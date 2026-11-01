@@ -1,0 +1,118 @@
+name: CI
+
+# Validation only. Release packaging and publishing are handled separately.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+  CC_x86_64_unknown_linux_musl: musl-gcc
+
+jobs:
+  check:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests on musl
+        run: cargo test --locked --target x86_64-unknown-linux-musl
+
+  android:
+    name: Android arm64 build check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android-arm64
+
+      - name: Configure Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
+          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+            echo "::error::Android NDK not found on this runner"
+            exit 1
+          fi
+          toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
+          cc="$toolchain/bin/aarch64-linux-android24-clang"
+          if [ ! -x "$cc" ]; then
+            echo "::error::missing NDK clang at $cc"
+            exit 1
+          fi
+          echo "Using NDK $ndk"
+          {
+            echo "ANDROID_NDK=$ndk"
+            echo "CC_aarch64_linux_android=$cc"
+            echo "AR_aarch64_linux_android=$toolchain/bin/llvm-ar"
+            echo "RANLIB_aarch64_linux_android=$toolchain/bin/llvm-ranlib"
+            echo "TARGET_CC=$cc"
+            echo "TARGET_AR=$toolchain/bin/llvm-ar"
+            echo "TARGET_RANLIB=$toolchain/bin/llvm-ranlib"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$cc"
+            echo "RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Android release binary
+        run: cargo build --locked --release --target aarch64-linux-android
+
+      - name: Verify ELF target
+        shell: bash
+        run: |
+          set -euo pipefail
+          readelf="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          if [ ! -x "$readelf" ]; then
+            echo "::error::llvm-readelf not found at $readelf"
+            exit 1
+          fi
+          # Do not use grep -q here: it closes the pipe early, llvm-readelf
+          # treats the resulting EPIPE as EX_IOERR (74), and pipefail fails.
+          if ! "$readelf" -h target/aarch64-linux-android/release/dfr | grep 'AArch64' >/dev/null; then
+            echo "::error::built dfr is not an AArch64 ELF binary"
+            exit 1
+          fi
+          if ! "$readelf" -l target/aarch64-linux-android/release/dfr | grep '/system/bin/linker64' >/dev/null; then
+            echo "::error::built dfr does not use the Android 64-bit dynamic linker"
+            exit 1
+          fi

@@ -1,0 +1,358 @@
+name: Release
+
+# Tag-triggered release. Push an annotated v* tag to start it; workflow_dispatch
+# is available for retries. The annotated tag message is the only release-notes
+# source; it is passed to the release job as an output, not uploaded as an
+# artifact. The release is published after all assets and SHA256SUMS verify.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing annotated tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Validate tag and notes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      notes: ${{ steps.check.outputs.notes }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check tag and version
+        id: check
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          case "$tag" in
+            v[0-9]*) ;;
+            *)
+              echo "::error::tag must start with 'v' followed by a digit, got '$tag'"
+              exit 1
+              ;;
+          esac
+          version="${tag#v}"
+          manifest="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::tag version $version does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+          if [ "$(git cat-file -t "$tag")" != "tag" ]; then
+            echo "::error::$tag must be an annotated tag"
+            exit 1
+          fi
+          if [ "$(git rev-parse "$tag^{}")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::$tag does not point to the checked-out commit"
+            exit 1
+          fi
+          notes="$(git tag -l --format='%(contents)' "$tag")"
+          if [ -z "$notes" ]; then
+            echo "::error::$tag has an empty message; release notes are required"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            printf '%s\n' "$notes"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Validated $tag (version $version)."
+
+  test:
+    name: Quality gate
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-test
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests on musl
+        run: cargo test --locked --target x86_64-unknown-linux-musl
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [prepare, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: ubuntu-24.04
+            target: aarch64-linux-android
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            *-linux-musl)
+              target_underscore="$(echo "$TARGET" | tr '-' '_')"
+              target_upper="$(echo "$TARGET" | tr '[:lower:]-' '[:upper:]_')"
+              export "CC_${target_underscore}=musl-gcc"
+              export "CARGO_TARGET_${target_upper}_LINKER=musl-gcc"
+              ;;
+            aarch64-linux-android)
+              ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
+              if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+                echo "::error::Android NDK not found on this runner"
+                exit 1
+              fi
+              toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
+              cc="$toolchain/bin/aarch64-linux-android24-clang"
+              if [ ! -x "$cc" ]; then
+                echo "::error::missing NDK clang at $cc"
+                exit 1
+              fi
+              echo "Using NDK $ndk"
+              export CC_aarch64_linux_android="$cc"
+              export AR_aarch64_linux_android="$toolchain/bin/llvm-ar"
+              export RANLIB_aarch64_linux_android="$toolchain/bin/llvm-ranlib"
+              export TARGET_CC="$cc"
+              export TARGET_AR="$toolchain/bin/llvm-ar"
+              export TARGET_RANLIB="$toolchain/bin/llvm-ranlib"
+              export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$cc"
+              export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
+              echo "ANDROID_NDK=$ndk" >> "$GITHUB_ENV"
+              ;;
+          esac
+          cargo build --locked --release --target "$TARGET"
+
+      - name: Package archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            x86_64-unknown-linux-musl)
+              asset="dfrelay_linux_x64_v${VERSION}_musl.tar.gz"
+              ;;
+            aarch64-unknown-linux-musl)
+              asset="dfrelay_linux_arm64_v${VERSION}_musl.tar.gz"
+              ;;
+            aarch64-linux-android)
+              asset="dfrelay_android_arm64_v${VERSION}.tar.gz"
+              ;;
+            x86_64-apple-darwin)
+              asset="dfrelay_macos_x64_v${VERSION}.tar.gz"
+              ;;
+            aarch64-apple-darwin)
+              asset="dfrelay_macos_arm64_v${VERSION}.tar.gz"
+              ;;
+            *)
+              echo "::error::unsupported target $TARGET"
+              exit 1
+              ;;
+          esac
+
+          stage="$(mktemp -d)"
+          install -m 0755 "target/${TARGET}/release/dfr" "$stage/dfr"
+          install -m 0755 install.sh "$stage/install.sh"
+          for file in README.md LICENSE THIRD_PARTY_NOTICES.md; do
+            install -m 0644 "$file" "$stage/$file"
+          done
+
+          if [ "$TARGET" = aarch64-linux-android ]; then
+            if [ -z "${ANDROID_NDK:-}" ]; then
+              echo "::error::Android NDK is unavailable for ELF verification"
+              exit 1
+            fi
+            readelf="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+            if [ ! -x "$readelf" ]; then
+              echo "::error::llvm-readelf not found at $readelf"
+              exit 1
+            fi
+            # Do not use grep -q here: it closes the pipe early, llvm-readelf
+            # treats the resulting EPIPE as EX_IOERR (74), and pipefail fails.
+            if ! "$readelf" -h "$stage/dfr" | grep 'AArch64' >/dev/null; then
+              echo "::error::built dfr is not an AArch64 ELF binary"
+              exit 1
+            fi
+            if ! "$readelf" -l "$stage/dfr" | grep '/system/bin/linker64' >/dev/null; then
+              echo "::error::built dfr does not use the Android 64-bit dynamic linker"
+              exit 1
+            fi
+          else
+            "$stage/dfr" --version | grep -F "$VERSION"
+          fi
+          mkdir -p dist
+          tar -czf "dist/$asset" -C "$stage" dfr install.sh README.md LICENSE THIRD_PARTY_NOTICES.md
+
+          expected="$(printf '%s\n' dfr install.sh README.md LICENSE THIRD_PARTY_NOTICES.md | LC_ALL=C sort)"
+          actual="$(tar -tzf "dist/$asset" | LC_ALL=C sort)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::unexpected archive contents"
+            printf '%s\n' "$actual"
+            exit 1
+          fi
+          echo "Packaged $asset"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify assets and checksums
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for name in \
+            "dfrelay_linux_x64_v${VERSION}_musl.tar.gz" \
+            "dfrelay_linux_arm64_v${VERSION}_musl.tar.gz" \
+            "dfrelay_android_arm64_v${VERSION}.tar.gz" \
+            "dfrelay_macos_x64_v${VERSION}.tar.gz" \
+            "dfrelay_macos_arm64_v${VERSION}.tar.gz"
+          do
+            if [ ! -f "dist/$name" ]; then
+              echo "::error::missing asset $name"
+              exit 1
+            fi
+          done
+          count="$(find dist -maxdepth 1 -name 'dfrelay_*.tar.gz' | wc -l | tr -d '[:space:]')"
+          if [ "$count" -ne 5 ]; then
+            echo "::error::expected exactly five release archives, found $count"
+            exit 1
+          fi
+          (cd dist && LC_ALL=C sha256sum dfrelay_*.tar.gz | LC_ALL=C sort -k2 > SHA256SUMS)
+          (cd dist && sha256sum -c SHA256SUMS)
+          ls -lh dist
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BODY: ${{ needs.prepare.outputs.notes }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BODY" ]; then
+            echo "::error::release notes are empty"
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::a release for $TAG already exists; delete it before retrying"
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --title "dfrelay v$VERSION" \
+            --notes "$BODY" \
+            dist/dfrelay_*.tar.gz dist/SHA256SUMS
+
+      - name: Summary
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          {
+            echo "### Release $TAG"
+            echo
+            echo "Assets:"
+            ls -1 dist/dfrelay_*.tar.gz dist/SHA256SUMS
+            echo
+            echo "Published automatically after asset and checksum verification."
+          } >> "$GITHUB_STEP_SUMMARY"
