@@ -253,7 +253,7 @@ static ZH: Text = Text {
 
     dashboard_title: "总览",
     listen: "监听",
-    selection_mode: "节点选择方式",
+    selection_mode: "节点方式",
     selection_mode_auto: "自动选择",
     selection_mode_manual: "手动指定",
     current_node: "当前节点",
