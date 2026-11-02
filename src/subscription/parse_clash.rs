@@ -158,6 +158,40 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             add_auth(proxy, &mut value);
             ("socks", Value::Object(value))
         }
+        "anytls" => {
+            if ["shadow-tls-opts", "restls-opts", "jls-opts"]
+                .iter()
+                .any(|key| yaml_get(proxy, key).is_some())
+            {
+                return Err("anytls camouflage variant is not supported".to_string());
+            }
+            let password = yaml_str(proxy, "password")
+                .filter(|password| !password.is_empty())
+                .ok_or("anytls missing password")?;
+            let mut value = Map::new();
+            value.insert("type".into(), json!("anytls"));
+            value.insert("server".into(), json!(server));
+            value.insert("server_port".into(), json!(port));
+            value.insert("password".into(), json!(password));
+            insert_duration(
+                proxy,
+                "idle-session-check-interval",
+                "idle_session_check_interval",
+                &mut value,
+            );
+            insert_duration(
+                proxy,
+                "idle-session-timeout",
+                "idle_session_timeout",
+                &mut value,
+            );
+            if let Some(min) = yaml_u64(proxy, "min-idle-session") {
+                value.insert("min_idle_session".into(), json!(min));
+            }
+            // sing-box requires TLS for anytls; map sni/alpn/insecure/utls.
+            value.insert("tls".into(), tls_value(proxy, true));
+            ("anytls", Value::Object(value))
+        }
         other => return Err(format!("unsupported protocol: {other}")),
     };
 
@@ -354,6 +388,64 @@ fn yaml_u16(map: &Mapping, key: &str) -> Option<u16> {
         .and_then(|value| u16::try_from(value).ok())
 }
 
+fn yaml_u64(map: &Mapping, key: &str) -> Option<u64> {
+    let key = YamlValue::String(key.to_string());
+    map.get(&key).and_then(YamlValue::as_u64)
+}
+
+/// Map a Clash duration (seconds as a number, or a Go-style duration string)
+/// to sing-box's duration string. Invalid optional values are dropped so a
+/// bad subscription field cannot fail `sing-box check` for the whole profile.
+fn insert_duration(
+    proxy: &Mapping,
+    clash_key: &str,
+    sing_key: &str,
+    outbound: &mut Map<String, Value>,
+) {
+    let Some(value) = yaml_get(proxy, clash_key) else {
+        return;
+    };
+    let duration = match value {
+        YamlValue::Number(number) => number
+            .as_u64()
+            .filter(|seconds| *seconds > 0)
+            .map(|seconds| format!("{seconds}s")),
+        YamlValue::String(text) => {
+            let text = text.trim();
+            is_go_duration(text).then(|| text.to_string())
+        }
+        _ => None,
+    };
+    if let Some(duration) = duration {
+        outbound.insert(sing_key.to_string(), json!(duration));
+    }
+}
+
+fn is_go_duration(text: &str) -> bool {
+    let mut rest = text;
+    if rest.is_empty() {
+        return false;
+    }
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
+        let number = &rest[..digits];
+        if digits == 0 || number.ends_with('.') || number.parse::<f64>().is_err() {
+            return false;
+        }
+        rest = &rest[digits..];
+        let Some(unit) = ["ns", "us", "µs", "ms", "s", "m", "h"]
+            .iter()
+            .find(|unit| rest.starts_with(*unit))
+        else {
+            return false;
+        };
+        rest = &rest[unit.len()..];
+    }
+    true
+}
+
 fn yaml_bool(map: &Mapping, key: &str) -> Option<bool> {
     let key = YamlValue::String(key.to_string());
     map.get(&key).and_then(YamlValue::as_bool)
@@ -437,6 +529,90 @@ proxies:
         let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
         assert!(nodes.is_empty());
         assert!(unsupported[0].1.contains("wireguard"));
+    }
+
+    #[test]
+    fn parses_anytls_with_tls_and_session_tuning() {
+        let yaml = r#"
+proxies:
+  - name: "anytls node"
+    type: anytls
+    server: example.com
+    port: 8443
+    password: secret
+    sni: cdn.example.com
+    alpn: [h2, http/1.1]
+    skip-cert-verify: true
+    client-fingerprint: chrome
+    idle-session-check-interval: 30
+    idle-session-timeout: 1m
+    min-idle-session: 2
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert!(unsupported.is_empty());
+        assert_eq!(nodes.len(), 1);
+        let outbound = &nodes[0].outbound;
+        assert_eq!(nodes[0].protocol, "anytls");
+        assert_eq!(outbound["type"], "anytls");
+        assert_eq!(outbound["server_port"], 8443);
+        assert_eq!(outbound["password"], "secret");
+        assert_eq!(outbound["tls"]["enabled"], true);
+        assert_eq!(outbound["tls"]["server_name"], "cdn.example.com");
+        assert_eq!(outbound["tls"]["insecure"], true);
+        assert_eq!(outbound["tls"]["utls"]["fingerprint"], "chrome");
+        assert_eq!(outbound["idle_session_check_interval"], "30s");
+        assert_eq!(outbound["idle_session_timeout"], "1m");
+        assert_eq!(outbound["min_idle_session"], 2);
+    }
+
+    #[test]
+    fn anytls_drops_invalid_duration_and_requires_password() {
+        let yaml = r#"
+proxies:
+  - name: "bad duration"
+    type: anytls
+    server: example.com
+    port: 443
+    password: secret
+    idle-session-timeout: soon
+  - name: "no password"
+    type: anytls
+    server: example.com
+    port: 443
+  - name: "empty password"
+    type: anytls
+    server: example.com
+    port: 443
+    password: ""
+  - name: "camouflage"
+    type: anytls
+    server: example.com
+    port: 443
+    password: secret
+    shadow-tls-opts:
+      version: 3
+      password: pass
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].outbound["tls"]["enabled"], true);
+        assert!(nodes[0].outbound.get("idle_session_timeout").is_none());
+        assert_eq!(unsupported.len(), 3);
+        assert!(unsupported[0].1.contains("missing password"));
+        assert!(unsupported[1].1.contains("missing password"));
+        assert!(unsupported[2].1.contains("camouflage"));
+    }
+
+    #[test]
+    fn go_duration_validation() {
+        for valid in [
+            "30s", "1m", "1h30m", "500ms", "1.5s", ".5s", "250us", "100ns",
+        ] {
+            assert!(is_go_duration(valid), "{valid} should be valid");
+        }
+        for invalid in ["", "soon", "30", "s", "1d", "-5s", "1x", "1m3", "1.s"] {
+            assert!(!is_go_duration(invalid), "{invalid} should be invalid");
+        }
     }
 
     #[test]
