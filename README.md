@@ -228,16 +228,11 @@ File: `~/Library/LaunchAgents/io.github.fynhq.dfrelay.plist`
   <false/>
   <key>WorkingDirectory</key>
   <string>/Users/YOUR_USER</string>
-  <key>StandardOutPath</key>
-  <string>/Users/YOUR_USER/Library/Logs/DFRelay/launchd.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/YOUR_USER/Library/Logs/DFRelay/launchd.err.log</string>
 </dict>
 </plist>
 ```
 
 ```bash
-mkdir -p ~/Library/Logs/DFRelay
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.fynhq.dfrelay.plist
 launchctl kickstart -k gui/$(id -u)/io.github.fynhq.dfrelay
 launchctl bootout gui/$(id -u)/io.github.fynhq.dfrelay
@@ -248,7 +243,10 @@ target in `DFRELAY_SERVICE_UNIT`/`DFRELAY_SERVICE_TARGET` equal to the plist
 `Label` and path. A LaunchAgent starts at login. `dfr stop` uses
 `launchctl bootout`; the plist remains and is loaded again at the next login. The target path is required to bootstrap the job again
 after a stop. A system-wide LaunchDaemon in `/Library/LaunchDaemons` requires
-root and is not controlled automatically by `dfr`.
+root and is not controlled automatically by `dfr`. The plist does not set
+`StandardOutPath`/`StandardErrorPath`: `dfr serve` writes its own daily logs
+to the DFRelay data directory, so redirected stdout/stderr files would stay
+empty.
 
 ## Security
 
@@ -481,16 +479,11 @@ systemctl --user stop dfrelay.service
   <false/>
   <key>WorkingDirectory</key>
   <string>/Users/YOUR_USER</string>
-  <key>StandardOutPath</key>
-  <string>/Users/YOUR_USER/Library/Logs/DFRelay/launchd.out.log</string>
-  <key>StandardErrorPath</key>
-  <string>/Users/YOUR_USER/Library/Logs/DFRelay/launchd.err.log</string>
 </dict>
 </plist>
 ```
 
 ```bash
-mkdir -p ~/Library/Logs/DFRelay
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.fynhq.dfrelay.plist
 launchctl kickstart -k gui/$(id -u)/io.github.fynhq.dfrelay
 launchctl bootout gui/$(id -u)/io.github.fynhq.dfrelay
@@ -500,7 +493,9 @@ launchctl bootout gui/$(id -u)/io.github.fynhq.dfrelay
 `Label` 一致，`DFRELAY_SERVICE_TARGET` 必须指向该 plist。LaunchAgent 在登录时启动。
 `dfr stop` 使用 `launchctl bootout`，plist 仍在，下次登录会重新加载；target 路径用于
 停止后再次 bootstrap。系统级 LaunchDaemon（`/Library/LaunchDaemons`）需要 root，
-DFRelay 不会自动控制。
+DFRelay 不会自动控制。plist 不配置 `StandardOutPath`/`StandardErrorPath`：
+`dfr serve` 自己把日志按天写入 DFRelay 数据目录，重定向出来的 stdout/stderr
+文件只会是空的。
 
 ## 安全
 
