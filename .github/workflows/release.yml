@@ -269,6 +269,9 @@ jobs:
             printf '%s\n' "$actual"
             exit 1
           fi
+          # Reject private-document references and local paths before the
+          # archive can be uploaded as a release asset.
+          python3 .github/scripts/check_public_surface.py --assets "$stage" --assets "dist/$asset"
           echo "Packaged $asset"
 
       - name: Upload package

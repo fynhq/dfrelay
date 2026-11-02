@@ -48,6 +48,43 @@ jobs:
       - name: Run tests on musl
         run: cargo test --locked --target x86_64-unknown-linux-musl
 
+  # Public-surface guard: reject private-document references, local environment
+  # narration, verification trailers, and local paths in new commit messages
+  # and tracked files. It scans only the new range, so historical content does
+  # not make every push fail.
+  public-surface:
+    name: Public surface
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check public surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            before="${{ github.event.pull_request.base.sha }}"
+            after="${{ github.event.pull_request.head.sha }}"
+          else
+            before="${{ github.event.before }}"
+            after="${{ github.sha }}"
+          fi
+          if ! git cat-file -e "$before" 2>/dev/null; then
+            if git cat-file -e "$after^" 2>/dev/null; then
+              before="$after^"
+            else
+              before="$after"
+            fi
+          fi
+          python3 .github/scripts/check_public_surface.py --range "$before..$after" --tree
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            python3 .github/scripts/check_public_surface.py --tag "${{ github.ref_name }}"
+          fi
+
   android:
     name: Android arm64 build check
     runs-on: ubuntu-24.04
