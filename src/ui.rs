@@ -220,6 +220,17 @@ fn dashboard_lines(view: &View, width: usize) -> Vec<Line<'static>> {
     );
     push_key_value(
         &mut lines,
+        text.selection_mode,
+        (if view.selection_mode_auto {
+            text.selection_mode_auto
+        } else {
+            text.selection_mode_manual
+        })
+        .to_string(),
+        width,
+    );
+    push_key_value(
+        &mut lines,
         text.current_node,
         view.current_node()
             .map(str::to_string)
@@ -555,6 +566,7 @@ fn render_connections(frame: &mut Frame, view: &View, area: ratatui::layout::Rec
         Cell::from(text.connections_dest),
         Cell::from(text.connections_network),
         Cell::from(text.connections_traffic),
+        Cell::from(text.connections_duration),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     let rows = view.metrics.connections.iter().map(|connection| {
@@ -566,6 +578,7 @@ fn render_connections(frame: &mut Frame, view: &View, area: ratatui::layout::Rec
                 format_bytes(connection.download),
                 format_bytes(connection.upload)
             )),
+            Cell::from(format_duration(connection.duration_secs)),
         ])
     });
     let selected = view
@@ -582,14 +595,30 @@ fn render_connections(frame: &mut Frame, view: &View, area: ratatui::layout::Rec
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-const CONNECTION_COLUMNS: [Constraint; 3] = [
+const CONNECTION_COLUMNS: [Constraint; 4] = [
     Constraint::Fill(1),
     Constraint::Length(7),
     Constraint::Length(21),
+    Constraint::Length(9),
 ];
 
 fn connection_target(connection: &crate::singbox::clash::ConnectionInfo) -> String {
     connection.target().unwrap_or_else(|| "—".to_string())
+}
+
+/// Connection age: `MM:SS` below one hour, `H:MM:SS` from one hour on.
+fn format_duration(seconds: Option<u64>) -> String {
+    let Some(total) = seconds else {
+        return "—".to_string();
+    };
+    let hours = total / 3600;
+    let minutes = (total / 60) % 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
 }
 
 fn log_level_style(level: LogLevel, palette: Palette) -> Style {
@@ -2307,16 +2336,20 @@ mod tests {
             let dest = find_cell_text(header, text.connections_dest).expect("destination header");
             let network = find_cell_text(header, text.connections_network).expect("network header");
             let traffic = find_cell_text(header, text.connections_traffic).expect("traffic header");
+            let duration =
+                find_cell_text(header, text.connections_duration).expect("duration header");
             let columns = Layout::horizontal(CONNECTION_COLUMNS)
                 .spacing(TABLE_COLUMN_SPACING)
                 .split(Rect::new(0, 0, 94, 1));
             let dest_width = columns[0].width as usize;
             assert_eq!(network, dest + dest_width + 2, "{lang:?}");
             assert_eq!(traffic, network + 7 + 2, "{lang:?}");
-            assert_eq!(traffic + 21, 98, "{lang:?}");
+            assert_eq!(duration, traffic + 21 + 2, "{lang:?}");
+            assert_eq!(duration + 9, 98, "{lang:?}");
             assert_eq!(header[98], " ", "{lang:?}");
             let content: String = rows.iter().flatten().map(String::as_str).collect();
             assert!(content.contains("↓ 2.0 K ↑ 1.0 K"), "{lang:?}");
+            assert!(content.contains("1:02:05"), "{lang:?}");
         }
     }
 
@@ -2654,6 +2687,73 @@ mod tests {
             .collect();
         assert!(!text.contains(app.text().network), "{text}");
         assert!(!text.contains(app.text().connections), "{text}");
+    }
+
+    #[tokio::test]
+    async fn dashboard_shows_selection_mode_above_current_node() {
+        for (lang, auto, manual) in [
+            (Lang::Zh, "自动选择", "手动指定"),
+            (Lang::En, "Auto", "Manual"),
+        ] {
+            let (mut app, _dir) = test_app(lang).await;
+            app.page = Page::Dashboard;
+            app.nodes = vec![node("n1", "香港 01")];
+            let labels = app.text();
+
+            let lines = |app: &crate::app::App| -> Vec<String> {
+                dashboard_lines(&app.view(), 80)
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                    })
+                    .collect()
+            };
+
+            app.metrics.selection.selected = Some("auto".to_string());
+            let rendered = lines(&app);
+            let mode = rendered
+                .iter()
+                .position(|line| line.contains(labels.selection_mode))
+                .expect("selection mode line");
+            let current = rendered
+                .iter()
+                .position(|line| line.contains(labels.current_node))
+                .expect("current node line");
+            assert_eq!(mode + 1, current, "{lang:?}");
+            assert!(
+                rendered[mode].contains(auto),
+                "{lang:?}: {}",
+                rendered[mode]
+            );
+
+            app.metrics.selection.selected = Some("n1".to_string());
+            let rendered = lines(&app);
+            assert!(
+                rendered[mode].contains(manual),
+                "{lang:?}: {}",
+                rendered[mode]
+            );
+
+            app.metrics.selection.selected = None;
+            app.preferred_node = Some("n1".to_string());
+            let rendered = lines(&app);
+            assert!(
+                rendered[mode].contains(manual),
+                "{lang:?}: {}",
+                rendered[mode]
+            );
+
+            app.preferred_node = None;
+            let rendered = lines(&app);
+            assert!(
+                rendered[mode].contains(auto),
+                "{lang:?}: {}",
+                rendered[mode]
+            );
+        }
     }
 
     #[tokio::test]
@@ -3205,6 +3305,7 @@ mod tests {
             network: "tcp".to_string(),
             upload: 1024,
             download: 2048,
+            duration_secs: Some(3725),
         }
     }
 
@@ -3225,9 +3326,10 @@ mod tests {
         let columns = Layout::horizontal(CONNECTION_COLUMNS)
             .spacing(TABLE_COLUMN_SPACING)
             .split(Rect::new(0, 0, 94, 1));
-        assert_eq!(columns[0].width, 94 - 2 * 2 - 7 - 21);
+        assert_eq!(columns[0].width, 94 - 3 * 2 - 7 - 21 - 9);
         assert_eq!(columns[1].width, 7);
         assert_eq!(columns[2].width, 21);
+        assert_eq!(columns[3].width, 9);
     }
 
     #[test]
@@ -3248,6 +3350,15 @@ mod tests {
         assert_eq!(format_bytes(1024u64.pow(2)), "1.0 M");
         assert_eq!(format_bytes(1024u64.pow(3)), "1.0 G");
         assert_eq!(format_bytes(1024u64.pow(4)), "1.0 T");
+    }
+
+    #[test]
+    fn connection_durations_are_compact_clock_values() {
+        assert_eq!(format_duration(None), "—");
+        assert_eq!(format_duration(Some(0)), "00:00");
+        assert_eq!(format_duration(Some(59)), "00:59");
+        assert_eq!(format_duration(Some(3725)), "1:02:05");
+        assert_eq!(format_duration(Some(90000)), "25:00:00");
     }
 
     #[test]

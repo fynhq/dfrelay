@@ -61,6 +61,9 @@ pub struct Text {
 
     pub dashboard_title: &'static str,
     pub listen: &'static str,
+    pub selection_mode: &'static str,
+    pub selection_mode_auto: &'static str,
+    pub selection_mode_manual: &'static str,
     pub current_node: &'static str,
     pub node_removed_suffix: &'static str,
     pub node_unknown: &'static str,
@@ -105,6 +108,7 @@ pub struct Text {
     pub connections_dest: &'static str,
     pub connections_network: &'static str,
     pub connections_traffic: &'static str,
+    pub connections_duration: &'static str,
 
     pub logs_title: &'static str,
     pub logs_empty: &'static str,
@@ -249,6 +253,9 @@ static ZH: Text = Text {
 
     dashboard_title: "总览",
     listen: "监听",
+    selection_mode: "节点选择方式",
+    selection_mode_auto: "自动选择",
+    selection_mode_manual: "手动指定",
     current_node: "当前节点",
     node_removed_suffix: "（已移除）",
     node_unknown: "未知节点",
@@ -293,6 +300,7 @@ static ZH: Text = Text {
     connections_dest: "目标",
     connections_network: "网络",
     connections_traffic: "流量",
+    connections_duration: "时长",
 
     logs_title: "日志",
     logs_empty: "暂无日志。",
@@ -522,6 +530,9 @@ static EN: Text = Text {
 
     dashboard_title: "Dashboard",
     listen: "Listen",
+    selection_mode: "Selection mode",
+    selection_mode_auto: "Auto",
+    selection_mode_manual: "Manual",
     current_node: "Current node",
     node_removed_suffix: " (removed)",
     node_unknown: "Unknown node",
@@ -566,6 +577,7 @@ static EN: Text = Text {
     connections_dest: "Destination",
     connections_network: "Network",
     connections_traffic: "Traffic",
+    connections_duration: "Duration",
 
     logs_title: "Logs",
     logs_empty: "No logs.",

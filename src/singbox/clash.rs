@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +15,9 @@ pub struct ConnectionInfo {
     pub network: String,
     pub upload: u64,
     pub download: u64,
+    /// Seconds since the connection started; `None` when the API omitted it.
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
 }
 
 impl ConnectionInfo {
@@ -247,7 +251,19 @@ fn parse_connection(value: &Value) -> Option<ConnectionInfo> {
             .to_string(),
         upload: value.get("upload").and_then(Value::as_u64).unwrap_or(0),
         download: value.get("download").and_then(Value::as_u64).unwrap_or(0),
+        duration_secs: connection_duration(value),
     })
+}
+
+/// Age of a connection, computed from the RFC3339 `start` field at snapshot
+/// time. Clock skew that would yield a negative age clamps to zero.
+fn connection_duration(value: &Value) -> Option<u64> {
+    let start = value
+        .get("start")
+        .and_then(Value::as_str)
+        .and_then(|start| DateTime::parse_from_rfc3339(start).ok())?;
+    let seconds = Utc::now().signed_duration_since(start).num_seconds();
+    Some(seconds.max(0) as u64)
 }
 
 fn parse_selection(value: &Value) -> ProxySelection {
@@ -296,6 +312,7 @@ mod tests {
 
     #[test]
     fn parses_connections_and_selection() {
+        let started = Utc::now() - chrono::TimeDelta::seconds(3661);
         let connections = json!({
             "uploadTotal": 100,
             "downloadTotal": 200,
@@ -313,9 +330,19 @@ mod tests {
                 },
                 "upload": 10,
                 "download": 20,
-                "start": "2026-10-29T00:00:00Z",
+                "start": started.to_rfc3339(),
                 "chains": ["proxy", "auto", "n-1a2b3c4d"],
                 "rule": "final"
+            }, {
+                "id": "id2",
+                "metadata": {
+                    "network": "udp",
+                    "host": "",
+                    "destinationIP": "203.0.113.9",
+                    "destinationPort": "443"
+                },
+                "upload": 0,
+                "download": 0
             }]
         });
         let proxies = json!({
@@ -333,8 +360,13 @@ mod tests {
         );
         assert_eq!(snapshot.upload_total, 100);
         assert_eq!(snapshot.download_total, 200);
-        assert_eq!(snapshot.connections.len(), 1);
+        assert_eq!(snapshot.connections.len(), 2);
         assert_eq!(snapshot.connections[0].destination_ip, "2001:db8::1");
+        let duration = snapshot.connections[0]
+            .duration_secs
+            .expect("duration parsed from start");
+        assert!((3661..3671).contains(&duration), "{duration}");
+        assert_eq!(snapshot.connections[1].duration_secs, None);
         assert_eq!(snapshot.selection.selected.as_deref(), Some("auto"));
         assert_eq!(snapshot.selection.auto_now.as_deref(), Some("n-1a2b3c4d"));
         assert_eq!(snapshot.selection.auto_delay, Some(42));

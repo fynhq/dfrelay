@@ -97,6 +97,7 @@ pub struct View {
     pub uptime: String,
     pub listen: String,
     pub current_node: Option<String>,
+    pub selection_mode_auto: bool,
 }
 
 impl View {

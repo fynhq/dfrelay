@@ -1007,6 +1007,7 @@ impl App {
             uptime: self.uptime(),
             listen: self.listen_addresses(),
             current_node: self.current_node(),
+            selection_mode_auto: self.selection_mode_auto(),
         }
     }
 
@@ -3697,6 +3698,17 @@ impl App {
         }
     }
 
+    /// Whether nodes are picked automatically (urltest) or pinned manually.
+    ///
+    /// While running the selector state is authoritative; before startup the
+    /// pending preferred node decides the mode.
+    pub fn selection_mode_auto(&self) -> bool {
+        match self.metrics.selection.selected.as_deref() {
+            Some(selected) => selected == "auto",
+            None => self.preferred_node.is_none(),
+        }
+    }
+
     fn node_display_name(&self, tag: &str) -> String {
         if let Some(node) = self.nodes.iter().find(|node| node.tag == tag) {
             return node.name.clone();
@@ -4220,6 +4232,7 @@ mod tests {
                 network: "tcp".to_string(),
                 upload: 1,
                 download: 2,
+                duration_secs: None,
             });
         app.selected = 0;
         app.handle_key(key(KeyCode::Enter)).await;
@@ -4907,6 +4920,23 @@ mod tests {
 
         app.metrics.selection.selected = Some("n-missing".to_string());
         assert_eq!(app.current_node().as_deref(), Some(app.text().node_unknown));
+    }
+
+    #[tokio::test]
+    async fn selection_mode_follows_selector_state_and_pending_node() {
+        let (mut app, _dir) = test_app().await;
+        // Stopped without a pending node: automatic selection.
+        assert!(app.selection_mode_auto());
+
+        app.preferred_node = Some("n1".to_string());
+        assert!(!app.selection_mode_auto());
+
+        // While running the selector state is authoritative.
+        app.metrics.selection.selected = Some("auto".to_string());
+        assert!(app.selection_mode_auto());
+
+        app.metrics.selection.selected = Some("n2".to_string());
+        assert!(!app.selection_mode_auto());
     }
 
     #[tokio::test]
