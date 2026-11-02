@@ -41,10 +41,10 @@ use view::DaemonStatus;
 )]
 struct Cli {
     /// Override the config file path.
-    #[arg(long, global = true, value_name = "FILE")]
+    #[arg(short = 'c', long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
     /// Override the data directory (selects a separate daemon instance).
-    #[arg(long, global = true, value_name = "DIR")]
+    #[arg(short = 'd', long = "data", global = true, value_name = "DIR")]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -510,7 +510,13 @@ mod tests {
 
     #[test]
     fn old_flags_are_rejected() {
-        for arg in ["--daemon", "--stop", "--restart", "--internal-daemon"] {
+        for arg in [
+            "--daemon",
+            "--stop",
+            "--restart",
+            "--internal-daemon",
+            "--data-dir",
+        ] {
             assert!(parse(&["dfr", arg]).is_err(), "{arg} should be rejected");
         }
     }
@@ -521,9 +527,20 @@ mod tests {
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/a.toml")));
         assert!(matches!(cli.command, Some(Command::Serve)));
 
-        let cli = parse(&["dfr", "--data-dir", "/tmp/data", "start"]).unwrap();
+        let cli = parse(&["dfr", "--data", "/tmp/data", "start"]).unwrap();
         assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/data")));
         assert!(matches!(cli.command, Some(Command::Start)));
+    }
+
+    #[test]
+    fn short_path_flags_apply_to_subcommands() {
+        let cli = parse(&["dfr", "status", "-c", "/tmp/a.toml"]).unwrap();
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/a.toml")));
+        assert!(matches!(cli.command, Some(Command::Status)));
+
+        let cli = parse(&["dfr", "-d", "/tmp/data", "stop"]).unwrap();
+        assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/data")));
+        assert!(matches!(cli.command, Some(Command::Stop)));
     }
 
     #[test]

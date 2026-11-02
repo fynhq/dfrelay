@@ -252,7 +252,7 @@ pub fn spawn_daemon(config: Option<PathBuf>, data_dir: Option<PathBuf>) -> io::R
         command.arg("--config").arg(config);
     }
     if let Some(data_dir) = data_dir {
-        command.arg("--data-dir").arg(data_dir);
+        command.arg("--data").arg(data_dir);
     }
     // `start` is an ad-hoc launch; never inherit a service-manager marker.
     command.env_remove("DFRELAY_SERVICE");

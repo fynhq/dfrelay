@@ -121,8 +121,8 @@ ad-hoc daemon use `dfr restart`; for a service use `dfr restart` (which invokes
 the supervisor) or the service manager.
 
 The managed sing-box binary can be downloaded or updated from Setup. The
-previous binary is kept for rollback. `--config` and `--data-dir` override the
-XDG paths.
+previous binary is kept for rollback. `--config` (`-c`) and `--data` (`-d`)
+override the XDG paths.
 
 <a id="service-templates"></a>
 
@@ -134,8 +134,9 @@ automatically when the configuration is valid. Choose one supervisor below; do
 not enable both. With `DFRELAY_SERVICE=1` and the service identity below,
 `dfr start/stop/restart` invoke the supervisor when the daemon is stopped;
 `dfr start` on a running daemon only asks it to start the proxy. Without the
-identity they refuse and print the supervisor command. Keep the same `--data-dir` for the
-service and the CLI so both use the same instance marker. Existing units that
+identity they refuse and print the supervisor command. Keep the same `--data`
+directory for the service and the CLI so both use the same instance marker.
+Existing units that
 only set `DFRELAY_SERVICE=1` keep the old refusal behavior; add the identity
 and restart the service once before relying on automatic control. A recorded
 marker never falls back to an ad-hoc daemon: if you remove the service, also
@@ -380,7 +381,7 @@ $XDG_DATA_HOME/dfrelay/                # 兜底：~/.local/share/dfrelay/
 只能编辑 `config.toml`，改后需要重启 daemon：ad-hoc 用 `dfr restart`，服务模式用
 `dfr restart`（自动调用服务管理器）或服务管理器。受管 sing-box 可在 Setup 页下载/
 更新，上一版保留用于回滚。
-`--config`、`--data-dir` 可覆盖 XDG 路径。
+`--config`（`-c`）、`--data`（`-d`）可覆盖 XDG 路径。
 
 <a id="service-templates-zh"></a>
 
@@ -391,7 +392,7 @@ $XDG_DATA_HOME/dfrelay/                # 兜底：~/.local/share/dfrelay/
 `DFRELAY_SERVICE=1` 并配置下面的服务身份后，daemon 停止时
 `dfr start/stop/restart` 会自动调用服务管理器；daemon 运行中 `dfr start` 只请求
 启动代理。未配置身份时拒绝并打印服务管理器命令。服务与 CLI 应使用相同的
-`--data-dir`，以读取同一实例的 marker。仅设置 `DFRELAY_SERVICE=1` 的旧 unit 仍保持
+`--data` 目录，以读取同一实例的 marker。仅设置 `DFRELAY_SERVICE=1` 的旧 unit 仍保持
 拒绝行为；请补齐身份并重启一次服务，再使用自动控制。marker 存在时不会回退 ad-hoc：
 如果移除了服务，请先删除 `<data-dir>/service.json`，再使用 `dfr start`。
 
