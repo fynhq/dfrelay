@@ -32,7 +32,6 @@ pub struct SubscriptionView {
     pub enabled: bool,
     pub node_count: usize,
     pub unsupported_count: usize,
-    pub unsupported_sample: Option<String>,
     pub last_updated: Option<String>,
     pub error: Option<String>,
     pub stale: bool,

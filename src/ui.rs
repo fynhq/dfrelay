@@ -303,19 +303,18 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
         return;
     }
     let header = Row::new(vec![
-        Cell::from(" "),
-        Cell::from(text.nodes_name),
+        // The active-node dot shares the name column: one cell for the dot and
+        // one blank cell before the name, so the label aligns with the names.
+        Cell::from(format!("  {}", text.nodes_name)),
         Cell::from(text.nodes_source),
         Cell::from(text.nodes_protocol),
         Cell::from(text.nodes_auto),
         Cell::from(text.nodes_latency),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
-    let preferred = view.preferred_node.as_deref();
+    let active_tag = active_node_tag(view);
     let rows = view.nodes.iter().map(|node| {
-        let selected = view.metrics.selection.selected.as_deref() == Some(node.tag.as_str())
-            || view.metrics.selection.auto_now.as_deref() == Some(node.tag.as_str())
-            || preferred == Some(node.tag.as_str());
+        let active = active_tag == Some(node.tag.as_str());
         let latency = if view.delay_testing.contains(node.tag.as_str()) {
             "…".to_string()
         } else {
@@ -325,8 +324,7 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
                 .unwrap_or_else(|| "—".to_string())
         };
         Row::new(vec![
-            Cell::from(if selected { "●" } else { " " }),
-            Cell::from(node.name.clone()),
+            Cell::from(format!("{} {}", if active { "●" } else { " " }, node.name)),
             Cell::from(marquee_text(&node.source, NODE_SOURCE_WIDTH as usize, tick)),
             Cell::from(node.protocol.clone()),
             Cell::from(if view.auto_tags.contains(node.tag.as_str()) {
@@ -354,14 +352,32 @@ const TABLE_COLUMN_SPACING: u16 = 2;
 
 const NODE_SOURCE_WIDTH: u16 = 14;
 
-const NODE_COLUMNS: [Constraint; 6] = [
-    Constraint::Length(2),
+const NODE_COLUMNS: [Constraint; 5] = [
     Constraint::Fill(1),
     Constraint::Length(NODE_SOURCE_WIDTH),
     Constraint::Length(11),
     Constraint::Length(4),
     Constraint::Length(8),
 ];
+
+/// The single node that carries traffic, marked with a dot in the node list.
+///
+/// A manual selection takes precedence over the urltest result; without
+/// metrics (proxy stopped or not yet polled) the pending preferred node is
+/// marked instead. The previous OR-based marking could light up both the
+/// manual pick and the stale urltest result at the same time.
+fn active_node_tag(view: &View) -> Option<&str> {
+    match view.metrics.selection.selected.as_deref() {
+        Some("auto") => view.metrics.selection.auto_now.as_deref(),
+        Some(tag) => Some(tag),
+        None => view
+            .metrics
+            .selection
+            .auto_now
+            .as_deref()
+            .or(view.preferred_node.as_deref()),
+    }
+}
 
 fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tick: u64) {
     let text = view.text();
@@ -391,10 +407,12 @@ fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::R
         if subscription.stale {
             markers.push(text.subscriptions_stale.to_string());
         }
+        // The status column is reserved for the refresh error or the last
+        // successful update time; unsupported nodes only add the (+N) count
+        // to the nodes column so they never displace the timestamp.
         let status = subscription
             .error
             .clone()
-            .or_else(|| subscription.unsupported_sample.clone())
             .or_else(|| {
                 subscription
                     .last_updated
@@ -2183,18 +2201,17 @@ mod tests {
                 .map(|column| column.width)
                 .collect::<Vec<_>>()
         };
-        let fixed = 2 + NODE_SOURCE_WIDTH + 11 + 4 + 8;
+        let fixed = NODE_SOURCE_WIDTH + 11 + 4 + 8;
         let wide = widths(94);
-        assert_eq!(wide[0], 2);
-        assert_eq!(wide[2], NODE_SOURCE_WIDTH);
-        assert_eq!(wide[3], 11);
-        assert_eq!(wide[4], 4);
-        assert_eq!(wide[5], 8);
-        assert_eq!(wide[1], 94 - 5 * 2 - fixed);
+        assert_eq!(wide[1], NODE_SOURCE_WIDTH);
+        assert_eq!(wide[2], 11);
+        assert_eq!(wide[3], 4);
+        assert_eq!(wide[4], 8);
+        assert_eq!(wide[0], 94 - 4 * 2 - fixed);
 
         let narrow = widths(74);
-        assert_eq!(narrow[1], 74 - 5 * 2 - fixed);
-        assert!(narrow[1] < wide[1]);
+        assert_eq!(narrow[0], 74 - 4 * 2 - fixed);
+        assert!(narrow[0] < wide[0]);
     }
 
     #[test]
@@ -2254,7 +2271,6 @@ mod tests {
                 enabled: true,
                 node_count: 8,
                 unsupported_count: 0,
-                unsupported_sample: None,
                 last_updated: Some("2026-10-31 12:34:56".to_string()),
                 error: None,
                 stale: false,
@@ -2327,7 +2343,6 @@ mod tests {
             enabled: true,
             node_count: 8,
             unsupported_count: 0,
-            unsupported_sample: None,
             last_updated: Some(status.clone()),
             error: None,
             stale: false,
@@ -3312,6 +3327,118 @@ mod tests {
             .filter(|ch| !ch.is_whitespace())
             .collect();
         assert!(content.contains('…'), "{content}");
+    }
+
+    #[tokio::test]
+    async fn nodes_mark_a_single_active_node() {
+        let (mut app, _dir) = test_app(Lang::En).await;
+        app.page = Page::Nodes;
+        app.nodes = vec![node("n1", "hk-01"), node("n2", "jp-02")];
+
+        // Manual selection wins over a different urltest result; previously
+        // both rows carried a dot in this state.
+        app.metrics.selection.selected = Some("n1".to_string());
+        app.metrics.selection.auto_now = Some("n2".to_string());
+        app.preferred_node = Some("n1".to_string());
+        let rows = rendered_rows(&app.view(), 100, 30);
+        let marks: Vec<String> = rows
+            .iter()
+            .map(|row| row.concat())
+            .filter(|row| row.contains('●'))
+            .collect();
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert!(marks[0].contains("hk-01"), "{marks:?}");
+
+        // Auto mode marks the urltest result only.
+        app.metrics.selection.selected = Some("auto".to_string());
+        app.preferred_node = None;
+        let rows = rendered_rows(&app.view(), 100, 30);
+        let marks: Vec<String> = rows
+            .iter()
+            .map(|row| row.concat())
+            .filter(|row| row.contains('●'))
+            .collect();
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert!(marks[0].contains("jp-02"), "{marks:?}");
+
+        // Without metrics the pending preferred node is marked.
+        app.metrics = crate::singbox::clash::MetricsSnapshot::default();
+        app.preferred_node = Some("n2".to_string());
+        let rows = rendered_rows(&app.view(), 100, 30);
+        let marks: Vec<String> = rows
+            .iter()
+            .map(|row| row.concat())
+            .filter(|row| row.contains('●'))
+            .collect();
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert!(marks[0].contains("jp-02"), "{marks:?}");
+    }
+
+    #[tokio::test]
+    async fn nodes_dot_keeps_one_cell_and_one_blank_before_the_name() {
+        let (mut app, _dir) = test_app(Lang::En).await;
+        app.page = Page::Nodes;
+        app.nodes = vec![node("n1", "hk-01")];
+        app.metrics.selection.selected = Some("n1".to_string());
+        let rows = rendered_rows(&app.view(), 100, 30);
+        // Match the table row (it also carries the source "test"), not the
+        // status bar, which shows the current node name as well.
+        let row = rows
+            .iter()
+            .find(|row| {
+                let line = row.concat();
+                line.contains("hk-01") && line.contains("test")
+            })
+            .expect("node row");
+        let dot = row.iter().position(|cell| cell == "●").expect("dot");
+        assert_eq!(row[dot + 1], " ", "one blank cell after the dot");
+        assert_eq!(row[dot + 2], "h", "name starts right after the gap");
+        let header = rows
+            .iter()
+            .find(|row| row.concat().contains("Source"))
+            .expect("header row");
+        let label = header
+            .iter()
+            .position(|cell| cell == "N")
+            .expect("name label");
+        assert_eq!(label, dot + 2, "header label aligns with names");
+    }
+
+    #[tokio::test]
+    async fn subscriptions_keep_timestamp_when_some_nodes_are_unsupported() {
+        let (app, _dir) = test_app(Lang::En).await;
+        let mut view = app.view();
+        view.page = Page::Subscriptions;
+        view.subscriptions = vec![crate::view::SubscriptionView {
+            name: "example".to_string(),
+            url: "https://example.com/sub".to_string(),
+            enabled: true,
+            node_count: 8,
+            unsupported_count: 2,
+            last_updated: Some("2026-10-31 12:34:56".to_string()),
+            error: None,
+            stale: false,
+        }];
+        let content: String = rendered_rows(&view, 100, 30)
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        assert!(content.contains("10-31 12:34:56"), "{content}");
+        assert!(content.contains("8 (+2)"), "{content}");
+        assert!(!content.contains("unsupported"), "{content}");
+
+        // Refresh errors still take the status column.
+        view.subscriptions[0].error = Some("HTTP 500".to_string());
+        let content: String = rendered_rows(&view, 100, 30)
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            content.contains("HTTP500") || content.contains("HTTP 500"),
+            "{content}"
+        );
     }
 
     #[tokio::test]

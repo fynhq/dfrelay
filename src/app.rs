@@ -963,10 +963,6 @@ impl App {
                     enabled: runtime.config.enabled,
                     node_count: runtime.nodes.len(),
                     unsupported_count: runtime.unsupported.len(),
-                    unsupported_sample: runtime
-                        .unsupported
-                        .first()
-                        .map(|item| format!("{}: {}", item.name, item.reason)),
                     last_updated: runtime.last_updated.clone(),
                     error: runtime.error.clone(),
                     stale: runtime.stale,
