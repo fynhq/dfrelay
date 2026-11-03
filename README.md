@@ -78,6 +78,7 @@ dfr stop            # stop an ad-hoc daemon, or the configured service
 dfr restart         # restart an ad-hoc daemon, or the configured service
 dfr status          # show daemon mode, proxy state, node, and listen address
 dfr serve           # run the daemon in the foreground for systemd/launchd
+dfr service forget  # remove the service marker after removing the service
 ```
 
 `dfr` is a pure client. If the daemon is not running, start it with `dfr start`
@@ -140,7 +141,8 @@ Existing units that
 only set `DFRELAY_SERVICE=1` keep the old refusal behavior; add the identity
 and restart the service once before relying on automatic control. A recorded
 marker never falls back to an ad-hoc daemon: if you remove the service, also
-remove `<data-dir>/service.json` before using `dfr start` ad hoc.
+remove `<data-dir>/service.json` before using `dfr start` ad hoc. Run
+`dfr service forget` to remove the marker (the daemon must be stopped).
 
 ### Linux systemd (user service)
 
@@ -346,6 +348,7 @@ dfr stop            # 停止 ad-hoc daemon，或停止已配置的系统服务
 dfr restart         # 重启 ad-hoc daemon，或重启已配置的系统服务
 dfr status          # 查看模式、代理状态、当前节点和监听地址
 dfr serve           # 前台运行 daemon，供 systemd/launchd 托管
+dfr service forget  # 移除服务后清理 service marker
 ```
 
 `dfr` 只是客户端。daemon 没运行时应执行 `dfr start` 或通过服务管理器启动。
@@ -394,7 +397,7 @@ $XDG_DATA_HOME/dfrelay/                # 兜底：~/.local/share/dfrelay/
 启动代理。未配置身份时拒绝并打印服务管理器命令。服务与 CLI 应使用相同的
 `--data` 目录，以读取同一实例的 marker。仅设置 `DFRELAY_SERVICE=1` 的旧 unit 仍保持
 拒绝行为；请补齐身份并重启一次服务，再使用自动控制。marker 存在时不会回退 ad-hoc：
-如果移除了服务，请先删除 `<data-dir>/service.json`，再使用 `dfr start`。
+如果移除了服务，请先删除 `<data-dir>/service.json`，再使用 `dfr start`；也可在 daemon 停止后执行 `dfr service forget`。
 
 ### Linux systemd（用户服务）
 
