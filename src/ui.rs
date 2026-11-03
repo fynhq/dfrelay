@@ -1352,7 +1352,7 @@ fn subscription_form_lines(
             field_label_style(form.focus == 2, palette),
         ),
         Span::raw(": "),
-        Span::raw(if form.enabled { "[y]" } else { "[ ]" }),
+        Span::raw(if form.enabled { "[◉]" } else { "[ ]" }),
         Span::raw("  Space"),
     ]));
     lines
@@ -3110,8 +3110,7 @@ mod tests {
         let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains("新增订阅"));
         assert!(compact.contains("启用"));
-        assert!(compact.contains("[y]"));
-        assert!(!compact.contains("[x]"));
+        assert!(compact.contains("[◉]"));
     }
 
     #[tokio::test]
@@ -3144,14 +3143,14 @@ mod tests {
             .expect("url value");
         let enabled_row = rows
             .iter()
-            .position(|row| find_cell(row, "[y]").is_some())
+            .position(|row| find_cell(row, "[◉]").is_some())
             .expect("enabled value");
         let name_column = find_cell(rows[name_row], "alpha").unwrap();
         assert_eq!(
             name_column,
             find_cell(rows[url_row], "https://example.com/sub").unwrap()
         );
-        assert_eq!(name_column, find_cell(rows[enabled_row], "[y]").unwrap());
+        assert_eq!(name_column, find_cell(rows[enabled_row], "[◉]").unwrap());
     }
 
     #[test]
