@@ -316,6 +316,9 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
     let header = Row::new(vec![
         // The active-node dot shares the name column: one cell for the dot and
         // one blank cell before the name, so the label aligns with the names.
+        // U+25C9 FISHEYE is East Asian Width N, so every terminal keeps it at
+        // one cell; U+25CF BLACK CIRCLE is ambiguous and turns into an ellipse
+        // or shifts the row in some terminals.
         Cell::from(format!("  {}", text.nodes_name)),
         Cell::from(text.nodes_source),
         Cell::from(text.nodes_protocol),
@@ -335,7 +338,7 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
                 .unwrap_or_else(|| "—".to_string())
         };
         Row::new(vec![
-            Cell::from(format!("{} {}", if active { "●" } else { " " }, node.name)),
+            Cell::from(format!("{} {}", if active { "◉" } else { " " }, node.name)),
             Cell::from(marquee_text(&node.source, NODE_SOURCE_WIDTH as usize, tick)),
             Cell::from(node.protocol.clone()),
             Cell::from(if view.auto_tags.contains(node.tag.as_str()) {
@@ -3455,7 +3458,7 @@ mod tests {
         let marks: Vec<String> = rows
             .iter()
             .map(|row| row.concat())
-            .filter(|row| row.contains('●'))
+            .filter(|row| row.contains('◉'))
             .collect();
         assert_eq!(marks.len(), 1, "{marks:?}");
         assert!(marks[0].contains("hk-01"), "{marks:?}");
@@ -3467,7 +3470,7 @@ mod tests {
         let marks: Vec<String> = rows
             .iter()
             .map(|row| row.concat())
-            .filter(|row| row.contains('●'))
+            .filter(|row| row.contains('◉'))
             .collect();
         assert_eq!(marks.len(), 1, "{marks:?}");
         assert!(marks[0].contains("jp-02"), "{marks:?}");
@@ -3479,7 +3482,7 @@ mod tests {
         let marks: Vec<String> = rows
             .iter()
             .map(|row| row.concat())
-            .filter(|row| row.contains('●'))
+            .filter(|row| row.contains('◉'))
             .collect();
         assert_eq!(marks.len(), 1, "{marks:?}");
         assert!(marks[0].contains("jp-02"), "{marks:?}");
@@ -3501,7 +3504,7 @@ mod tests {
                 line.contains("hk-01") && line.contains("test")
             })
             .expect("node row");
-        let dot = row.iter().position(|cell| cell == "●").expect("dot");
+        let dot = row.iter().position(|cell| cell == "◉").expect("dot");
         assert_eq!(row[dot + 1], " ", "one blank cell after the dot");
         assert_eq!(row[dot + 2], "h", "name starts right after the gap");
         let header = rows
