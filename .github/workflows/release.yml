@@ -337,11 +337,11 @@ jobs:
             echo "::error::release notes are empty"
             exit 1
           fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::error::a release for $TAG already exists; delete it before retrying"
-            exit 1
-          fi
+          # Let `gh release create` report an existing release or a missing tag.
+          # `--verify-tag` prevents gh from creating a new tag at the default
+          # branch if the validated tag disappeared between jobs.
           gh release create "$TAG" \
+            --verify-tag \
             --title "dfrelay v$VERSION" \
             --notes "$BODY" \
             dist/dfrelay_*.tar.gz dist/SHA256SUMS
