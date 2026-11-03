@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{Overlay, Page, ProxyStatus, SetupState};
 use crate::config::Config;
 use crate::i18n::{Lang, Text};
-use crate::logging::{LogLevel, LogLine};
+use crate::logging::{LogLevel, LogLine, LogTimestamp};
 use crate::service::ServiceIdentity;
 use crate::singbox::clash::MetricsSnapshot;
 
@@ -82,7 +82,7 @@ pub struct View {
     pub subscription_delete: bool,
     pub log_filter: LogLevel,
     pub log_follow: bool,
-    pub log_show_timestamp: bool,
+    pub log_timestamp: LogTimestamp,
     pub logs: Vec<LogLine>,
     pub log_file: PathBuf,
     pub last_error: Option<String>,

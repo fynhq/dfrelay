@@ -14,7 +14,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::config::{Config, Paths, SubscriptionConfig};
 use crate::i18n::Text;
 use crate::ipc::{self, ServerMsg};
-use crate::logging::{LogLevel, LogLine, Logger};
+use crate::logging::{LogLevel, LogLine, LogTimestamp, Logger};
 use crate::netinfo;
 use crate::service::ServiceIdentity;
 use crate::singbox::binary::{is_newer_version, BinaryManager, BinaryMetadata, InboxCandidate};
@@ -610,7 +610,7 @@ pub struct App {
     pub subscription_delete: Option<String>,
     pub log_filter: LogLevel,
     pub log_follow: bool,
-    pub log_show_timestamp: bool,
+    pub log_timestamp: LogTimestamp,
     pub last_error: Option<String>,
     pub message: Option<String>,
     pub message_at: Option<Instant>,
@@ -832,7 +832,7 @@ impl App {
             subscription_delete: None,
             log_filter: LogLevel::Info,
             log_follow: true,
-            log_show_timestamp: false,
+            log_timestamp: LogTimestamp::Time,
             last_error: None,
             message: None,
             message_at: None,
@@ -1023,7 +1023,7 @@ impl App {
             subscription_delete: self.subscription_delete.is_some(),
             log_filter: self.log_filter,
             log_follow: self.log_follow,
-            log_show_timestamp: self.log_show_timestamp,
+            log_timestamp: self.log_timestamp,
             logs: if self.page == Page::Logs {
                 self.log_lines()
             } else {
@@ -1903,7 +1903,7 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.jump_selection(false),
             KeyCode::Char('G') | KeyCode::End => self.jump_selection(true),
             KeyCode::Char('f') if self.page == Page::Logs => self.toggle_log_follow(),
-            KeyCode::Char('d') if self.page == Page::Logs => self.toggle_log_timestamp(),
+            KeyCode::Char('d') if self.page == Page::Logs => self.cycle_log_timestamp(),
             KeyCode::Char('v') if self.page == Page::Logs => self.cycle_log_filter(),
             KeyCode::Char('c') if self.page == Page::Logs => {
                 self.logger.clear_view();
@@ -2165,8 +2165,8 @@ impl App {
         self.notify(format!("{}: {state}", self.text().logs_follow));
     }
 
-    fn toggle_log_timestamp(&mut self) {
-        self.log_show_timestamp = !self.log_show_timestamp;
+    fn cycle_log_timestamp(&mut self) {
+        self.log_timestamp = self.log_timestamp.next();
     }
 
     fn cycle_log_filter(&mut self) {
@@ -4525,14 +4525,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logs_date_toggle_is_off_by_default() {
+    async fn logs_timestamp_cycles_through_time_date_and_hidden() {
         let (mut app, _dir) = test_app().await;
         app.page = Page::Logs;
-        assert!(!app.log_show_timestamp);
+        assert_eq!(app.log_timestamp, LogTimestamp::Time);
         app.handle_key(key(KeyCode::Char('d'))).await;
-        assert!(app.log_show_timestamp);
+        assert_eq!(app.log_timestamp, LogTimestamp::DateTime);
         app.handle_key(key(KeyCode::Char('d'))).await;
-        assert!(!app.log_show_timestamp);
+        assert_eq!(app.log_timestamp, LogTimestamp::Hidden);
+        app.handle_key(key(KeyCode::Char('d'))).await;
+        assert_eq!(app.log_timestamp, LogTimestamp::Time);
     }
 
     #[tokio::test]

@@ -412,7 +412,7 @@ static ZH: Text = Text {
             lines: &[
                 "j/k  滚动；到底自动跟随",
                 "f  跟随开关",
-                "d  显示/隐藏日期",
+                "d  切换时间显示（时间/日期时间/隐藏）",
                 "v  循环级别",
                 "c  清空视图（不删文件）",
                 "Enter  查看详情（j/k、g/G 滚动）",
@@ -695,7 +695,7 @@ static EN: Text = Text {
             lines: &[
                 "j/k  scroll; bottom resumes follow",
                 "f  follow tail",
-                "d  show/hide dates",
+                "d  cycle time display (time/datetime/hidden)",
                 "v  cycle level",
                 "c  clear view (files kept)",
                 "Enter  detail (j/k, g/G)",

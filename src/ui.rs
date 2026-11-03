@@ -653,7 +653,7 @@ fn render_logs(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pale
         .iter()
         .map(|line| {
             ListItem::new(Line::from(Span::styled(
-                line.display(view.log_show_timestamp),
+                line.display(view.log_timestamp),
                 log_level_style(line.level, palette),
             )))
         })
@@ -1698,7 +1698,7 @@ mod tests {
     };
     use crate::config::{Config, Paths};
     use crate::i18n::Lang;
-    use crate::logging::{LogLevel, Logger};
+    use crate::logging::{LogLevel, LogTimestamp, Logger};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use tempfile::TempDir;
@@ -2800,7 +2800,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logs_keep_time_when_dates_are_hidden() {
+    async fn logs_timestamp_cycles_time_date_and_hidden() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
         app.page = Page::Logs;
         app.logger.app(LogLevel::Info, "date toggle test");
@@ -2816,9 +2816,17 @@ mod tests {
         let content = rendered(&app, 30);
         assert!(content.contains(time), "{content}");
         assert!(!content.contains(&timestamp), "{content}");
-        app.log_show_timestamp = true;
+        app.log_timestamp = LogTimestamp::DateTime;
         let content = rendered(&app, 30);
         assert!(content.contains(&timestamp), "{content}");
+        app.log_timestamp = LogTimestamp::Hidden;
+        let content = rendered(&app, 30);
+        assert!(!content.contains(time), "{content}");
+        assert!(!content.contains(&timestamp), "{content}");
+        assert!(
+            content.contains("[INFO] [app] date toggle test"),
+            "{content}"
+        );
     }
 
     #[tokio::test]

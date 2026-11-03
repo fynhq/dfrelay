@@ -60,6 +60,25 @@ impl Component {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LogTimestamp {
+    #[default]
+    Time,
+    DateTime,
+    Hidden,
+}
+
+impl LogTimestamp {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Time => Self::DateTime,
+            Self::DateTime => Self::Hidden,
+            Self::Hidden => Self::Time,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
     pub timestamp: String,
@@ -69,23 +88,32 @@ pub struct LogLine {
 }
 
 impl LogLine {
-    pub fn display(&self, show_date: bool) -> String {
-        // The date is optional; the time of day must always stay visible.
-        let timestamp = if show_date {
-            self.timestamp.as_str()
-        } else {
-            self.timestamp
-                .split_once(' ')
-                .map(|(_, time)| time)
-                .unwrap_or(self.timestamp.as_str())
+    pub fn display(&self, timestamp: LogTimestamp) -> String {
+        let prefix = match timestamp {
+            LogTimestamp::Time => Some(
+                self.timestamp
+                    .split_once(' ')
+                    .map(|(_, time)| time)
+                    .unwrap_or(self.timestamp.as_str()),
+            ),
+            LogTimestamp::DateTime => Some(self.timestamp.as_str()),
+            LogTimestamp::Hidden => None,
         };
-        format!(
-            "{} [{}] [{}] {}",
-            timestamp,
-            self.level.label(),
-            self.component.label(),
-            self.message
-        )
+        match prefix {
+            Some(prefix) => format!(
+                "{} [{}] [{}] {}",
+                prefix,
+                self.level.label(),
+                self.component.label(),
+                self.message
+            ),
+            None => format!(
+                "[{}] [{}] {}",
+                self.level.label(),
+                self.component.label(),
+                self.message
+            ),
+        }
     }
 }
 
@@ -402,17 +430,27 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn display_always_shows_time_and_toggles_only_the_date() {
+    fn display_cycles_time_date_and_hidden() {
         let line = LogLine {
             timestamp: "2026-10-31 12:34:56.789".to_string(),
             level: LogLevel::Info,
             component: Component::App,
             message: "message".to_string(),
         };
-        let without_date = line.display(false);
-        assert_eq!(without_date, "12:34:56.789 [INFO] [app] message");
-        let with_date = line.display(true);
+        let time = line.display(LogTimestamp::Time);
+        assert_eq!(time, "12:34:56.789 [INFO] [app] message");
+        let with_date = line.display(LogTimestamp::DateTime);
         assert_eq!(with_date, "2026-10-31 12:34:56.789 [INFO] [app] message");
+        let hidden = line.display(LogTimestamp::Hidden);
+        assert_eq!(hidden, "[INFO] [app] message");
+    }
+
+    #[test]
+    fn timestamp_cycles_through_three_states() {
+        assert_eq!(LogTimestamp::default(), LogTimestamp::Time);
+        assert_eq!(LogTimestamp::Time.next(), LogTimestamp::DateTime);
+        assert_eq!(LogTimestamp::DateTime.next(), LogTimestamp::Hidden);
+        assert_eq!(LogTimestamp::Hidden.next(), LogTimestamp::Time);
     }
 
     #[test]
