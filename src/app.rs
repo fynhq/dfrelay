@@ -2014,10 +2014,11 @@ impl App {
         self.update_check_in_flight = true;
         self.last_update_check = Some(Instant::now());
         let manager = self.binary_manager.clone();
+        let config = self.config.clone();
         let tx = self.events_tx.clone();
         tokio::spawn(async move {
             let result = manager
-                .latest_version()
+                .latest_version(&config)
                 .await
                 .map_err(|err| err.to_string());
             let _ = tx.send(AppEvent::UpdateCheckDone(result));

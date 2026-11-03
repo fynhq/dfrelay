@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use chrono::Local;
 use flate2::read::GzDecoder;
-use reqwest::Client;
+use reqwest::{Client, Proxy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -116,14 +116,9 @@ impl BinaryManager {
             .ok_or_else(|| BinaryError::Version("unexpected output".to_string()))
     }
 
-    pub async fn latest_version(&self) -> Result<String, BinaryError> {
-        let client = download_client()?;
-        let asset = tokio::time::timeout(
-            UPDATE_CHECK_TIMEOUT,
-            fetch_latest_release(&client, GITHUB_API_LATEST),
-        )
-        .await
-        .map_err(|_| BinaryError::Network("update check timed out".to_string()))??;
+    pub async fn latest_version(&self, config: &Config) -> Result<String, BinaryError> {
+        let clients = download_clients(config)?;
+        let asset = resolve_latest_release(&clients, GITHUB_API_LATEST, None).await?;
         Ok(asset.version)
     }
 
@@ -133,8 +128,8 @@ impl BinaryManager {
         logger: &Logger,
     ) -> Result<BinaryMetadata, BinaryError> {
         logger.app(LogLevel::Info, "resolving latest sing-box release");
-        let client = download_client()?;
-        let asset = fetch_latest_release(&client, GITHUB_API_LATEST)
+        let clients = download_clients(config)?;
+        let asset = resolve_latest_release(&clients, GITHUB_API_LATEST, Some(logger))
             .await
             .map_err(|err| {
                 logger.app(
@@ -146,14 +141,16 @@ impl BinaryManager {
         let digest = asset.digest.clone().ok_or(BinaryError::ManualRequired)?;
 
         let mut attempts = Vec::new();
-        attempts.push(("direct", asset.url.clone()));
+        for channel in &clients {
+            attempts.push((channel.channel.label(), &channel.client, asset.url.clone()));
+        }
         for prefix in &config.github_mirrors {
-            attempts.push(("mirror", mirror_url(prefix, &asset.url)));
+            attempts.push(("mirror", &clients[0].client, mirror_url(prefix, &asset.url)));
         }
 
-        for (kind, url) in attempts {
+        for (kind, client, url) in attempts {
             logger.app(LogLevel::Info, format!("download attempt {kind}: {url}"));
-            match download_and_verify(&client, &url, &digest).await {
+            match download_and_verify(client, &url, &digest).await {
                 Ok(bytes) => match self.install_archive(&bytes, &asset, &digest, true).await {
                     Ok(metadata) => {
                         logger.app(
@@ -487,13 +484,138 @@ impl BinaryManager {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DownloadChannel {
+    Direct,
+    EnvProxy,
+    LocalProxy,
+}
+
+impl DownloadChannel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::EnvProxy => "env-proxy",
+            Self::LocalProxy => "local-proxy",
+        }
+    }
+}
+
+struct ChannelClient {
+    channel: DownloadChannel,
+    client: Client,
+}
+
+fn download_clients(config: &Config) -> Result<Vec<ChannelClient>, BinaryError> {
+    let mut clients = vec![ChannelClient {
+        channel: DownloadChannel::Direct,
+        client: download_client()?,
+    }];
+    if let Some(url) = env_proxy_url() {
+        if let Ok(client) = proxy_client(&url) {
+            clients.push(ChannelClient {
+                channel: DownloadChannel::EnvProxy,
+                client,
+            });
+        }
+    }
+    let local_url = match config.lan_auth() {
+        Some((username, password)) => {
+            crate::netinfo::local_proxy_url_with_auth(config.port, username, password)
+        }
+        None => crate::netinfo::local_proxy_url(config.port),
+    };
+    if let Ok(client) = proxy_client(&local_url) {
+        clients.push(ChannelClient {
+            channel: DownloadChannel::LocalProxy,
+            client,
+        });
+    }
+    Ok(clients)
+}
+
+fn env_proxy_url() -> Option<String> {
+    const KEYS: [&str; 6] = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ];
+    KEYS.iter().find_map(|key| {
+        let value = std::env::var(key).ok()?;
+        let value = value.trim();
+        (!value.is_empty()).then(|| normalize_proxy_url(value))
+    })
+}
+
+fn normalize_proxy_url(value: &str) -> String {
+    if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("http://{value}")
+    }
+}
+
 fn download_client() -> Result<Client, BinaryError> {
     Client::builder()
         .no_proxy()
+        .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
         .user_agent(format!("DFRelay/{}", crate::version::BASE))
         .build()
         .map_err(|err| BinaryError::Network(err.to_string()))
+}
+
+fn proxy_client(url: &str) -> Result<Client, BinaryError> {
+    let proxy = Proxy::all(url).map_err(|err| BinaryError::Network(err.to_string()))?;
+    Client::builder()
+        .proxy(proxy)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .user_agent(format!("DFRelay/{}", crate::version::BASE))
+        .build()
+        .map_err(|err| BinaryError::Network(err.to_string()))
+}
+
+async fn resolve_latest_release(
+    clients: &[ChannelClient],
+    api: &str,
+    logger: Option<&Logger>,
+) -> Result<ReleaseAsset, BinaryError> {
+    let mut last_error = BinaryError::Network("no network channel available".to_string());
+    for channel in clients {
+        let label = channel.channel.label();
+        match tokio::time::timeout(
+            UPDATE_CHECK_TIMEOUT,
+            fetch_latest_release(&channel.client, api),
+        )
+        .await
+        {
+            Ok(Ok(asset)) => return Ok(asset),
+            Ok(Err(err)) => {
+                if let Some(logger) = logger {
+                    logger.app(
+                        LogLevel::Warn,
+                        format!("release API attempt {label} failed: {err}"),
+                    );
+                }
+                last_error = err;
+            }
+            Err(_) => {
+                let err = BinaryError::Network(format!("{label} timed out"));
+                if let Some(logger) = logger {
+                    logger.app(
+                        LogLevel::Warn,
+                        format!("release API attempt {label} failed: {err}"),
+                    );
+                }
+                last_error = err;
+            }
+        }
+    }
+    Err(last_error)
 }
 
 async fn fetch_latest_release(client: &Client, api: &str) -> Result<ReleaseAsset, BinaryError> {
@@ -1035,5 +1157,31 @@ mod tests {
         let candidates = manager.scan_inbox().unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].has_checksum);
+    }
+
+    #[test]
+    fn proxy_urls_without_a_scheme_default_to_http() {
+        assert_eq!(
+            normalize_proxy_url("127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            normalize_proxy_url("https://proxy.example:8443"),
+            "https://proxy.example:8443"
+        );
+    }
+
+    #[test]
+    fn download_channels_try_direct_then_proxies() {
+        let clients = download_clients(&Config::default()).unwrap();
+        let channels: Vec<_> = clients.iter().map(|client| client.channel).collect();
+        assert_eq!(channels.first(), Some(&DownloadChannel::Direct));
+        assert_eq!(channels.last(), Some(&DownloadChannel::LocalProxy));
+        if let Some(env) = channels
+            .iter()
+            .position(|channel| *channel == DownloadChannel::EnvProxy)
+        {
+            assert!(env < channels.len() - 1);
+        }
     }
 }

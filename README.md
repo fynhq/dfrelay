@@ -121,8 +121,10 @@ edited only in `config.toml`; restart the daemon after changing them. For an
 ad-hoc daemon use `dfr restart`; for a service use `dfr restart` (which invokes
 the supervisor) or the service manager.
 
-The managed sing-box binary can be downloaded or updated from Setup. The
-previous binary is kept for rollback. `--config` (`-c`) and `--data` (`-d`)
+The managed sing-box binary can be downloaded or updated from Setup. Downloads
+try a direct connection first, then the environment proxy, then DFRelay's local
+mixed proxy, and finally GitHub mirrors; the official release digest is always
+the trust anchor. The previous binary is kept for rollback. `--config` (`-c`) and `--data` (`-d`)
 override the XDG paths.
 
 <a id="service-templates"></a>
@@ -383,7 +385,8 @@ $XDG_DATA_HOME/dfrelay/                # 兜底：~/.local/share/dfrelay/
 大部分设置可在 TUI 修改；端口、DNS、测试 URL、sing-box 日志级别和 `bypass_lan`
 只能编辑 `config.toml`，改后需要重启 daemon：ad-hoc 用 `dfr restart`，服务模式用
 `dfr restart`（自动调用服务管理器）或服务管理器。受管 sing-box 可在 Setup 页下载/
-更新，上一版保留用于回滚。
+更新：先直连，失败后依次尝试环境代理、本机 mixed 代理，最后才用 GitHub 反代；
+始终以官方 release digest 校验，上一版保留用于回滚。
 `--config`（`-c`）、`--data`（`-d`）可覆盖 XDG 路径。
 
 <a id="service-templates-zh"></a>
