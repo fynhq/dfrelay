@@ -3,7 +3,7 @@ use serde_json::Value;
 use serde_yaml_ng::Value as YamlValue;
 
 use super::model::Node;
-use super::parse_clash::parse_clash;
+use super::parse_clash::parse_clash_document;
 use super::parse_uri::{decode_base64_text, parse_uri_list};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,10 +36,13 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
         }
     }
 
-    if let Ok(YamlValue::Mapping(mapping)) = serde_yaml_ng::from_str::<YamlValue>(trimmed) {
+    if let Ok(document) = serde_yaml_ng::from_str::<YamlValue>(trimmed) {
         let proxies_key = YamlValue::String("proxies".to_string());
-        if mapping.contains_key(&proxies_key) {
-            let (nodes, unsupported) = parse_clash(trimmed, source)?;
+        let has_proxies = document
+            .as_mapping()
+            .is_some_and(|mapping| mapping.contains_key(&proxies_key));
+        if has_proxies {
+            let (nodes, unsupported) = parse_clash_document(&document, source)?;
             return Ok(ParseOutcome {
                 nodes,
                 unsupported: unsupported

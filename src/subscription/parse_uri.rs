@@ -59,8 +59,19 @@ pub(crate) fn decode_base64_text(input: &str) -> Option<String> {
     None
 }
 
+fn strip_uri_scheme<'a>(uri: &'a str, expected: &str) -> Result<&'a str, String> {
+    let (scheme, rest) = uri
+        .split_once("://")
+        .ok_or_else(|| format!("invalid {expected} URI"))?;
+    if scheme.eq_ignore_ascii_case(expected) {
+        Ok(rest)
+    } else {
+        Err(format!("invalid {expected} URI"))
+    }
+}
+
 fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
-    let rest = uri.strip_prefix("ss://").ok_or("invalid ss URI")?;
+    let rest = strip_uri_scheme(uri, "ss")?;
     let (rest, name) = split_fragment(rest);
     let name = name.map(|name| decode_percent(&name));
     let (rest, query) = split_query(rest);
@@ -86,7 +97,13 @@ fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
     let (method, password) = decoded_userinfo
         .split_once(':')
         .ok_or("invalid ss userinfo: expected method:password")?;
+    if method.is_empty() || password.is_empty() {
+        return Err("ss method or password is empty".to_string());
+    }
     let (server, port) = parse_host_port(&hostport)?;
+    if server.is_empty() {
+        return Err("ss missing server".to_string());
+    }
     let display_name = name.unwrap_or_else(|| format!("{server}:{port}"));
     let outbound = json!({
         "type": "shadowsocks",
@@ -106,15 +123,24 @@ fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
 }
 
 fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
-    let rest = uri.strip_prefix("vmess://").ok_or("invalid vmess URI")?;
+    let rest = strip_uri_scheme(uri, "vmess")?;
     let decoded = decode_base64_text(rest).ok_or("invalid vmess base64 payload")?;
     let value: Value =
         serde_json::from_str(&decoded).map_err(|e| format!("invalid vmess JSON: {e}"))?;
     let object = value.as_object().ok_or("vmess payload is not an object")?;
 
-    let server = string_field(object, "add").ok_or("vmess missing add")?;
+    let server = normalize_host(string_field(object, "add").ok_or("vmess missing add")?);
+    if server.is_empty() {
+        return Err("vmess missing add".to_string());
+    }
     let port = number_field(object, "port").ok_or("vmess missing port")?;
+    if port == 0 {
+        return Err("vmess invalid port".to_string());
+    }
     let uuid = string_field(object, "id").ok_or("vmess missing id")?;
+    if uuid.is_empty() {
+        return Err("vmess missing id".to_string());
+    }
     let name = string_field(object, "ps")
         .map(str::to_string)
         .unwrap_or_else(|| format!("{server}:{port}"));
@@ -165,7 +191,7 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
         return Err("vless missing uuid".to_string());
     }
     let server = normalize_host(url.host_str().ok_or("vless missing host")?);
-    let port = url.port().unwrap_or(443);
+    let port = port_or(url.port(), 443)?;
     let query = query_map(&url);
     let network = query
         .get("type")
@@ -246,14 +272,25 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
     ))
 }
 
+fn single_secret(url: &Url) -> String {
+    let mut value = url.username().to_string();
+    if let Some(extra) = url.password() {
+        if !value.is_empty() {
+            value.push(':');
+        }
+        value.push_str(extra);
+    }
+    decode_percent(&value)
+}
+
 fn parse_trojan(uri: &str, source: &str) -> Result<Node, String> {
     let url = Url::parse(uri).map_err(|e| format!("invalid trojan URI: {e}"))?;
-    let password = decode_percent(url.username());
+    let password = single_secret(&url);
     if password.is_empty() {
         return Err("trojan missing password".to_string());
     }
     let server = normalize_host(url.host_str().ok_or("trojan missing host")?);
-    let port = url.port().unwrap_or(443);
+    let port = port_or(url.port(), 443)?;
     let query = query_map(&url);
     let network = query
         .get("type")
@@ -306,12 +343,12 @@ fn parse_trojan(uri: &str, source: &str) -> Result<Node, String> {
 
 fn parse_hysteria2(uri: &str, source: &str) -> Result<Node, String> {
     let url = Url::parse(uri).map_err(|e| format!("invalid hysteria2 URI: {e}"))?;
-    let password = decode_percent(url.username());
+    let password = single_secret(&url);
     if password.is_empty() {
         return Err("hysteria2 missing password".to_string());
     }
     let server = normalize_host(url.host_str().ok_or("hysteria2 missing host")?);
-    let port = url.port().unwrap_or(443);
+    let port = port_or(url.port(), 443)?;
     let query = query_map(&url);
     let sni = query
         .get("sni")
@@ -361,7 +398,7 @@ fn parse_tuic(uri: &str, source: &str) -> Result<Node, String> {
         return Err("tuic missing uuid or password".to_string());
     }
     let server = normalize_host(url.host_str().ok_or("tuic missing host")?);
-    let port = url.port().unwrap_or(443);
+    let port = port_or(url.port(), 443)?;
     let query = query_map(&url);
     let sni = query
         .get("sni")
@@ -402,7 +439,7 @@ fn parse_http(uri: &str, source: &str) -> Result<Node, String> {
     let url = Url::parse(uri).map_err(|e| format!("invalid http URI: {e}"))?;
     let tls = url.scheme().eq_ignore_ascii_case("https");
     let server = normalize_host(url.host_str().ok_or("http missing host")?);
-    let port = url.port().unwrap_or(if tls { 443 } else { 8080 });
+    let port = port_or(url.port(), if tls { 443 } else { 8080 })?;
     let query = query_map(&url);
     let sni = query
         .get("sni")
@@ -441,7 +478,7 @@ fn parse_http(uri: &str, source: &str) -> Result<Node, String> {
 fn parse_socks(uri: &str, source: &str) -> Result<Node, String> {
     let url = Url::parse(uri).map_err(|e| format!("invalid socks URI: {e}"))?;
     let server = normalize_host(url.host_str().ok_or("socks missing host")?);
-    let port = url.port().unwrap_or(1080);
+    let port = port_or(url.port(), 1080)?;
     let mut outbound = Map::new();
     outbound.insert("type".into(), json!("socks"));
     outbound.insert("server".into(), json!(server));
@@ -486,12 +523,18 @@ fn parse_host_port(input: &str) -> Result<(String, u16), String> {
             .ok_or("missing port")?
             .parse::<u16>()
             .map_err(|_| "invalid port".to_string())?;
+        if port == 0 {
+            return Err("invalid port".to_string());
+        }
         return Ok((host.to_string(), port));
     }
     let (host, port) = input.rsplit_once(':').ok_or("missing port")?;
     let port = port
         .parse::<u16>()
         .map_err(|_| "invalid port".to_string())?;
+    if port == 0 {
+        return Err("invalid port".to_string());
+    }
     Ok((host.to_string(), port))
 }
 
@@ -499,6 +542,15 @@ fn normalize_host(host: &str) -> String {
     host.trim_start_matches('[')
         .trim_end_matches(']')
         .to_string()
+}
+
+fn port_or(port: Option<u16>, default: u16) -> Result<u16, String> {
+    let port = port.unwrap_or(default);
+    if port == 0 {
+        Err("invalid port".to_string())
+    } else {
+        Ok(port)
+    }
 }
 
 fn decode_percent(input: &str) -> String {
@@ -759,6 +811,43 @@ mod tests {
         assert_eq!(node.protocol, "vless");
         assert_eq!(node.outbound["tls"]["reality"]["public_key"], "abc");
         assert_eq!(node.outbound["tls"]["utls"]["fingerprint"], "chrome");
+    }
+
+    #[test]
+    fn accepts_uppercase_scheme_and_keeps_colons_in_single_secret_schemes() {
+        let ss = "SS://YWVzLTEyOC1nY206c2VjcmV0@example.com:443#a";
+        assert_eq!(parse_uri(ss, "test").unwrap().protocol, "shadowsocks");
+
+        let trojan = parse_uri("trojan://p:ss@example.com:443#t", "test").unwrap();
+        assert_eq!(trojan.outbound["password"], "p:ss");
+
+        let hy2 = parse_uri("hysteria2://p:ss@example.com:443#h", "test").unwrap();
+        assert_eq!(hy2.outbound["password"], "p:ss");
+    }
+
+    #[test]
+    fn vmess_normalizes_bracketed_ipv6_and_rejects_zero_ports() {
+        let payload = serde_json::json!({
+            "v": "2", "ps": "vmess", "add": "[2001:db8::1]", "port": "443",
+            "id": "11111111-1111-1111-1111-111111111111", "aid": "0", "net": "tcp"
+        });
+        let encoded = STANDARD.encode(payload.to_string());
+        let node = parse_uri(&format!("vmess://{encoded}"), "test").unwrap();
+        assert_eq!(node.server, "2001:db8::1");
+        assert_eq!(node.outbound["server"], "2001:db8::1");
+
+        let zero = serde_json::json!({
+            "v": "2", "ps": "vmess", "add": "example.com", "port": "0",
+            "id": "11111111-1111-1111-1111-111111111111"
+        });
+        let encoded = STANDARD.encode(zero.to_string());
+        assert!(parse_uri(&format!("vmess://{encoded}"), "test").is_err());
+    }
+
+    #[test]
+    fn rejects_zero_port_and_empty_ss_credentials() {
+        assert!(parse_uri("trojan://pass@example.com:0#t", "test").is_err());
+        assert!(parse_uri("ss://YWVzLTEyOC1nY206@example.com:443#a", "test").is_err());
     }
 
     #[test]

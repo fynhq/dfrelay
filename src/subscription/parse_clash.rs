@@ -5,9 +5,17 @@ use super::model::Node;
 
 pub type ClashParseOutput = (Vec<Node>, Vec<(String, String)>);
 
+#[cfg(test)]
 pub fn parse_clash(text: &str, source: &str) -> Result<ClashParseOutput, String> {
     let document: YamlValue =
         serde_yaml_ng::from_str(text).map_err(|e| format!("invalid YAML: {e}"))?;
+    parse_clash_document(&document, source)
+}
+
+pub fn parse_clash_document(
+    document: &YamlValue,
+    source: &str,
+) -> Result<ClashParseOutput, String> {
     let proxies = document
         .as_mapping()
         .and_then(|mapping| yaml_get(mapping, "proxies"))
@@ -34,7 +42,13 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
     let server = yaml_str(proxy, "server")
         .ok_or("missing server")?
         .to_string();
+    if server.is_empty() {
+        return Err("missing server".to_string());
+    }
     let port = yaml_u16(proxy, "port").ok_or("missing or invalid port")?;
+    if port == 0 {
+        return Err("invalid port".to_string());
+    }
     let name = yaml_str(proxy, "name")
         .unwrap_or(&format!("{server}:{port}"))
         .to_string();
@@ -52,6 +66,9 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             }
             let cipher = yaml_str(proxy, "cipher").ok_or("ss missing cipher")?;
             let password = yaml_str(proxy, "password").ok_or("ss missing password")?;
+            if cipher.is_empty() || password.is_empty() {
+                return Err("ss cipher or password is empty".to_string());
+            }
             (
                 "shadowsocks",
                 json!({
@@ -65,6 +82,9 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
         }
         "vmess" => {
             let uuid = yaml_str(proxy, "uuid").ok_or("vmess missing uuid")?;
+            if uuid.is_empty() {
+                return Err("vmess missing uuid".to_string());
+            }
             let alter_id = yaml_u16(proxy, "alterId").unwrap_or(0);
             let security = yaml_str(proxy, "cipher").unwrap_or("auto");
             let mut value = Map::new();
@@ -81,6 +101,9 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
         }
         "vless" => {
             let uuid = yaml_str(proxy, "uuid").ok_or("vless missing uuid")?;
+            if uuid.is_empty() {
+                return Err("vless missing uuid".to_string());
+            }
             let mut value = Map::new();
             value.insert("type".into(), json!("vless"));
             value.insert("server".into(), json!(server));
@@ -94,6 +117,9 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
         }
         "trojan" => {
             let password = yaml_str(proxy, "password").ok_or("trojan missing password")?;
+            if password.is_empty() {
+                return Err("trojan missing password".to_string());
+            }
             let mut value = Map::new();
             value.insert("type".into(), json!("trojan"));
             value.insert("server".into(), json!(server));
@@ -105,6 +131,9 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
         }
         "hysteria2" | "hy2" => {
             let password = yaml_str(proxy, "password").ok_or("hysteria2 missing password")?;
+            if password.is_empty() {
+                return Err("hysteria2 missing password".to_string());
+            }
             let mut value = Map::new();
             value.insert("type".into(), json!("hysteria2"));
             value.insert("server".into(), json!(server));
@@ -124,6 +153,9 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
         "tuic" => {
             let uuid = yaml_str(proxy, "uuid").ok_or("tuic missing uuid")?;
             let password = yaml_str(proxy, "password").ok_or("tuic missing password")?;
+            if uuid.is_empty() || password.is_empty() {
+                return Err("tuic missing uuid or password".to_string());
+            }
             let mut value = Map::new();
             value.insert("type".into(), json!("tuic"));
             value.insert("server".into(), json!(server));
@@ -515,6 +547,34 @@ proxies:
         let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
         assert!(nodes.is_empty());
         assert_eq!(unsupported.len(), 1);
+    }
+
+    #[test]
+    fn rejects_zero_ports_and_empty_credentials() {
+        let yaml = r#"
+proxies:
+  - name: zero
+    type: ss
+    server: example.com
+    port: 0
+    cipher: aes-128-gcm
+    password: secret
+  - name: empty-password
+    type: ss
+    server: example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: ""
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert!(nodes.is_empty());
+        assert_eq!(unsupported.len(), 2);
+        assert!(unsupported
+            .iter()
+            .any(|(_, reason)| reason.contains("port")));
+        assert!(unsupported
+            .iter()
+            .any(|(_, reason)| reason.contains("empty")));
     }
 
     #[test]

@@ -296,11 +296,12 @@ impl Logger {
             };
         }
 
+        let message: String = message.into();
         let line = LogLine {
             timestamp: now.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
             level,
             component,
-            message: message.into(),
+            message: crate::text::sanitize_display(&message),
         };
 
         if let Some(file) = inner.file.as_mut() {
@@ -425,6 +426,19 @@ mod tests {
         assert_eq!(recent.len(), MAX_BUFFER_LINES);
         assert!(recent.last().unwrap().message.ends_with("2009"));
         assert!(logger.current_file().exists());
+    }
+
+    #[test]
+    fn messages_are_sanitized_before_buffering_and_writing() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
+        logger.app(LogLevel::Info, "node \x1b]0;pwned\x07\nnext");
+        let recent = logger.recent(1);
+        assert_eq!(recent[0].message, "node ]0;pwned next");
+        let file = fs::read_to_string(logger.current_file()).unwrap();
+        assert!(!file.contains('\x1b'));
+        assert!(!file.contains('\x07'));
+        assert_eq!(file.lines().count(), 1);
     }
 
     #[test]

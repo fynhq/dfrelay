@@ -868,6 +868,12 @@ fn render_setup(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pal
         let current =
             binary_version_text(view.binary_version.as_deref()).unwrap_or_else(|| "—".to_string());
         rows.push((text.setup_current_version, current));
+        let verified = match view.binary_verified {
+            Some(true) => text.setup_verified_ok,
+            Some(false) => text.setup_unverified,
+            None => text.settings_unset,
+        };
+        rows.push((text.setup_verified, verified.to_string()));
     }
     if let Some(latest) = binary_version_text(view.latest_binary_version.as_deref()) {
         rows.push((text.setup_latest_version, latest));
@@ -1895,6 +1901,27 @@ mod tests {
         assert!(compact.contains("Enter安装"), "{compact}");
         assert!(compact.contains("b切换"), "{compact}");
         assert_eq!(compact.matches("Enter安装").count(), 1, "{compact}");
+    }
+
+    #[tokio::test]
+    async fn setup_shows_binary_verification_state() {
+        let (mut app, _dir) = test_app(Lang::Zh).await;
+        app.page = Page::Setup;
+        app.binary_installed = true;
+        app.binary_version = Some("1.14.4".to_string());
+        app.binary_verified = Some(false);
+        let content: String = rendered(&app, 30)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(content.contains("校验未校验"), "{content}");
+
+        app.binary_verified = Some(true);
+        let content: String = rendered(&app, 30)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(content.contains("校验已校验"), "{content}");
     }
 
     #[tokio::test]

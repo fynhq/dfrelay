@@ -98,7 +98,10 @@ impl BinaryManager {
     pub async fn version(&self, binary: &Path) -> Result<String, BinaryError> {
         let output = tokio::time::timeout(
             VERSION_TIMEOUT,
-            tokio::process::Command::new(binary).arg("version").output(),
+            tokio::process::Command::new(binary)
+                .arg("version")
+                .kill_on_drop(true)
+                .output(),
         )
         .await
         .map_err(|_| BinaryError::Version("timed out".to_string()))?
@@ -237,7 +240,7 @@ impl BinaryManager {
                 return Err(err);
             }
         };
-        if let Err(err) = self.check_binary(&temp).await {
+        if let Err(err) = self.check_existing_config(&temp).await {
             let _ = fs::remove_file(&temp);
             return Err(err);
         }
@@ -337,7 +340,7 @@ impl BinaryManager {
                 return Err(err);
             }
         };
-        if let Err(err) = self.check_binary(&temp).await {
+        if let Err(err) = self.check_existing_config(&temp).await {
             let _ = fs::remove_file(&temp);
             return Err(err);
         }
@@ -364,6 +367,21 @@ impl BinaryManager {
         })
     }
 
+    /// Check a new binary against the currently generated runtime configuration.
+    ///
+    /// The minimal config only proves that the executable can start. Upgrade
+    /// compatibility must also cover the node fields in the live configuration;
+    /// otherwise a new sing-box can replace the old one and fail at the next
+    /// proxy start. Fall back to the minimal check when no runtime config exists.
+    async fn check_existing_config(&self, binary: &Path) -> Result<(), BinaryError> {
+        let runtime = self.paths.runtime_config();
+        if runtime.is_file() {
+            self.check_config_file(binary, &runtime).await
+        } else {
+            self.check_binary(binary).await
+        }
+    }
+
     async fn check_binary(&self, binary: &Path) -> Result<(), BinaryError> {
         let config = self
             .paths
@@ -373,15 +391,21 @@ impl BinaryManager {
             &config,
             br#"{"log":{"level":"info"},"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}"#,
         )?;
+        let result = self.check_config_file(binary, &config).await;
+        let _ = fs::remove_file(&config);
+        result
+    }
+
+    async fn check_config_file(&self, binary: &Path, config: &Path) -> Result<(), BinaryError> {
         let output = tokio::time::timeout(
             CHECK_TIMEOUT,
             tokio::process::Command::new(binary)
                 .args(["check", "-c"])
-                .arg(&config)
+                .arg(config)
+                .kill_on_drop(true)
                 .output(),
         )
         .await;
-        let _ = fs::remove_file(&config);
         let output = output
             .map_err(|_| BinaryError::Check("timed out".to_string()))?
             .map_err(BinaryError::Io)?;
@@ -965,6 +989,30 @@ mod tests {
         assert_eq!(metadata.version, "1.15.0");
         assert_eq!(manager.metadata().unwrap().version, "1.15.0");
         assert_eq!(manager.previous_metadata().unwrap().version, "1.14.4");
+    }
+
+    #[tokio::test]
+    async fn upgrade_check_covers_the_existing_runtime_config() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        };
+        paths.ensure().unwrap();
+        let binary = paths.bin_dir.join("fake-sing-box");
+        let script = "#!/bin/sh\nif [ \"$1\" = check ]; then\n  case \"$3\" in *runtime/config.json*) exit 1;; esac\nfi\nexit 0\n";
+        fs::write(&binary, script).unwrap();
+        set_executable(&binary).unwrap();
+        fs::write(paths.runtime_config(), "{}").unwrap();
+
+        let manager = BinaryManager::new(paths);
+        assert!(manager.check_binary(&binary).await.is_ok());
+        assert!(manager.check_existing_config(&binary).await.is_err());
     }
 
     #[test]

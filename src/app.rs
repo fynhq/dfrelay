@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -20,6 +22,7 @@ use crate::singbox::clash::{ClashClient, ClashError, MetricsSnapshot};
 use crate::singbox::supervisor::{self, RunningProxy};
 use crate::subscription::model::Node;
 use crate::subscription::{self, merge_nodes, FetchOptions, SubscriptionRuntime};
+use crate::text::sanitize_display;
 use crate::view::{BinaryStatus, DaemonStatus, View};
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -592,6 +595,7 @@ pub struct App {
     pub local_ips: Vec<String>,
     pub proxy_ips: Vec<String>,
     pub binary_version: Option<String>,
+    pub binary_verified: Option<bool>,
     pub binary_installed: bool,
     pub latest_binary_version: Option<String>,
     pub previous_binary_available: bool,
@@ -645,6 +649,8 @@ pub struct App {
     subscription_refresh_seq: HashMap<String, u64>,
     pub last_subscription_refresh: Option<Instant>,
     pub preferred_node: Option<String>,
+    runtime_has_auto: bool,
+    selection_generation: Arc<AtomicU64>,
     pending_selection: Option<PendingSelection>,
     pending_start: Option<u64>,
     proxy_node_tags: Vec<String>,
@@ -759,14 +765,17 @@ impl App {
         let locator = binary_manager.locate();
         let binary_installed = locator.is_some();
         let mut binary_version = None;
+        let mut binary_verified = None;
         if locator.is_none() {
             setup.candidates = binary_manager.scan_inbox().unwrap_or_default();
         } else if let Some(binary) = locator.as_ref() {
+            let metadata = binary_manager.metadata();
             binary_version = binary_manager
                 .version(binary)
                 .await
                 .ok()
-                .or_else(|| binary_manager.metadata().map(|metadata| metadata.version));
+                .or_else(|| metadata.as_ref().map(|metadata| metadata.version.clone()));
+            binary_verified = metadata.map(|metadata| metadata.verified);
         }
         let page = if locator.is_none() {
             Page::Setup
@@ -808,6 +817,7 @@ impl App {
             local_ips: netinfo::local_addresses(false),
             proxy_ips: Vec::new(),
             binary_version,
+            binary_verified,
             binary_installed,
             latest_binary_version: None,
             previous_binary_available: false,
@@ -861,6 +871,8 @@ impl App {
             subscription_refresh_seq: HashMap::new(),
             last_subscription_refresh: None,
             preferred_node: None,
+            runtime_has_auto: false,
+            selection_generation: Arc::new(AtomicU64::new(0)),
             pending_selection: None,
             pending_start: None,
             proxy_node_tags: Vec::new(),
@@ -892,9 +904,10 @@ impl App {
         let toast = self
             .message
             .clone()
-            .filter(|_| self.message_at.is_none_or(|at| at.elapsed() < TOAST_TTL));
+            .filter(|_| self.message_at.is_none_or(|at| at.elapsed() < TOAST_TTL))
+            .map(|message| crate::text::sanitize_display(&message));
         let filtered = if self.page == Page::Nodes {
-            crate::selection::filter_nodes(
+            crate::selection::filter_node_tags(
                 &self.nodes,
                 &self.config.keywords_include,
                 &self.config.keywords_exclude,
@@ -904,6 +917,18 @@ impl App {
         };
         let mut config = self.config.clone();
         config.subscriptions.clear();
+        config.lan_username = crate::text::sanitize_display(&config.lan_username);
+        config.keywords_include = config
+            .keywords_include
+            .iter()
+            .map(|keyword| crate::text::sanitize_display(keyword))
+            .collect();
+        config.keywords_exclude = config
+            .keywords_exclude
+            .iter()
+            .map(|keyword| crate::text::sanitize_display(keyword))
+            .collect();
+        config.test_url = crate::text::sanitize_display(&config.test_url);
         let lan_password_set = !config.lan_password.is_empty();
         config.lan_password.clear();
         let binary_status = if !self.binary_installed {
@@ -947,24 +972,24 @@ impl App {
                 .iter()
                 .map(|node| crate::view::NodeView {
                     tag: node.tag.clone(),
-                    name: node.name.clone(),
-                    source: node.source.clone(),
-                    protocol: node.protocol.clone(),
+                    name: sanitize_display(&node.name),
+                    source: sanitize_display(&node.source),
+                    protocol: sanitize_display(&node.protocol),
                 })
                 .collect(),
-            auto_tags: filtered.iter().map(|node| node.tag.clone()).collect(),
+            auto_tags: filtered.iter().cloned().collect(),
             auto_candidates: filtered.len(),
             subscriptions: self
                 .subscriptions
                 .iter()
                 .map(|runtime| crate::view::SubscriptionView {
-                    name: runtime.config.name.clone(),
-                    url: subscription::redact_url(&runtime.config.url),
+                    name: sanitize_display(&runtime.config.name),
+                    url: sanitize_display(&subscription::redact_url(&runtime.config.url)),
                     enabled: runtime.config.enabled,
                     node_count: runtime.nodes.len(),
                     unsupported_count: runtime.unsupported.len(),
                     last_updated: runtime.last_updated.clone(),
-                    error: runtime.error.clone(),
+                    error: runtime.error.as_deref().map(sanitize_display),
                     stale: runtime.stale,
                 })
                 .collect(),
@@ -977,12 +1002,23 @@ impl App {
             down_speed: self.down_speed,
             local_ips: self.local_ips.clone(),
             proxy_ips: self.proxy_ips.clone(),
-            binary_version: self.binary_version.clone(),
+            binary_version: self.binary_version.as_deref().map(sanitize_display),
+            binary_verified: self.binary_verified,
             binary_status,
-            latest_binary_version: self.latest_binary_version.clone(),
+            latest_binary_version: self.latest_binary_version.as_deref().map(sanitize_display),
             previous_binary_available: self.previous_binary_available,
-            previous_binary_version: self.previous_binary_version.clone(),
-            setup: self.setup.clone(),
+            previous_binary_version: self
+                .previous_binary_version
+                .as_deref()
+                .map(sanitize_display),
+            setup: {
+                let mut setup = self.setup.clone();
+                setup.message = setup.message.as_deref().map(sanitize_display);
+                for candidate in &mut setup.candidates {
+                    candidate.label = sanitize_display(&candidate.label);
+                }
+                setup
+            },
             overlay: self.overlay.clone(),
             subscription_delete: self.subscription_delete.is_some(),
             log_filter: self.log_filter,
@@ -994,7 +1030,7 @@ impl App {
                 Vec::new()
             },
             log_file: self.logger.current_file(),
-            last_error: self.last_error.clone(),
+            last_error: self.last_error.as_deref().map(sanitize_display),
             toast,
             restart_confirm: self.restart_confirm,
             rollback_confirm: self.rollback_confirm,
@@ -1089,12 +1125,25 @@ impl App {
                         .iter()
                         .any(|config| &config.id == id)
                 });
+                let selected_before = self.selected;
+                let selected_tag = if self.page == Page::Nodes {
+                    self.nodes.get(selected_before).map(|node| node.tag.clone())
+                } else {
+                    None
+                };
                 let node_count: usize = ordered.iter().map(|item| item.nodes.len()).sum();
                 self.nodes = merge_nodes(&ordered);
                 self.prune_node_state();
                 self.subscriptions = ordered;
                 self.sync_preferred_node();
-                self.selected = 0;
+                self.selected = selected_tag
+                    .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
+                    .unwrap_or_else(|| {
+                        selected_before.min(self.max_selection_for(self.page).saturating_sub(1))
+                    });
+                if self.page == Page::Logs && self.log_follow {
+                    self.selected = self.max_selection_for(Page::Logs).saturating_sub(1);
+                }
                 self.sort_nodes_if_visible();
                 self.save_subscription_cache();
                 self.refresh_last_error_from_subscriptions();
@@ -1171,6 +1220,7 @@ impl App {
                 match result {
                     Ok(metadata) => {
                         self.binary_version = Some(metadata.version.clone());
+                        self.binary_verified = Some(metadata.verified);
                         self.binary_installed = true;
                         self.latest_binary_version = Some(metadata.version.clone());
                         self.last_update_check = Some(Instant::now());
@@ -1196,6 +1246,7 @@ impl App {
                 match result {
                     Ok(metadata) => {
                         self.binary_version = Some(metadata.version.clone());
+                        self.binary_verified = Some(metadata.verified);
                         self.binary_installed = true;
                         self.latest_binary_version = None;
                         self.last_update_check = None;
@@ -1258,6 +1309,7 @@ impl App {
                 Err(err) => {
                     self.status = ProxyStatus::Failed;
                     self.restart_in_progress = false;
+                    self.runtime_has_auto = false;
                     self.proxy_node_tags.clear();
                     self.proxy_node_names.clear();
                     self.stable_reset_at = None;
@@ -1270,6 +1322,7 @@ impl App {
             },
             AppEvent::ProxyStopped => {
                 self.status = ProxyStatus::Stopped;
+                self.runtime_has_auto = false;
                 self.proxy_node_tags.clear();
                 self.proxy_node_names.clear();
                 self.started_at = None;
@@ -1407,6 +1460,7 @@ impl App {
                     }
                 };
                 self.pending_selection = None;
+                self.selection_generation.fetch_add(1, Ordering::Relaxed);
                 self.health_failures = 0;
                 self.health_failure_tag = None;
                 self.last_error = None;
@@ -1503,6 +1557,7 @@ impl App {
                 match result {
                     Ok(metadata) => {
                         self.binary_version = Some(metadata.version.clone());
+                        self.binary_verified = Some(metadata.verified);
                         self.binary_installed = true;
                         self.setup.message = None;
                         self.refresh_previous_binary_state();
@@ -2070,13 +2125,12 @@ impl App {
 
     fn sort_nodes_preserving_selection(&mut self) {
         let selected_tag = self.nodes.get(self.selected).map(|node| node.tag.clone());
-        let auto_tags: HashSet<String> = crate::selection::filter_nodes(
+        let auto_tags: HashSet<String> = crate::selection::filter_node_tags(
             &self.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
         )
         .into_iter()
-        .map(|node| node.tag.clone())
         .collect();
         sort_nodes(
             &mut self.nodes,
@@ -2240,7 +2294,7 @@ impl App {
         self.refresh_last_error_from_subscriptions();
         self.notify(self.text().msg_subscription_deleted);
         if was_enabled {
-            self.auto_restart_after_change();
+            self.apply_nodes_change_to_proxy();
         }
         self.logger
             .app(LogLevel::Info, format!("subscription deleted: {id}"));
@@ -2349,11 +2403,18 @@ impl App {
             .editing_id
             .clone()
             .unwrap_or_else(|| format!("s-{:016x}", rand::random::<u64>()));
-        let was_enabled = self
+        let previous = self
             .config
             .subscriptions
             .iter()
-            .any(|subscription| subscription.id == id && subscription.enabled);
+            .find(|subscription| subscription.id == id)
+            .cloned();
+        let was_enabled = previous
+            .as_ref()
+            .is_some_and(|subscription| subscription.enabled);
+        let restart_needed = previous
+            .as_ref()
+            .is_none_or(|old| old.url != url || old.enabled != form.enabled);
         let mut updated_config = self.config.clone();
         let config = if let Some(existing) = updated_config
             .subscriptions
@@ -2379,7 +2440,12 @@ impl App {
             return;
         }
         self.close_overlay();
-        self.notify(format!("{}: {name}", self.text().msg_subscription_saved));
+        let mut saved_message = format!("{}: {name}", self.text().msg_subscription_saved);
+        if config.url.starts_with("http://") {
+            saved_message.push_str(" · ");
+            saved_message.push_str(self.text().subscription_http_warning);
+        }
+        self.notify(saved_message);
         self.logger.app(
             LogLevel::Info,
             format!(
@@ -2395,7 +2461,9 @@ impl App {
             {
                 self.subscriptions.push(empty_runtime(config.clone()));
             }
-            self.pending_restart_subscription = Some(config.id.clone());
+            if restart_needed {
+                self.pending_restart_subscription = Some(config.id.clone());
+            }
             self.refresh_subscription(config);
         } else {
             self.subscription_refresh_seq.remove(&config.id);
@@ -2414,8 +2482,21 @@ impl App {
             self.save_subscription_cache();
             self.refresh_last_error_from_subscriptions();
             if was_enabled {
-                self.auto_restart_after_change();
+                self.apply_nodes_change_to_proxy();
             }
+        }
+    }
+
+    /// React to a node-set change. Keeping the old proxy alive is correct when
+    /// the new configuration is invalid, but an intentional removal of all
+    /// subscriptions should stop the proxy rather than leave stale routing.
+    fn apply_nodes_change_to_proxy(&mut self) {
+        if self.nodes.is_empty() {
+            if self.proxy.is_some() {
+                self.stop_proxy();
+            }
+        } else {
+            self.auto_restart_after_change();
         }
     }
 
@@ -2579,7 +2660,7 @@ impl App {
             return;
         }
         self.close_overlay();
-        let filtered = crate::selection::filter_nodes(
+        let filtered = crate::selection::filter_node_tags(
             &self.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
@@ -2658,10 +2739,13 @@ impl App {
     }
 
     fn refresh_subscription(&mut self, config: SubscriptionConfig) {
+        // Keep last successful nodes even when the URL changed: a failed
+        // refresh of a newly edited URL must not erase the currently working
+        // node set and trigger a restart that cannot start.
         let previous = self
             .subscriptions
             .iter()
-            .find(|runtime| runtime.config.id == config.id && runtime.config.url == config.url)
+            .find(|runtime| runtime.config.id == config.id)
             .cloned();
         let seq = self.next_subscription_seq();
         self.subscription_refresh_seq.insert(config.id.clone(), seq);
@@ -2740,11 +2824,42 @@ impl App {
         if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
             return false;
         }
-        self.begin_restart();
-        true
+        if self.nodes.is_empty() {
+            self.last_error = Some(self.text().no_nodes.to_string());
+            self.notify(self.text().no_nodes);
+            return false;
+        }
+        let filtered = crate::selection::filter_node_tags(
+            &self.nodes,
+            &self.config.keywords_include,
+            &self.config.keywords_exclude,
+        );
+        if filtered.is_empty() {
+            self.last_error = Some(self.text().no_matching_nodes.to_string());
+            self.notify(self.text().no_matching_nodes);
+            return false;
+        }
+        self.begin_restart()
     }
 
-    fn begin_restart(&mut self) {
+    fn begin_restart(&mut self) -> bool {
+        // Validate the proposed configuration before tearing down the running
+        // instance. `start` repeats this check after stopping (it is the final
+        // safety net), but a failed proposal must not cause an outage.
+        if let Err(err) = supervisor::preflight(
+            &self.paths,
+            &self.config,
+            &self.nodes,
+            self.preferred_node.as_deref(),
+        ) {
+            let message = format!("{}: {err}", self.text().msg_preflight_failed);
+            self.last_error = Some(message.clone());
+            self.logger.app(LogLevel::Warn, message);
+            self.notify(self.text().msg_preflight_failed);
+            self.restart_confirm = false;
+            self.rollback_confirm = false;
+            return false;
+        }
         self.restart_confirm = false;
         self.rollback_confirm = false;
         self.subscription_delete = None;
@@ -2752,6 +2867,7 @@ impl App {
         self.restart_after_stop = true;
         self.notify(self.text().msg_restarting);
         self.stop_proxy();
+        true
     }
 
     fn start_proxy(&mut self) -> Result<(), String> {
@@ -2768,7 +2884,7 @@ impl App {
             self.switch_page(Page::Subscriptions);
             return Err(self.text().no_nodes.to_string());
         }
-        let filtered = crate::selection::filter_nodes(
+        let filtered = crate::selection::filter_node_tags(
             &self.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
@@ -2777,6 +2893,7 @@ impl App {
             self.last_error = Some(self.text().no_matching_nodes.to_string());
             return Err(self.text().no_matching_nodes.to_string());
         }
+        self.runtime_has_auto = filtered.len() >= 2;
         let mut preferred = self.preferred_node.clone();
         if let Some(tag) = preferred.as_deref() {
             if !self.nodes.iter().any(|node| node.tag == tag) {
@@ -3049,6 +3166,7 @@ impl App {
             ));
             return;
         }
+        self.selection_generation.fetch_add(1, Ordering::Relaxed);
         if !self.proxy_node_tags.is_empty() && !self.proxy_node_tags.contains(&node.tag) {
             self.preferred_node = Some(node.tag.clone());
             self.pending_selection = None;
@@ -3093,11 +3211,21 @@ impl App {
         };
         let (target, label) = match pending {
             PendingSelection::Auto => {
-                let Some(target) = self.auto_selection_target() else {
+                let Some(mut target) = self.auto_selection_target() else {
                     let message = self.text().no_matching_nodes.to_string();
                     let _ = self.events_tx.send(AppEvent::Error(message));
                     return;
                 };
+                if target == "auto" && !self.runtime_has_auto {
+                    target = crate::selection::filter_node_tags(
+                        &self.nodes,
+                        &self.config.keywords_include,
+                        &self.config.keywords_exclude,
+                    )
+                    .first()
+                    .cloned()
+                    .unwrap_or(target);
+                }
                 (target, self.text().msg_auto_enabled.to_string())
             }
             PendingSelection::Node(tag) => {
@@ -3111,9 +3239,14 @@ impl App {
             }
         };
         let tx = self.events_tx.clone();
+        let generation = self.selection_generation.load(Ordering::Relaxed);
+        let token = self.selection_generation.clone();
         tokio::spawn(async move {
             let client = ClashClient::new(port, secret);
             for attempt in 0..20 {
+                if token.load(Ordering::Relaxed) != generation {
+                    return;
+                }
                 match client.select(&target).await {
                     Ok(()) => {
                         let _ = tx.send(AppEvent::Info(label));
@@ -3486,7 +3619,7 @@ impl App {
     }
 
     fn auto_selection_target(&self) -> Option<String> {
-        let filtered = crate::selection::filter_nodes(
+        let filtered = crate::selection::filter_node_tags(
             &self.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
@@ -3494,7 +3627,7 @@ impl App {
         if filtered.len() >= 2 {
             Some("auto".to_string())
         } else {
-            filtered.first().map(|node| node.tag.clone())
+            filtered.first().cloned()
         }
     }
 
@@ -3509,10 +3642,25 @@ impl App {
             self.notify(self.text().msg_auto_pending);
             return;
         }
+        self.selection_generation.fetch_add(1, Ordering::Relaxed);
         let Some(target) = self.auto_selection_target() else {
             self.last_error = Some(self.text().no_matching_nodes.to_string());
             return;
         };
+        // A running config built with fewer than two auto candidates has no
+        // urltest group. If a refresh added candidates, restart to regenerate
+        // the topology instead of sending a selector request for a missing
+        // "auto" child.
+        if target == "auto" && !self.runtime_has_auto {
+            self.preferred_node = None;
+            self.pending_selection = Some(PendingSelection::Auto);
+            if self.auto_restart_after_change() {
+                self.notify(self.text().msg_auto_restarting);
+            } else {
+                self.pending_selection = None;
+            }
+            return;
+        }
         let Some(client) = self
             .proxy
             .as_ref()
@@ -3623,6 +3771,7 @@ impl App {
                 task.abort();
             }
             self.status = ProxyStatus::Failed;
+            self.runtime_has_auto = false;
             self.stable_reset_at = None;
             self.proxy_node_tags.clear();
             self.proxy_node_names.clear();
@@ -3711,10 +3860,14 @@ impl App {
 
     fn node_display_name(&self, tag: &str) -> String {
         if let Some(node) = self.nodes.iter().find(|node| node.tag == tag) {
-            return node.name.clone();
+            return sanitize_display(&node.name);
         }
         if let Some(name) = self.proxy_node_names.get(tag) {
-            return format!("{name}{}", self.text().node_removed_suffix);
+            return format!(
+                "{}{}",
+                sanitize_display(name),
+                self.text().node_removed_suffix
+            );
         }
         self.text().node_unknown.to_string()
     }

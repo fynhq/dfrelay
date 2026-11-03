@@ -98,7 +98,7 @@ pub async fn refresh_all(
             let config = configs[next].clone();
             let old = previous
                 .iter()
-                .find(|runtime| runtime.config.id == config.id && runtime.config.url == config.url)
+                .find(|runtime| runtime.config.id == config.id)
                 .cloned();
             let options = options.clone();
             let index = next;

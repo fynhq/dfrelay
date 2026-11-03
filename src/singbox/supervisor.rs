@@ -1,6 +1,8 @@
+use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
-use std::process::Stdio;
-use std::time::Duration;
+use std::path::Path;
+use std::process::{Command as StdCommand, Stdio};
+use std::time::{Duration, Instant};
 
 use rand::RngCore;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -50,6 +52,72 @@ pub enum SupervisorError {
     Check(String),
     #[error("sing-box failed to become healthy: {0}")]
     Health(String),
+}
+
+/// Validate a proposed configuration without touching the running instance.
+///
+/// The check runs against a temporary file, so a failed proposal never replaces
+/// `runtime/config.json` and never stops the current sing-box process. Listener
+/// port conflicts cannot be validated while the old instance still owns the
+/// port; such failures are reported by `start` after the caller stops.
+pub fn preflight(
+    paths: &Paths,
+    config: &Config,
+    nodes: &[Node],
+    preferred: Option<&str>,
+) -> Result<(), SupervisorError> {
+    if nodes.is_empty() {
+        return Err(SupervisorError::NoNodes);
+    }
+    let binary = BinaryManager::new(paths.clone())
+        .locate()
+        .ok_or(SupervisorError::BinaryMissing)?;
+    let clash_port = allocate_clash_port(config.port)?;
+    let secret = random_secret();
+    let generated = config_gen::generate_with_selection(
+        config,
+        nodes,
+        config.enable_ipv6,
+        clash_port,
+        &secret,
+        &paths.cache_file(),
+        preferred,
+    )?;
+    fsutil::ensure_private_dir(&paths.runtime_dir)?;
+    let candidate = paths.runtime_config().with_extension("json.preflight");
+    let generated = serde_json::to_string_pretty(&generated)?;
+    fsutil::write_private_file(&candidate, generated.as_bytes())?;
+    let result = run_check_blocking(&binary, &candidate);
+    let _ = std::fs::remove_file(&candidate);
+    result
+}
+
+fn run_check_blocking(binary: &Path, config: &Path) -> Result<(), SupervisorError> {
+    let mut child = StdCommand::new(binary)
+        .args(["check", "-c"])
+        .arg(config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if status.success() {
+                return Ok(());
+            }
+            return Err(SupervisorError::Check(stderr.trim().to_string()));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(SupervisorError::Check("timeout".to_string()));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 pub async fn start(
@@ -105,6 +173,7 @@ pub async fn start(
     let check = Command::new(&binary)
         .args(["check", "-c"])
         .arg(&candidate)
+        .kill_on_drop(true)
         .output();
     let check = match tokio::time::timeout(Duration::from_secs(15), check).await {
         Err(_) => {
@@ -188,9 +257,14 @@ pub async fn start(
 }
 
 pub async fn stop(mut proxy: RunningProxy, logger: &Logger) {
+    // Avoid signalling a pid that has already been reaped; this also keeps the
+    // cached pid from racing with a reused process id.
+    let already_exited = matches!(proxy.child.try_wait(), Ok(Some(_)));
     #[cfg(unix)]
-    unsafe {
-        libc::kill(proxy.pid as i32, libc::SIGTERM);
+    if !already_exited && proxy.pid != 0 {
+        unsafe {
+            libc::kill(proxy.pid as i32, libc::SIGTERM);
+        }
     }
     let waited = tokio::time::timeout(Duration::from_secs(5), proxy.child.wait()).await;
     if waited.is_err() {
@@ -219,21 +293,30 @@ where
 }
 
 async fn wait_healthy(port: u16, child: &mut Child) -> Result<(), SupervisorError> {
-    for _ in 0..20 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
         if let Ok(Some(status)) = child.try_wait() {
             return Err(SupervisorError::Health(format!(
                 "exited early with {status}"
             )));
         }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
         let attempt = tokio::time::timeout(
-            Duration::from_millis(300),
+            remaining.min(Duration::from_millis(300)),
             tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)),
         )
         .await;
         if matches!(attempt, Ok(Ok(_))) {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(250))).await;
     }
     Err(SupervisorError::Health(
         "mixed port did not become reachable".to_string(),
@@ -286,5 +369,52 @@ mod tests {
         let port = allocate_clash_port(12000).unwrap();
         assert!(port > 0);
         assert_ne!(port, 12000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_checks_the_generated_config() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let paths = Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        };
+        paths.ensure().unwrap();
+        let binary = paths.binary();
+        fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let node = Node::new(
+            "node".to_string(),
+            "test".to_string(),
+            "shadowsocks".to_string(),
+            "example.com".to_string(),
+            443,
+            serde_json::json!({
+                "type": "shadowsocks",
+                "server": "example.com",
+                "server_port": 443,
+                "method": "aes-128-gcm",
+                "password": "secret"
+            }),
+        );
+        let config = Config::default();
+        assert!(preflight(&paths, &config, std::slice::from_ref(&node), None).is_ok());
+
+        fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            preflight(&paths, &config, &[node], None),
+            Err(SupervisorError::Check(_))
+        ));
     }
 }

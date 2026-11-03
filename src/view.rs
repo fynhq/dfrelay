@@ -72,6 +72,7 @@ pub struct View {
     pub local_ips: Vec<String>,
     pub proxy_ips: Vec<String>,
     pub binary_version: Option<String>,
+    pub binary_verified: Option<bool>,
     pub binary_status: BinaryStatus,
     pub latest_binary_version: Option<String>,
     pub previous_binary_available: bool,

@@ -57,6 +57,20 @@ pub fn open_private_file(path: &Path, append: bool) -> io::Result<File> {
     Ok(file)
 }
 
+/// Tighten an existing file to 0600. Existing directories are intentionally
+/// left unchanged; the product scope promises not to alter user directory
+/// permissions.
+pub fn enforce_private_file(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = open_private_file(path, false)?;
     file.write_all(bytes)?;

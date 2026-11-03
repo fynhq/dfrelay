@@ -53,6 +53,7 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
 
     let mut builder = Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::limited(5))
         .timeout(options.timeout)
         .user_agent(&options.user_agent);
     if let Host::Domain(domain) = host {

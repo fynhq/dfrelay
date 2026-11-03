@@ -10,6 +10,7 @@ mod selection;
 mod service;
 mod singbox;
 mod subscription;
+mod text;
 mod theme;
 mod ui;
 mod version;
@@ -62,6 +63,17 @@ enum Command {
     Status,
     /// Run the daemon in the foreground for systemd/launchd.
     Serve,
+    /// Manage the service marker left by a service-managed daemon.
+    Service {
+        #[command(subcommand)]
+        action: ServiceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand, Clone, Copy)]
+enum ServiceCommand {
+    /// Remove the service marker so `dfr start` can use an ad-hoc daemon.
+    Forget,
 }
 
 #[tokio::main]
@@ -69,6 +81,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover(cli.config.clone(), cli.data_dir.clone())?;
     paths.ensure()?;
+    if let Some(Command::Service { action }) = cli.command {
+        return service_command(&paths, action).await;
+    }
     let (config, warnings) = Config::load_or_default(&paths.config_file);
     let logger = Logger::new(
         &paths.logs_dir,
@@ -85,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Restart) => return restart_daemon(&cli, &paths).await,
         Some(Command::Status) => return print_status(&paths).await,
         Some(Command::Serve) => return serve(config, paths, logger).await,
+        Some(Command::Service { action }) => return service_command(&paths, action).await,
         None => {}
     }
 
@@ -332,6 +348,22 @@ async fn restart_daemon(cli: &Cli, paths: &Paths) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn service_command(paths: &Paths, action: ServiceCommand) -> anyhow::Result<()> {
+    match action {
+        ServiceCommand::Forget => {
+            if ipc::daemon_is_running(&paths.control_socket()).await {
+                bail!("stop the DFRelay daemon before forgetting the service marker");
+            }
+            if service::remove_marker(&paths.data_dir)? {
+                println!("Removed the DFRelay service marker.");
+            } else {
+                println!("No DFRelay service marker was found.");
+            }
+            Ok(())
+        }
+    }
+}
+
 fn service_marker(paths: &Paths) -> anyhow::Result<Option<ServiceMarkerState>> {
     service::load_marker(&paths.data_dir).map_err(anyhow::Error::msg)
 }
@@ -503,9 +535,21 @@ mod tests {
                 Command::Restart => "restart",
                 Command::Status => "status",
                 Command::Serve => "serve",
+                Command::Service { .. } => "service",
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn service_forget_subcommand_parses() {
+        let cli = parse(&["dfr", "service", "forget"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service {
+                action: ServiceCommand::Forget
+            })
+        ));
     }
 
     #[test]

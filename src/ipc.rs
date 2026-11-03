@@ -210,6 +210,20 @@ async fn write_client(
 }
 
 pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        // Keep a margin below the platform's sockaddr_un.sun_path limit.
+        if socket.as_os_str().as_bytes().len() >= 100 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "control socket path is too long for a Unix socket: {}",
+                    socket.display()
+                ),
+            ));
+        }
+    }
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -441,6 +455,15 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_control_socket_paths_that_are_too_long() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("x".repeat(120));
+        let err = bind_listener(&socket).await.unwrap_err();
+        assert!(err.to_string().contains("too long"), "{err}");
     }
 
     #[test]

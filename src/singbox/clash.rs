@@ -229,26 +229,27 @@ fn parse_connection(value: &Value) -> Option<ConnectionInfo> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        host: metadata
-            .get("host")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        destination_ip: metadata
-            .get("destinationIP")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        destination_port: metadata
-            .get("destinationPort")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        network: metadata
-            .get("network")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        host: crate::text::sanitize_display(
+            metadata.get("host").and_then(Value::as_str).unwrap_or(""),
+        ),
+        destination_ip: crate::text::sanitize_display(
+            metadata
+                .get("destinationIP")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ),
+        destination_port: crate::text::sanitize_display(
+            metadata
+                .get("destinationPort")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ),
+        network: crate::text::sanitize_display(
+            metadata
+                .get("network")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        ),
         upload: value.get("upload").and_then(Value::as_u64).unwrap_or(0),
         download: value.get("download").and_then(Value::as_u64).unwrap_or(0),
         duration_secs: connection_duration(value),

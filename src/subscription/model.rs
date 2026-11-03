@@ -30,8 +30,8 @@ impl Node {
         }
         Self {
             tag,
-            name,
-            source,
+            name: crate::text::sanitize_display(&name),
+            source: crate::text::sanitize_display(&source),
             protocol,
             server,
             port,

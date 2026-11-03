@@ -214,6 +214,16 @@ pub fn write_marker(data_dir: &Path, identity: Option<&ServiceIdentity>) -> std:
     fsutil::write_private_atomic(&data_dir.join(MARKER_FILE), &bytes)
 }
 
+/// Remove the service marker after the service has been removed. Returns
+/// `true` when a marker existed, `false` when there was nothing to remove.
+pub fn remove_marker(data_dir: &Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(data_dir.join(MARKER_FILE)) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 pub fn load_marker(data_dir: &Path) -> Result<Option<ServiceMarkerState>, String> {
     let path = data_dir.join(MARKER_FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -221,11 +231,15 @@ pub fn load_marker(data_dir: &Path) -> Result<Option<ServiceMarkerState>, String
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(format!("read {} failed: {err}", path.display())),
     };
-    let marker: ServiceMarker = serde_json::from_str(&text)
-        .map_err(|err| format!("parse {} failed: {err}", path.display()))?;
+    let marker: ServiceMarker = serde_json::from_str(&text).map_err(|err| {
+        format!(
+            "parse {} failed: {err}; stop the daemon and run `dfr service forget`, or remove the file manually",
+            path.display()
+        )
+    })?;
     if marker.version != MARKER_VERSION {
         return Err(format!(
-            "unsupported service marker version {} in {}",
+            "unsupported service marker version {} in {}; stop the daemon and run `dfr service forget`, or remove the file manually",
             marker.version,
             path.display()
         ));
@@ -791,6 +805,15 @@ mod tests {
     fn missing_marker_is_none() {
         let dir = TempDir::new().unwrap();
         assert_eq!(load_marker(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn marker_can_be_removed_for_ad_hoc_recovery() {
+        let dir = TempDir::new().unwrap();
+        write_marker(dir.path(), None).unwrap();
+        assert!(remove_marker(dir.path()).unwrap());
+        assert_eq!(load_marker(dir.path()).unwrap(), None);
+        assert!(!remove_marker(dir.path()).unwrap());
     }
 
     #[test]

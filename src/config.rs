@@ -60,6 +60,18 @@ impl Config {
             return (config, warnings);
         }
 
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => warnings
+                .push("config file is a symlink; its permissions were not changed".to_string()),
+            Ok(metadata) if metadata.is_file() => {
+                if let Err(err) = fsutil::enforce_private_file(path) {
+                    warnings.push(format!("cannot enforce 0600 on config file: {err}"));
+                }
+            }
+            Ok(_) => {}
+            Err(err) => warnings.push(format!("cannot inspect config file permissions: {err}")),
+        }
+
         let mut config = match fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<Self>(&text) {
                 Ok(config) => config,
@@ -281,9 +293,14 @@ impl Paths {
             home,
             ".local/share",
         );
-        let app_data = data_override.unwrap_or_else(|| data_home.join("dfrelay"));
-        let config_file =
-            config_override.unwrap_or_else(|| config_home.join("dfrelay/config.toml"));
+        let app_data = match data_override {
+            Some(path) => std::path::absolute(path)?,
+            None => data_home.join("dfrelay"),
+        };
+        let config_file = match config_override {
+            Some(path) => std::path::absolute(path)?,
+            None => config_home.join("dfrelay/config.toml"),
+        };
         Ok(Self {
             config_file,
             bin_dir: app_data.join("bin"),
@@ -365,7 +382,15 @@ fn backup_invalid_config(path: &Path) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_string_lossy();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let backup = path.with_file_name(format!("{file_name}.invalid-{stamp}"));
-    fs::rename(path, &backup).ok().map(|_| backup)
+    fs::rename(path, &backup).ok()?;
+    // A config symlink is backed up as a symlink; do not chmod its target.
+    if fs::symlink_metadata(&backup)
+        .map(|metadata| !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        let _ = fsutil::enforce_private_file(&backup);
+    }
+    Some(backup)
 }
 
 #[cfg(test)]
@@ -562,6 +587,54 @@ mod tests {
         assert_eq!(config.dns_servers, vec!["1.1.1.1", "8.8.8.8"]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn existing_config_and_invalid_backup_are_tightened_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "port = 12000\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let (_config, warnings) = Config::load_or_default(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::write(&path, "not toml [[[").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = Config::load_or_default(&path);
+        let backup = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|candidate| candidate.to_string_lossy().contains(".invalid-"))
+            .expect("invalid backup");
+        assert_eq!(
+            fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backing_up_a_symlinked_invalid_config_does_not_chmod_the_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("shared.toml");
+        fs::write(&target, "not toml [[[").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("config.toml");
+        symlink(&target, &link).unwrap();
+        let (_, warnings) = Config::load_or_default(&link);
+        assert!(warnings.iter().any(|warning| warning.contains("symlink")));
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
     #[test]
     fn paths_use_explicit_overrides() {
         let dir = TempDir::new().unwrap();
@@ -573,5 +646,16 @@ mod tests {
         assert_eq!(paths.inbox_dir, data.join("inbox"));
         paths.ensure().unwrap();
         assert!(paths.inbox_dir.is_dir());
+    }
+
+    #[test]
+    fn relative_overrides_are_made_absolute() {
+        let paths = Paths::discover(
+            Some(PathBuf::from("relative-config.toml")),
+            Some(PathBuf::from("relative-data")),
+        )
+        .unwrap();
+        assert!(paths.config_file.is_absolute());
+        assert!(paths.data_dir.is_absolute());
     }
 }
