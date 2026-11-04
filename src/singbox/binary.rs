@@ -751,7 +751,7 @@ fn extract_tar_gz(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         .entries()
         .map_err(|err| BinaryError::Archive(err.to_string()))?
     {
-        let mut entry = entry.map_err(|err| BinaryError::Archive(err.to_string()))?;
+        let entry = entry.map_err(|err| BinaryError::Archive(err.to_string()))?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
@@ -771,6 +771,11 @@ fn extract_tar_gz(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         }) {
             return Err(BinaryError::Archive("unsafe archive path".to_string()));
         }
+        if entry.size() > MAX_MANUAL_BYTES {
+            return Err(BinaryError::Archive(
+                "archive entry is too large".to_string(),
+            ));
+        }
         if found.is_some() {
             return Err(BinaryError::Archive(
                 "archive contains multiple sing-box files".to_string(),
@@ -778,8 +783,14 @@ fn extract_tar_gz(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         }
         let mut binary = Vec::new();
         entry
+            .take(MAX_MANUAL_BYTES + 1)
             .read_to_end(&mut binary)
             .map_err(|err| BinaryError::Archive(err.to_string()))?;
+        if binary.len() as u64 > MAX_MANUAL_BYTES {
+            return Err(BinaryError::Archive(
+                "archive entry is too large".to_string(),
+            ));
+        }
         found = Some(binary);
     }
     found.ok_or_else(|| BinaryError::Archive("sing-box not found in archive".to_string()))
@@ -791,7 +802,7 @@ fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         zip::ZipArchive::new(reader).map_err(|err| BinaryError::Archive(err.to_string()))?;
     let mut found: Option<Vec<u8>> = None;
     for index in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(index)
             .map_err(|err| BinaryError::Archive(err.to_string()))?;
         let Some(path) = entry.enclosed_name() else {
@@ -800,6 +811,12 @@ fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         if path.file_name().and_then(|name| name.to_str()) != Some("sing-box") {
             continue;
         }
+        if !entry.is_file() {
+            continue;
+        }
+        if entry.size() > MAX_MANUAL_BYTES {
+            return Err(BinaryError::Archive("zip entry is too large".to_string()));
+        }
         if found.is_some() {
             return Err(BinaryError::Archive(
                 "archive contains multiple sing-box files".to_string(),
@@ -807,8 +824,12 @@ fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         }
         let mut binary = Vec::new();
         entry
+            .take(MAX_MANUAL_BYTES + 1)
             .read_to_end(&mut binary)
             .map_err(|err| BinaryError::Archive(err.to_string()))?;
+        if binary.len() as u64 > MAX_MANUAL_BYTES {
+            return Err(BinaryError::Archive("zip entry is too large".to_string()));
+        }
         found = Some(binary);
     }
     found.ok_or_else(|| BinaryError::Archive("sing-box not found in archive".to_string()))
@@ -1020,6 +1041,76 @@ mod tests {
         assert!(extract_tar_gz(&tar_bytes).is_err());
     }
 
+    fn zip_bytes(entries: &[(&str, &[u8], Option<u32>)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            for (name, data, mode) in entries {
+                let mut options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+                if let Some(mode) = mode {
+                    options = options.external_attributes((*mode) << 16);
+                }
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn extracts_zip_sing_box() {
+        let bytes = zip_bytes(&[("sing-box-1.14.4/sing-box", b"#!/bin/sh\n", None)]);
+        assert_eq!(extract_zip(&bytes).unwrap(), b"#!/bin/sh\n");
+    }
+
+    #[test]
+    fn rejects_unsafe_zip_paths() {
+        let bytes = zip_bytes(&[("../sing-box", b"payload", None)]);
+        assert!(extract_zip(&bytes).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_zip_sing_box_entries() {
+        let bytes = zip_bytes(&[
+            ("a/sing-box", b"first", None),
+            ("b/sing-box", b"second", None),
+        ]);
+        assert!(extract_zip(&bytes).is_err());
+    }
+
+    #[test]
+    fn skips_zip_symlink_entries() {
+        let bytes = zip_bytes(&[("sing-box", b"/etc/passwd", Some(0o120777))]);
+        assert!(extract_zip(&bytes).is_err());
+    }
+
+    #[tokio::test]
+    async fn installs_sing_box_from_zip_inbox() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        };
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+        let script = fake_binary_script("1.14.4");
+        let bytes = zip_bytes(&[("sing-box", script.as_bytes(), None)]);
+        let archive = paths.inbox_dir.join("sing-box-1.14.4.zip");
+        fs::write(&archive, bytes).unwrap();
+
+        let metadata = manager.install_from_inbox(&archive, &logger).await.unwrap();
+        assert_eq!(metadata.version, "1.14.4");
+        assert_eq!(manager.version(&paths.binary()).await.unwrap(), "1.14.4");
+    }
+
     #[test]
     fn upgrading_keeps_only_the_previous_binary_for_rollback() {
         let dir = TempDir::new().unwrap();
@@ -1051,11 +1142,14 @@ mod tests {
         assert_eq!(fs::read(paths.binary()).unwrap(), b"v3");
     }
 
-    fn write_fake_binary(path: &Path, version: &str) {
-        let script = format!(
+    fn fake_binary_script(version: &str) -> String {
+        format!(
             "#!/bin/sh\nif [ \"$1\" = version ]; then echo \"sing-box version {version}\"; exit 0; fi\nexit 0\n"
-        );
-        fs::write(path, script).unwrap();
+        )
+    }
+
+    fn write_fake_binary(path: &Path, version: &str) {
+        fs::write(path, fake_binary_script(version)).unwrap();
         set_executable(path).unwrap();
     }
 

@@ -61,7 +61,11 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         loop {
             if let Some(current) = &view {
                 if last_page != Some(current.page) {
-                    terminal.clear()?;
+                    // ratatui 0.30 `clear()` first queries the cursor position, which
+                    // fails on terminals that do not answer DSR. Resizing to the same
+                    // fullscreen area performs the same clear and buffer reset without
+                    // that query.
+                    terminal.resize(terminal.size()?.into())?;
                     last_page = Some(current.page);
                     animation_start = Instant::now();
                 }
