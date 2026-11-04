@@ -431,7 +431,7 @@ static ZH: Text = Text {
             ],
         },
         HelpSection {
-            title: "安装",
+            title: "设置/sing-box",
             lines: &[
                 "d  下载/更新最新版",
                 "b  切换上一版（两次确认）",
@@ -714,7 +714,7 @@ static EN: Text = Text {
             ],
         },
         HelpSection {
-            title: "Setup",
+            title: "Settings/sing-box",
             lines: &[
                 "d  download/update latest",
                 "b  switch previous (twice)",

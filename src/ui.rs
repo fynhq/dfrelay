@@ -3826,7 +3826,17 @@ mod tests {
         assert!(compact.contains("节点"), "{compact}");
         assert!(compact.contains("订阅"), "{compact}");
         assert!(compact.contains("日志"), "{compact}");
-        assert!(compact.contains("设置"), "{compact}");
+        let help: String = help_content_lines(&app.view(), 100)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(help.contains("设置/sing-box"), "{help}");
+        assert!(Lang::En
+            .text()
+            .help_sections
+            .iter()
+            .any(|section| section.title == "Settings/sing-box"));
     }
 
     #[tokio::test]
