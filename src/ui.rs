@@ -337,7 +337,7 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
                 .map(|delay| format!("{delay} ms"))
                 .unwrap_or_else(|| "—".to_string())
         };
-        Row::new(vec![
+        let row = Row::new(vec![
             Cell::from(format!("{} {}", if active { "◉" } else { " " }, node.name)),
             Cell::from(marquee_text(&node.source, NODE_SOURCE_WIDTH as usize, tick)),
             Cell::from(node.protocol.clone()),
@@ -347,7 +347,12 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
                 "—"
             }),
             Cell::from(latency),
-        ])
+        ]);
+        if active {
+            row.style(Style::default().fg(Color::Cyan))
+        } else {
+            row
+        }
     });
     let table = Table::new(rows, NODE_COLUMNS)
         .header(header)
@@ -1602,6 +1607,8 @@ fn truncate_to_width(text: &str, max: usize) -> String {
     out
 }
 
+// Widest dashboard label is "Subscriptions" (13 columns); keep at least two
+// blank columns between the label and its value in every language.
 const DASHBOARD_LABEL_WIDTH: usize = 15;
 
 fn key_value_wrapped(label: &str, value: String, width: usize) -> Vec<Line<'static>> {
@@ -1765,13 +1772,36 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_labels_are_padded_to_fifteen_columns() {
+    fn dashboard_labels_keep_two_spaces_before_values() {
         let line = key_value_wrapped("Listen", "value".to_string(), 80)
             .into_iter()
             .next()
             .expect("line");
-        assert_eq!(UnicodeWidthStr::width(line.spans[0].content.as_ref()), 15);
-        assert_eq!(DASHBOARD_LABEL_WIDTH, 15);
+        assert_eq!(
+            UnicodeWidthStr::width(line.spans[0].content.as_ref()),
+            DASHBOARD_LABEL_WIDTH
+        );
+        for lang in [Lang::Zh, Lang::En] {
+            let text = lang.text();
+            for label in [
+                text.listen,
+                text.selection_mode,
+                text.current_node,
+                text.latency,
+                text.local_ip,
+                text.proxy_ip,
+                text.version,
+                text.binary_version,
+                text.subscription_summary,
+                text.last_error,
+            ] {
+                let padding = DASHBOARD_LABEL_WIDTH.saturating_sub(UnicodeWidthStr::width(label));
+                assert!(
+                    padding >= 2,
+                    "{lang:?}: {label} leaves {padding} blank columns"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -3550,6 +3580,57 @@ mod tests {
             .position(|cell| cell == "N")
             .expect("name label");
         assert_eq!(label, dot + 2, "header label aligns with names");
+    }
+
+    #[tokio::test]
+    async fn nodes_active_row_uses_the_tab_accent_without_bold() {
+        let (mut app, _dir) = test_app(Lang::En).await;
+        app.page = Page::Nodes;
+        app.nodes = vec![
+            node("n1", "hk-01"),
+            node("n2", "jp-02"),
+            node("n3", "sg-03"),
+        ];
+        app.metrics.selection.selected = Some("n1".to_string());
+        // Keep the cursor off the active row so its own style is visible.
+        app.selected = 2;
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let view = app.view();
+        terminal.draw(|frame| render(frame, &view)).unwrap();
+        let cells = terminal.backend().buffer().content.clone();
+        let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
+
+        let active = rows
+            .iter()
+            .find(|row| row.iter().any(|cell| cell.symbol() == "◉"))
+            .expect("active node row");
+        let dot = active
+            .iter()
+            .position(|cell| cell.symbol() == "◉")
+            .expect("active dot");
+        for cell in active[dot..].iter().take_while(|cell| cell.symbol() != "│") {
+            if cell.symbol() != " " {
+                assert_eq!(cell.fg, Color::Cyan, "{cell:?}");
+                assert!(!cell.modifier.contains(Modifier::BOLD), "{cell:?}");
+            }
+        }
+
+        let inactive = rows
+            .iter()
+            .find(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("jp-02")
+            })
+            .expect("inactive node row");
+        let name = inactive
+            .iter()
+            .position(|cell| cell.symbol() == "j")
+            .expect("inactive name");
+        assert_ne!(inactive[name].fg, Color::Cyan);
     }
 
     #[tokio::test]

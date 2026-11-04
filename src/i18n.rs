@@ -542,7 +542,7 @@ static EN: Text = Text {
 
     dashboard_title: "Dashboard",
     listen: "Listen",
-    selection_mode: "Selection mode",
+    selection_mode: "Selection",
     selection_mode_auto: "Auto",
     selection_mode_manual: "Manual",
     current_node: "Current node",
