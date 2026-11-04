@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -260,10 +260,18 @@ fn level_token(token: &str) -> Option<LogLevel> {
 struct Inner {
     dir: PathBuf,
     date: String,
-    file: Option<File>,
+    file: Option<BufWriter<File>>,
     lines: VecDeque<LogLine>,
     app_level: LogLevel,
     singbox_level: LogLevel,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.flush();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -314,8 +322,13 @@ impl Logger {
         let now = Local::now();
         let date = now.format("%Y-%m-%d").to_string();
         if date != inner.date || inner.file.is_none() {
+            if let Some(file) = inner.file.as_mut() {
+                let _ = file.flush();
+            }
             inner.date = date;
-            inner.file = open_log_file(&inner.dir, &inner.date).ok();
+            inner.file = open_log_file(&inner.dir, &inner.date)
+                .map(BufWriter::new)
+                .ok();
             drop(inner);
             self.cleanup_old();
             inner = match self.inner.lock() {
@@ -341,7 +354,9 @@ impl Logger {
                 line.component.label(),
                 line.message
             );
-            let _ = file.flush();
+            if level <= LogLevel::Warn {
+                let _ = file.flush();
+            }
         }
         inner.lines.push_back(line);
         while inner.lines.len() > MAX_BUFFER_LINES {
@@ -357,6 +372,7 @@ impl Logger {
         self.log(Component::Singbox, level, message);
     }
 
+    #[cfg(test)]
     pub fn recent(&self, limit: usize) -> Vec<LogLine> {
         let inner = match self.inner.lock() {
             Ok(guard) => guard,
@@ -364,6 +380,45 @@ impl Logger {
         };
         let skip = inner.lines.len().saturating_sub(limit);
         inner.lines.iter().skip(skip).cloned().collect()
+    }
+
+    pub fn recent_filtered(&self, limit: usize, filter: LogLevel) -> Vec<LogLine> {
+        let inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let skip = inner.lines.len().saturating_sub(limit);
+        inner
+            .lines
+            .iter()
+            .skip(skip)
+            .filter(|line| line.level <= filter)
+            .cloned()
+            .collect()
+    }
+
+    pub fn count_recent(&self, limit: usize, filter: LogLevel) -> usize {
+        let inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let skip = inner.lines.len().saturating_sub(limit);
+        inner
+            .lines
+            .iter()
+            .skip(skip)
+            .filter(|line| line.level <= filter)
+            .count()
+    }
+
+    pub fn flush(&self) {
+        let mut inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(file) = inner.file.as_mut() {
+            let _ = file.flush();
+        }
     }
 
     pub fn clear_view(&self) {
@@ -471,6 +526,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
         logger.app(LogLevel::Info, "node \x1b]0;pwned\x07\nnext");
+        logger.flush();
         let recent = logger.recent(1);
         assert_eq!(recent[0].message, "node ]0;pwned next");
         let file = fs::read_to_string(logger.current_file()).unwrap();
@@ -491,6 +547,9 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].message, "shown");
         assert_eq!(lines[1].message, "shown error");
+        assert_eq!(logger.count_recent(10, LogLevel::Info), 2);
+        assert_eq!(logger.recent_filtered(10, LogLevel::Info).len(), 2);
+        assert_eq!(logger.count_recent(10, LogLevel::Warn), 1);
     }
 
     #[test]
