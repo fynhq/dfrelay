@@ -327,7 +327,9 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     let active_tag = active_node_tag(view);
-    let rows = view.nodes.iter().map(|node| {
+    let selected = view.selected.min(view.nodes.len().saturating_sub(1));
+    let (start, end) = visible_row_range(view.nodes.len(), selected, area.height.saturating_sub(3));
+    let rows = view.nodes[start..end].iter().map(|node| {
         let active = active_tag == Some(node.tag.as_str());
         let latency = if view.delay_testing.contains(node.tag.as_str()) {
             "…".to_string()
@@ -361,13 +363,27 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
         .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .highlight_symbol("▸ ");
     let mut state = TableState::default();
-    state.select(Some(view.selected.min(view.nodes.len().saturating_sub(1))));
+    if start < end {
+        state.select(Some(selected - start));
+    }
     frame.render_stateful_widget(table, area, &mut state);
 }
 
 /// Tables keep two blank cells between columns; the block padding leaves one
 /// blank cell after the last column.
 const TABLE_COLUMN_SPACING: u16 = 2;
+
+/// Rows visible below the table title/header; only this window is built each
+/// frame so large node/connection lists do not allocate every row.
+fn visible_row_range(total: usize, selected: usize, height: u16) -> (usize, usize) {
+    if total == 0 || height == 0 {
+        return (0, 0);
+    }
+    let height = usize::from(height).min(total);
+    let selected = selected.min(total - 1);
+    let start = (selected + 1).saturating_sub(height).min(total - height);
+    (start, start + height)
+}
 
 const NODE_SOURCE_WIDTH: u16 = 14;
 
@@ -418,7 +434,15 @@ fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::R
         Cell::from(text.subscriptions_updated),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
-    let rows = view.subscriptions.iter().map(|subscription| {
+    let selected = view
+        .selected
+        .min(view.subscriptions.len().saturating_sub(1));
+    let (start, end) = visible_row_range(
+        view.subscriptions.len(),
+        selected,
+        area.height.saturating_sub(3),
+    );
+    let rows = view.subscriptions[start..end].iter().map(|subscription| {
         let mut markers = Vec::new();
         if !subscription.enabled {
             markers.push(text.common_off.to_string());
@@ -466,10 +490,9 @@ fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::R
         .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .highlight_symbol("▸ ");
     let mut state = TableState::default();
-    state.select(Some(
-        view.selected
-            .min(view.subscriptions.len().saturating_sub(1)),
-    ));
+    if start < end {
+        state.select(Some(selected - start));
+    }
     frame.render_stateful_widget(table, area, &mut state);
 }
 
@@ -577,21 +600,28 @@ fn render_connections(frame: &mut Frame, view: &View, area: ratatui::layout::Rec
         Cell::from(text.connections_duration),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
-    let rows = view.metrics.connections.iter().map(|connection| {
-        Row::new(vec![
-            Cell::from(connection_target(connection)),
-            Cell::from(connection.network.clone()),
-            Cell::from(format!(
-                "↓ {} ↑ {}",
-                format_bytes(connection.download),
-                format_bytes(connection.upload)
-            )),
-            Cell::from(format_duration(connection.duration_secs)),
-        ])
-    });
     let selected = view
         .selected
         .min(view.metrics.connections.len().saturating_sub(1));
+    let (start, end) = visible_row_range(
+        view.metrics.connections.len(),
+        selected,
+        area.height.saturating_sub(3),
+    );
+    let rows = view.metrics.connections[start..end]
+        .iter()
+        .map(|connection| {
+            Row::new(vec![
+                Cell::from(connection_target(connection)),
+                Cell::from(connection.network.clone()),
+                Cell::from(format!(
+                    "↓ {} ↑ {}",
+                    format_bytes(connection.download),
+                    format_bytes(connection.upload)
+                )),
+                Cell::from(format_duration(connection.duration_secs)),
+            ])
+        });
     let table = Table::new(rows, CONNECTION_COLUMNS)
         .header(header)
         .block(block)
@@ -599,7 +629,9 @@ fn render_connections(frame: &mut Frame, view: &View, area: ratatui::layout::Rec
         .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .highlight_symbol("▸ ");
     let mut state = TableState::default();
-    state.select(Some(selected));
+    if start < end {
+        state.select(Some(selected - start));
+    }
     frame.render_stateful_widget(table, area, &mut state);
 }
 
@@ -653,8 +685,13 @@ fn render_logs(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pale
         follow
     );
     let block = titled_block(title);
-    let lines: Vec<ListItem> = view
-        .logs
+    if view.logs.is_empty() {
+        frame.render_widget(Paragraph::new(text.logs_empty).block(block), area);
+        return;
+    }
+    let selected = view.selected.min(view.logs.len().saturating_sub(1));
+    let (start, end) = visible_row_range(view.logs.len(), selected, area.height.saturating_sub(2));
+    let lines: Vec<ListItem> = view.logs[start..end]
         .iter()
         .map(|line| {
             ListItem::new(Line::from(Span::styled(
@@ -663,19 +700,17 @@ fn render_logs(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pale
             )))
         })
         .collect();
-    if lines.is_empty() {
-        frame.render_widget(Paragraph::new(text.logs_empty).block(block), area);
-    } else {
-        let mut state = ListState::default();
-        state.select(Some(view.selected.min(lines.len().saturating_sub(1))));
-        frame.render_stateful_widget(
-            List::new(lines)
-                .block(block)
-                .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan)),
-            area,
-            &mut state,
-        );
+    let mut state = ListState::default();
+    if start < end {
+        state.select(Some(selected - start));
     }
+    frame.render_stateful_widget(
+        List::new(lines)
+            .block(block)
+            .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan)),
+        area,
+        &mut state,
+    );
 }
 
 fn render_settings(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, palette: Palette) {
@@ -2905,6 +2940,16 @@ mod tests {
         app.selected = 29;
         let content = rendered(&app, 30);
         assert!(content.contains("cand-29"), "{content}");
+    }
+
+    #[test]
+    fn visible_row_range_follows_the_selection() {
+        assert_eq!(visible_row_range(250, 249, 27), (223, 250));
+        assert_eq!(visible_row_range(250, 0, 27), (0, 27));
+        assert_eq!(visible_row_range(2, 1, 27), (0, 2));
+        assert_eq!(visible_row_range(0, 0, 27), (0, 0));
+        assert_eq!(visible_row_range(10, 0, 0), (0, 0));
+        assert_eq!(visible_row_range(10, 99, 4), (6, 10));
     }
 
     #[tokio::test]

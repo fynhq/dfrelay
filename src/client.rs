@@ -28,6 +28,11 @@ use crate::ipc::{ClientMsg, InputCode, ServerMsg};
 use crate::theme::Palette;
 use crate::view::View;
 
+enum InputEvent {
+    Key(ClientMsg),
+    Resize,
+}
+
 pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
     let stream = UnixStream::connect(&socket)
         .await
@@ -50,61 +55,69 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         spawn_input(in_tx);
         let mut view: Option<View> = None;
         let mut parse_errors = 0usize;
-        let mut ticker = tokio::time::interval(Duration::from_millis(100));
         let mut note: Option<&'static str> = None;
         let mut last_help_max: Option<u16> = None;
         let mut last_dashboard_max: Option<u16> = None;
         let mut last_log_detail_max: Option<u16> = None;
         let mut last_page: Option<Page> = None;
         let mut animation_start = Instant::now();
+        let mut needs_draw = true;
+        let mut animate = false;
 
         loop {
-            if let Some(current) = &view {
-                if last_page != Some(current.page) {
-                    // ratatui 0.30 `clear()` first queries the cursor position, which
-                    // fails on terminals that do not answer DSR. Resizing to the same
-                    // fullscreen area performs the same clear and buffer reset without
-                    // that query.
-                    terminal.resize(terminal.size()?.into())?;
-                    last_page = Some(current.page);
-                    animation_start = Instant::now();
-                }
-            }
-            let tick = (animation_start.elapsed().as_millis() / 100) as u64;
-            terminal.draw(|frame| match &view {
-                Some(view) => crate::ui::render_at(frame, view, tick, palette),
-                None => render_connecting(frame, lang),
-            })?;
-            if let Some(current) = &view {
-                let size = terminal.size()?;
-                let max_scroll = crate::ui::help_max_scroll(current, size.width, size.height);
-                let max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
-                if last_help_max != Some(max_scroll) {
-                    let _ = out_tx.send(ClientMsg::HelpViewport { max_scroll });
-                    last_help_max = Some(max_scroll);
-                }
-                if current.page == Page::Dashboard {
-                    let max_scroll =
-                        crate::ui::dashboard_max_scroll(current, size.width, size.height);
-                    let max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
-                    if last_dashboard_max != Some(max_scroll) {
-                        let _ = out_tx.send(ClientMsg::DashboardViewport { max_scroll });
-                        last_dashboard_max = Some(max_scroll);
+            if needs_draw {
+                if let Some(current) = &view {
+                    if last_page != Some(current.page) {
+                        // ratatui 0.30 `clear()` first queries the cursor position, which
+                        // fails on terminals that do not answer DSR. Resizing to the same
+                        // fullscreen area performs the same clear and buffer reset without
+                        // that query.
+                        terminal.resize(terminal.size()?.into())?;
+                        last_page = Some(current.page);
+                        animation_start = Instant::now();
                     }
-                } else {
-                    last_dashboard_max = None;
                 }
-                if current.log_detail().is_some() {
-                    let max_scroll =
-                        crate::ui::log_detail_max_scroll(current, size.width, size.height, palette);
+                let tick = (animation_start.elapsed().as_millis() / 100) as u64;
+                terminal.draw(|frame| match &view {
+                    Some(view) => crate::ui::render_at(frame, view, tick, palette),
+                    None => render_connecting(frame, lang),
+                })?;
+                if let Some(current) = &view {
+                    let size = terminal.size()?;
+                    let max_scroll = crate::ui::help_max_scroll(current, size.width, size.height);
                     let max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
-                    if last_log_detail_max != Some(max_scroll) {
-                        let _ = out_tx.send(ClientMsg::LogDetailViewport { max_scroll });
-                        last_log_detail_max = Some(max_scroll);
+                    if last_help_max != Some(max_scroll) {
+                        let _ = out_tx.send(ClientMsg::HelpViewport { max_scroll });
+                        last_help_max = Some(max_scroll);
                     }
-                } else {
-                    last_log_detail_max = None;
+                    if current.page == Page::Dashboard {
+                        let max_scroll =
+                            crate::ui::dashboard_max_scroll(current, size.width, size.height);
+                        let max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
+                        if last_dashboard_max != Some(max_scroll) {
+                            let _ = out_tx.send(ClientMsg::DashboardViewport { max_scroll });
+                            last_dashboard_max = Some(max_scroll);
+                        }
+                    } else {
+                        last_dashboard_max = None;
+                    }
+                    if current.log_detail().is_some() {
+                        let max_scroll = crate::ui::log_detail_max_scroll(
+                            current,
+                            size.width,
+                            size.height,
+                            palette,
+                        );
+                        let max_scroll = u16::try_from(max_scroll).unwrap_or(u16::MAX);
+                        if last_log_detail_max != Some(max_scroll) {
+                            let _ = out_tx.send(ClientMsg::LogDetailViewport { max_scroll });
+                            last_log_detail_max = Some(max_scroll);
+                        }
+                    } else {
+                        last_log_detail_max = None;
+                    }
                 }
+                needs_draw = false;
             }
             tokio::select! {
                 line = reader.next_line() => {
@@ -114,7 +127,9 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                                 if frame.quitting {
                                     break;
                                 }
+                                animate = matches!(frame.page, Page::Nodes | Page::Subscriptions);
                                 view = Some(*frame);
+                                needs_draw = true;
                             }
                             Ok(ServerMsg::Busy) => {
                                 note = Some(lang.text().msg_attach_busy);
@@ -150,9 +165,16 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                     }
                 }
                 Some(message) = in_rx.recv() => {
-                    let _ = out_tx.send(message);
+                    match message {
+                        InputEvent::Key(message) => {
+                            let _ = out_tx.send(message);
+                        }
+                        InputEvent::Resize => needs_draw = true,
+                    }
                 }
-                _ = ticker.tick() => {}
+                _ = tokio::time::sleep(Duration::from_millis(100)), if animate => {
+                    needs_draw = true;
+                }
             }
         }
         note
@@ -184,26 +206,28 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn spawn_input(tx: mpsc::UnboundedSender<ClientMsg>) {
+fn spawn_input(tx: mpsc::UnboundedSender<InputEvent>) {
     std::thread::spawn(move || loop {
-        match event::poll(Duration::from_millis(100)) {
-            Ok(true) => match event::read() {
-                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                    let Some(code) = InputCode::from_key_code(key.code) else {
-                        continue;
-                    };
-                    let message = ClientMsg::Key {
-                        code,
-                        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
-                        alt: key.modifiers.contains(KeyModifiers::ALT),
-                    };
-                    if tx.send(message).is_err() {
-                        break;
-                    }
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                let Some(code) = InputCode::from_key_code(key.code) else {
+                    continue;
+                };
+                let message = ClientMsg::Key {
+                    code,
+                    ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+                    alt: key.modifiers.contains(KeyModifiers::ALT),
+                };
+                if tx.send(InputEvent::Key(message)).is_err() {
+                    break;
                 }
-                _ => {}
-            },
-            Ok(false) => {}
+            }
+            Ok(Event::Resize(_, _)) => {
+                if tx.send(InputEvent::Resize).is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
             Err(_) => break,
         }
     });
