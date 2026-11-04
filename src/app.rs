@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::config::{Config, Paths, SubscriptionConfig};
@@ -18,7 +19,7 @@ use crate::logging::{LogLevel, LogLine, LogTimestamp, Logger};
 use crate::netinfo;
 use crate::service::ServiceIdentity;
 use crate::singbox::binary::{is_newer_version, BinaryManager, BinaryMetadata, InboxCandidate};
-use crate::singbox::clash::{ClashClient, ClashError, MetricsSnapshot};
+use crate::singbox::clash::{ClashClient, ClashError, MetricsSnapshot, ProxySelection};
 use crate::singbox::supervisor::{self, RunningProxy};
 use crate::subscription::model::Node;
 use crate::subscription::{self, merge_nodes, FetchOptions, SubscriptionRuntime};
@@ -37,6 +38,9 @@ const HEALTH_RECOVERY_COOLDOWN: Duration = Duration::from_secs(120);
 const HEALTH_NO_NODE_PAUSE: Duration = Duration::from_secs(300);
 const HEALTH_REFRESH_COOLDOWN: Duration = Duration::from_secs(600);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
+const IDLE_METRICS_INTERVAL: Duration = Duration::from_secs(3);
+const PROXIES_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub const MAX_LIST_ROWS: usize = 200;
 pub const TOAST_TTL: Duration = Duration::from_secs(3);
 pub const VIEW_QUEUE_LIMIT: usize = 8;
@@ -542,6 +546,7 @@ pub enum AppEvent {
         delay: Option<u64>,
     },
     NodeSelected(String),
+    SelectionApplied,
     NodeDelaySweepDone,
     DashboardViewport(usize),
     HelpViewport(usize),
@@ -644,6 +649,9 @@ pub struct App {
     last_recovery_refresh: Option<Instant>,
     pub started_at: Option<Instant>,
     pub metrics_task: Option<JoinHandle<()>>,
+    viewer_active: Arc<AtomicBool>,
+    metrics_wake: Arc<Notify>,
+    proxies_refresh: Arc<AtomicBool>,
     pub refreshing_subscriptions: bool,
     subscription_seq: u64,
     subscription_refresh_seq: HashMap<String, u64>,
@@ -866,6 +874,9 @@ impl App {
             last_recovery_refresh: None,
             started_at: None,
             metrics_task: None,
+            viewer_active: Arc::new(AtomicBool::new(false)),
+            metrics_wake: Arc::new(Notify::new()),
+            proxies_refresh: Arc::new(AtomicBool::new(false)),
             refreshing_subscriptions: false,
             subscription_seq: 0,
             subscription_refresh_seq: HashMap::new(),
@@ -1060,18 +1071,31 @@ impl App {
         spawn_signal_handler(self.events_tx.clone());
         spawn_auto_start(socket_path.clone(), self.logger.clone());
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
+        let mut last_publish = Instant::now() - PUBLISH_INTERVAL;
         loop {
+            let mut publish = false;
             tokio::select! {
                 maybe_event = self.events_rx.recv() => {
                     if let Some(event) = maybe_event {
                         self.handle_event(event).await;
+                        // Coalesce bursts (delay sweeps, key repeats) into one snapshot.
+                        for _ in 0..32 {
+                            let Ok(event) = self.events_rx.try_recv() else {
+                                break;
+                            };
+                            self.handle_event(event).await;
+                        }
+                        publish = true;
                     }
                 }
                 _ = ticker.tick() => {
-                    self.on_tick().await;
+                    publish = self.on_tick().await;
                 }
             }
-            self.publish_view();
+            if publish || last_publish.elapsed() >= PUBLISH_INTERVAL {
+                self.publish_view();
+                last_publish = Instant::now();
+            }
             if self.should_quit {
                 break;
             }
@@ -1514,6 +1538,7 @@ impl App {
                     self.preferred_node = Some(tag);
                 }
             }
+            AppEvent::SelectionApplied => self.request_metrics_refresh(),
             AppEvent::NodeDelaySweepDone => {
                 self.delay_sweep_running = false;
                 self.delay_testing.clear();
@@ -1593,12 +1618,22 @@ impl App {
                 } else {
                     self.clients.insert(id, ClientHandle { viewer, tx });
                     if viewer {
+                        self.viewer_active.store(true, Ordering::Relaxed);
+                        self.metrics_wake.notify_one();
+                        if self.page == Page::Logs && self.log_follow {
+                            self.selected = self.log_count().saturating_sub(1);
+                        }
+                        self.sort_nodes_if_visible();
                         self.broadcast_view();
                     }
                 }
             }
             AppEvent::ClientDetached(id) => {
-                self.clients.remove(&id);
+                if let Some(client) = self.clients.remove(&id) {
+                    if client.viewer {
+                        self.viewer_active.store(false, Ordering::Relaxed);
+                    }
+                }
             }
             AppEvent::StartProxyRequest { client_id } => {
                 self.handle_start_request(client_id);
@@ -1702,8 +1737,17 @@ impl App {
         }
     }
 
+    fn has_viewer(&self) -> bool {
+        self.viewer_active.load(Ordering::Relaxed)
+    }
+
+    fn request_metrics_refresh(&self) {
+        self.proxies_refresh.store(true, Ordering::Relaxed);
+        self.metrics_wake.notify_one();
+    }
+
     fn broadcast_view(&self) {
-        if !self.clients.values().any(|client| client.viewer) {
+        if !self.has_viewer() {
             return;
         }
         let view = Box::new(self.view());
@@ -1713,7 +1757,7 @@ impl App {
     }
 
     fn publish_view(&mut self) {
-        if self.clients.values().any(|client| client.viewer) {
+        if self.has_viewer() {
             self.broadcast_view();
         }
     }
@@ -2104,7 +2148,7 @@ impl App {
             Page::Nodes => self.nodes.len(),
             Page::Connections => self.metrics.connections.len(),
             Page::Subscriptions => self.subscriptions.len(),
-            Page::Logs => self.log_lines().len(),
+            Page::Logs => self.log_count(),
             Page::Settings => settings_items(self.config.allow_lan).len(),
             _ => 0,
         }
@@ -2119,7 +2163,7 @@ impl App {
     }
 
     fn sort_nodes_if_visible(&mut self) {
-        if self.page == Page::Nodes {
+        if self.has_viewer() && self.page == Page::Nodes {
             self.sort_nodes_preserving_selection();
         }
     }
@@ -2145,11 +2189,11 @@ impl App {
     }
 
     pub fn log_lines(&self) -> Vec<LogLine> {
-        self.logger
-            .recent(500)
-            .into_iter()
-            .filter(|line| line.level <= self.log_filter)
-            .collect()
+        self.logger.recent_filtered(500, self.log_filter)
+    }
+
+    fn log_count(&self) -> usize {
+        self.logger.count_recent(500, self.log_filter)
     }
 
     fn toggle_log_follow(&mut self) {
@@ -2983,23 +3027,61 @@ impl App {
             format!("{}: {}", self.text().msg_clash_api, client.base_url()),
         );
         let clash_api_label = self.text().msg_clash_api;
+        let viewer_active = self.viewer_active.clone();
+        let metrics_wake = self.metrics_wake.clone();
+        let proxies_refresh = self.proxies_refresh.clone();
         self.metrics_task = Some(tokio::spawn(async move {
-            let mut last_error: Option<String> = None;
+            let mut selection = ProxySelection::default();
+            let mut node_delays = HashMap::new();
+            let mut next_proxies = Instant::now();
+            let mut last_connection_error: Option<String> = None;
+            let mut last_proxy_error: Option<String> = None;
             loop {
-                match client.metrics().await {
-                    Ok(metrics) => {
-                        last_error = None;
-                        let _ = tx.send(AppEvent::Metrics(metrics));
+                let connections = match client.connections().await {
+                    Ok(snapshot) => {
+                        last_connection_error = None;
+                        Some(snapshot)
                     }
                     Err(err) => {
-                        let message = format!("{clash_api_label}: {err}");
-                        if last_error.as_deref() != Some(message.as_str()) {
-                            last_error = Some(message.clone());
-                            let _ = tx.send(AppEvent::Info(message));
+                        report_clash_error(&tx, clash_api_label, &mut last_connection_error, err);
+                        None
+                    }
+                };
+                if Instant::now() >= next_proxies || proxies_refresh.swap(false, Ordering::Relaxed)
+                {
+                    match client.proxies().await {
+                        Ok(snapshot) => {
+                            selection = snapshot.selection;
+                            node_delays = snapshot.node_delays;
+                            last_proxy_error = None;
+                        }
+                        Err(err) => {
+                            report_clash_error(&tx, clash_api_label, &mut last_proxy_error, err);
                         }
                     }
+                    next_proxies = Instant::now() + PROXIES_REFRESH_INTERVAL;
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                let mut interval = Duration::from_secs(1);
+                if let Some(connections) = connections {
+                    let idle = connections.connections.is_empty();
+                    let metrics = MetricsSnapshot {
+                        upload_total: connections.upload_total,
+                        download_total: connections.download_total,
+                        connections: connections.connections,
+                        selection: selection.clone(),
+                        node_delays: node_delays.clone(),
+                    };
+                    if tx.send(AppEvent::Metrics(metrics)).is_err() {
+                        break;
+                    }
+                    if idle && !viewer_active.load(Ordering::Relaxed) {
+                        interval = IDLE_METRICS_INTERVAL;
+                    }
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = metrics_wake.notified() => {}
+                }
             }
         }));
     }
@@ -3190,6 +3272,7 @@ impl App {
         let name = node.name.clone();
         self.pending_selection = None;
         self.invalidate_health_tasks();
+        self.request_metrics_refresh();
         self.notify(format!("{}: {name}", self.text().msg_node_selected));
         let tx = self.events_tx.clone();
         let selected_label = self.text().msg_node_selected;
@@ -3198,6 +3281,7 @@ impl App {
                 Ok(()) => {
                     let _ = tx.send(AppEvent::NodeSelected(tag));
                     let _ = tx.send(AppEvent::Info(format!("{selected_label}: {name}")));
+                    let _ = tx.send(AppEvent::SelectionApplied);
                 }
                 Err(err) => {
                     let _ = tx.send(AppEvent::Error(err.to_string()));
@@ -3239,6 +3323,7 @@ impl App {
                 (tag, format!("{}: {name}", self.text().msg_node_selected))
             }
         };
+        self.request_metrics_refresh();
         let tx = self.events_tx.clone();
         let generation = self.selection_generation.load(Ordering::Relaxed);
         let token = self.selection_generation.clone();
@@ -3251,6 +3336,7 @@ impl App {
                 match client.select(&target).await {
                     Ok(()) => {
                         let _ = tx.send(AppEvent::Info(label));
+                        let _ = tx.send(AppEvent::SelectionApplied);
                         return;
                     }
                     Err(_) if attempt < 19 => {
@@ -3672,12 +3758,14 @@ impl App {
         self.preferred_node = None;
         self.pending_selection = None;
         self.invalidate_health_tasks();
+        self.request_metrics_refresh();
         let tx = self.events_tx.clone();
         let auto_label = self.text().msg_auto_enabled;
         tokio::spawn(async move {
             match client.select(&target).await {
                 Ok(()) => {
                     let _ = tx.send(AppEvent::Info(auto_label.to_string()));
+                    let _ = tx.send(AppEvent::SelectionApplied);
                 }
                 Err(err) => {
                     let _ = tx.send(AppEvent::Error(err.to_string()));
@@ -3755,10 +3843,12 @@ impl App {
         }
     }
 
-    async fn on_tick(&mut self) {
+    async fn on_tick(&mut self) -> bool {
+        let mut changed = false;
         if self.message_at.is_some_and(|at| at.elapsed() >= TOAST_TTL) {
             self.message = None;
             self.message_at = None;
+            changed = true;
         }
         let mut crashed = None;
         if let Some(proxy) = self.proxy.as_mut() {
@@ -3784,17 +3874,19 @@ impl App {
                 format!("sing-box exited unexpectedly: {status}"),
             );
             self.schedule_restart();
+            changed = true;
         }
         if self.proxy.is_some() && self.stable_reset_at.is_some_and(|at| Instant::now() >= at) {
             self.restart_attempts = 0;
             self.stable_reset_at = None;
         }
-        if self.page == Page::Logs && self.log_follow {
-            self.selected = self.max_selection().saturating_sub(1);
+        if self.has_viewer() && self.page == Page::Logs && self.log_follow {
+            self.selected = self.log_count().saturating_sub(1);
         }
         if self.last_local_ips.elapsed() >= Duration::from_secs(30) {
             self.local_ips = netinfo::local_addresses(false);
             self.last_local_ips = Instant::now();
+            changed = true;
         }
         if self.proxy.is_some() && !self.proxy_ips_in_flight {
             let interval = if self.proxy_ips.is_empty() {
@@ -3817,6 +3909,7 @@ impl App {
             })
         {
             self.refresh_subscriptions();
+            changed = true;
         }
         if self.status == ProxyStatus::Failed
             && self.proxy.is_none()
@@ -3824,7 +3917,10 @@ impl App {
         {
             self.restart_at = None;
             let _ = self.start_proxy();
+            changed = true;
         }
+        self.logger.flush();
+        changed
     }
 
     pub fn current_node(&self) -> Option<String> {
@@ -3904,6 +4000,19 @@ impl App {
             ),
         };
         format_listen_addresses(v4, port, ipv6)
+    }
+}
+
+fn report_clash_error(
+    tx: &UnboundedSender<AppEvent>,
+    label: &str,
+    last_error: &mut Option<String>,
+    err: ClashError,
+) {
+    let message = format!("{label}: {err}");
+    if last_error.as_deref() != Some(message.as_str()) {
+        *last_error = Some(message.clone());
+        let _ = tx.send(AppEvent::Info(message));
     }
 }
 

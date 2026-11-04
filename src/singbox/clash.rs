@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectionInfo {
@@ -56,6 +56,19 @@ pub struct MetricsSnapshot {
     pub node_delays: HashMap<String, u64>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ConnectionsSnapshot {
+    pub upload_total: u64,
+    pub download_total: u64,
+    pub connections: Vec<ConnectionInfo>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProxiesSnapshot {
+    pub selection: ProxySelection,
+    pub node_delays: HashMap<String, u64>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClashError {
     #[error("HTTP {0}")]
@@ -101,14 +114,14 @@ impl ClashClient {
         &self.base
     }
 
-    pub async fn metrics(&self) -> Result<MetricsSnapshot, ClashError> {
-        let connections = self.get_json("/connections").await?;
-        let proxies = self.get_json("/proxies").await?;
-        Ok(parse_metrics(
-            &connections,
-            parse_selection(&proxies),
-            parse_node_delays(&proxies),
-        ))
+    pub async fn connections(&self) -> Result<ConnectionsSnapshot, ClashError> {
+        let response: ConnectionsResponse = self.get_json("/connections").await?;
+        Ok(response.into_snapshot())
+    }
+
+    pub async fn proxies(&self) -> Result<ProxiesSnapshot, ClashError> {
+        let response: ProxiesResponse = self.get_json("/proxies").await?;
+        Ok(response.into_snapshot())
     }
 
     pub async fn select(&self, name: &str) -> Result<(), ClashError> {
@@ -132,14 +145,13 @@ impl ClashClient {
             .send()
             .await?;
         ensure_success(&response)?;
-        let value: Value = response.json().await?;
+        let value: DelayResponse = response.json().await?;
         value
-            .get("delay")
-            .and_then(Value::as_u64)
+            .delay
             .ok_or_else(|| ClashError::Invalid("delay missing from response".to_string()))
     }
 
-    async fn get_json(&self, path: &str) -> Result<Value, ClashError> {
+    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClashError> {
         let response = self
             .client
             .get(format!("{}{path}", self.base))
@@ -174,122 +186,184 @@ fn ensure_success(response: &reqwest::Response) -> Result<(), ClashError> {
     }
 }
 
-fn parse_metrics(
-    value: &Value,
-    selection: ProxySelection,
-    node_delays: HashMap<String, u64>,
-) -> MetricsSnapshot {
-    let connections = value
-        .get("connections")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(parse_connection).collect())
-        .unwrap_or_default();
-    MetricsSnapshot {
-        upload_total: value
-            .get("uploadTotal")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        download_total: value
-            .get("downloadTotal")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        connections,
-        selection,
-        node_delays,
-    }
+#[derive(Debug, Default, Deserialize)]
+struct ConnectionsResponse {
+    #[serde(rename = "uploadTotal", default)]
+    upload_total: u64,
+    #[serde(rename = "downloadTotal", default)]
+    download_total: u64,
+    #[serde(default)]
+    connections: Vec<RawConnection>,
 }
 
-fn parse_node_delays(value: &Value) -> HashMap<String, u64> {
-    let mut delays = HashMap::new();
-    let Some(proxies) = value.get("proxies").and_then(Value::as_object) else {
-        return delays;
-    };
-    for (tag, proxy) in proxies {
-        let Some(delay) = proxy
-            .get("history")
-            .and_then(Value::as_array)
-            .and_then(|history| history.last())
-            .and_then(|item| item.get("delay"))
-            .and_then(Value::as_u64)
-        else {
-            continue;
-        };
-        if delay > 0 {
-            delays.insert(tag.clone(), delay);
+impl ConnectionsResponse {
+    fn into_snapshot(self) -> ConnectionsSnapshot {
+        ConnectionsSnapshot {
+            upload_total: self.upload_total,
+            download_total: self.download_total,
+            connections: self
+                .connections
+                .into_iter()
+                .map(RawConnection::into_info)
+                .collect(),
         }
     }
-    delays
 }
 
-fn parse_connection(value: &Value) -> Option<ConnectionInfo> {
-    let metadata = value.get("metadata")?;
-    Some(ConnectionInfo {
-        id: value
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        host: crate::text::sanitize_display(
-            metadata.get("host").and_then(Value::as_str).unwrap_or(""),
-        ),
-        destination_ip: crate::text::sanitize_display(
-            metadata
-                .get("destinationIP")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
-        destination_port: crate::text::sanitize_display(
-            metadata
-                .get("destinationPort")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
-        network: crate::text::sanitize_display(
-            metadata
-                .get("network")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
-        upload: value.get("upload").and_then(Value::as_u64).unwrap_or(0),
-        download: value.get("download").and_then(Value::as_u64).unwrap_or(0),
-        duration_secs: connection_duration(value),
-    })
+#[derive(Debug, Default, Deserialize)]
+struct RawConnection {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    metadata: Option<RawMetadata>,
+    #[serde(default)]
+    upload: Option<u64>,
+    #[serde(default)]
+    download: Option<u64>,
+    #[serde(default)]
+    start: Option<String>,
+}
+
+impl RawConnection {
+    fn into_info(self) -> ConnectionInfo {
+        let metadata = self.metadata.unwrap_or_default();
+        ConnectionInfo {
+            id: self.id.unwrap_or_default(),
+            host: crate::text::sanitize_display(metadata.host.as_deref().unwrap_or("")),
+            destination_ip: crate::text::sanitize_display(
+                metadata.destination_ip.as_deref().unwrap_or(""),
+            ),
+            destination_port: crate::text::sanitize_display(&metadata.destination_port),
+            network: crate::text::sanitize_display(metadata.network.as_deref().unwrap_or("")),
+            upload: self.upload.unwrap_or(0),
+            download: self.download.unwrap_or(0),
+            duration_secs: connection_duration(self.start.as_deref()),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMetadata {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(rename = "destinationIP", default)]
+    destination_ip: Option<String>,
+    #[serde(
+        rename = "destinationPort",
+        default,
+        deserialize_with = "deserialize_string_or_number"
+    )]
+    destination_port: String,
+    #[serde(default)]
+    network: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProxiesResponse {
+    #[serde(default)]
+    proxies: HashMap<String, ProxyEntry>,
+}
+
+impl ProxiesResponse {
+    fn into_snapshot(self) -> ProxiesSnapshot {
+        let selected = self
+            .proxies
+            .get("proxy")
+            .and_then(|proxy| proxy.now.clone());
+        let auto = self.proxies.get("auto");
+        let auto_now = auto.and_then(|proxy| proxy.now.clone());
+        let auto_delay = auto.and_then(ProxyEntry::last_delay);
+        let mut node_delays = HashMap::new();
+        for (tag, proxy) in &self.proxies {
+            if let Some(delay) = proxy.last_delay().filter(|delay| *delay > 0) {
+                node_delays.insert(tag.clone(), delay);
+            }
+        }
+        ProxiesSnapshot {
+            selection: ProxySelection {
+                selected,
+                auto_now,
+                auto_delay,
+            },
+            node_delays,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProxyEntry {
+    #[serde(default)]
+    now: Option<String>,
+    #[serde(default)]
+    history: Option<Vec<ProxyHistory>>,
+}
+
+impl ProxyEntry {
+    fn last_delay(&self) -> Option<u64> {
+        self.history.as_ref()?.last()?.delay
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProxyHistory {
+    #[serde(default)]
+    delay: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DelayResponse {
+    #[serde(default)]
+    delay: Option<u64>,
+}
+
+/// Clash metadata normally uses strings, but tolerate numeric ports too.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrNumber;
+
+    impl serde::de::Visitor<'_> for StringOrNumber {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string, number, or null")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(value.to_string())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(value.to_string())
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+            Ok(value.to_string())
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(String::new())
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(String::new())
+        }
+    }
+
+    deserializer.deserialize_any(StringOrNumber)
 }
 
 /// Age of a connection, computed from the RFC3339 `start` field at snapshot
 /// time. Clock skew that would yield a negative age clamps to zero.
-fn connection_duration(value: &Value) -> Option<u64> {
-    let start = value
-        .get("start")
-        .and_then(Value::as_str)
-        .and_then(|start| DateTime::parse_from_rfc3339(start).ok())?;
+fn connection_duration(start: Option<&str>) -> Option<u64> {
+    let start = start.and_then(|start| DateTime::parse_from_rfc3339(start).ok())?;
     let seconds = Utc::now().signed_duration_since(start).num_seconds();
     Some(seconds.max(0) as u64)
-}
-
-fn parse_selection(value: &Value) -> ProxySelection {
-    let proxies = value.get("proxies");
-    let selected = proxies
-        .and_then(|p| p.get("proxy"))
-        .and_then(|p| p.get("now"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let auto = proxies.and_then(|p| p.get("auto"));
-    let auto_now = auto
-        .and_then(|a| a.get("now"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let auto_delay = auto
-        .and_then(|a| a.get("history"))
-        .and_then(Value::as_array)
-        .and_then(|history| history.last())
-        .and_then(|item| item.get("delay"))
-        .and_then(Value::as_u64);
-    ProxySelection {
-        selected,
-        auto_now,
-        auto_delay,
-    }
 }
 
 #[cfg(test)]
@@ -354,26 +428,73 @@ mod tests {
                 "n-dead": { "history": [{ "delay": 0 }] }
             }
         });
-        let snapshot = parse_metrics(
-            &connections,
-            parse_selection(&proxies),
-            parse_node_delays(&proxies),
-        );
-        assert_eq!(snapshot.upload_total, 100);
-        assert_eq!(snapshot.download_total, 200);
-        assert_eq!(snapshot.connections.len(), 2);
-        assert_eq!(snapshot.connections[0].destination_ip, "2001:db8::1");
-        let duration = snapshot.connections[0]
+        let connections: ConnectionsResponse = serde_json::from_value(connections).unwrap();
+        let proxies: ProxiesResponse = serde_json::from_value(proxies).unwrap();
+        let connections = connections.into_snapshot();
+        let proxies = proxies.into_snapshot();
+        assert_eq!(connections.upload_total, 100);
+        assert_eq!(connections.download_total, 200);
+        assert_eq!(connections.connections.len(), 2);
+        assert_eq!(connections.connections[0].destination_ip, "2001:db8::1");
+        let duration = connections.connections[0]
             .duration_secs
             .expect("duration parsed from start");
         assert!((3661..3671).contains(&duration), "{duration}");
-        assert_eq!(snapshot.connections[1].duration_secs, None);
-        assert_eq!(snapshot.selection.selected.as_deref(), Some("auto"));
-        assert_eq!(snapshot.selection.auto_now.as_deref(), Some("n-1a2b3c4d"));
-        assert_eq!(snapshot.selection.auto_delay, Some(42));
-        assert_eq!(snapshot.node_delays.get("n-1a2b3c4d"), Some(&88));
-        assert!(!snapshot.node_delays.contains_key("n-dead"));
-        assert_eq!(snapshot.node_delays.get("auto"), Some(&42));
+        assert_eq!(connections.connections[1].duration_secs, None);
+        assert_eq!(proxies.selection.selected.as_deref(), Some("auto"));
+        assert_eq!(proxies.selection.auto_now.as_deref(), Some("n-1a2b3c4d"));
+        assert_eq!(proxies.selection.auto_delay, Some(42));
+        assert_eq!(proxies.node_delays.get("n-1a2b3c4d"), Some(&88));
+        assert!(!proxies.node_delays.contains_key("n-dead"));
+        assert_eq!(proxies.node_delays.get("auto"), Some(&42));
+    }
+
+    #[test]
+    fn tolerates_missing_metadata_and_numeric_ports() {
+        let connections: ConnectionsResponse = serde_json::from_value(json!({
+            "uploadTotal": 1,
+            "downloadTotal": 2,
+            "connections": [{
+                "id": "a",
+                "metadata": {
+                    "host": null,
+                    "destinationIP": "203.0.113.4",
+                    "destinationPort": 443,
+                    "network": "tcp"
+                },
+                "upload": 3,
+                "download": 4
+            }, {
+                "id": "b"
+            }]
+        }))
+        .unwrap();
+        let connections = connections.into_snapshot();
+        assert_eq!(connections.connections.len(), 2);
+        assert_eq!(connections.connections[0].host, "");
+        assert_eq!(connections.connections[0].destination_port, "443");
+        assert_eq!(
+            connections.connections[0].target().as_deref(),
+            Some("203.0.113.4:443")
+        );
+        assert_eq!(connections.connections[1].target(), None);
+    }
+
+    #[test]
+    fn proxies_tolerate_missing_history() {
+        let proxies: ProxiesResponse = serde_json::from_value(json!({
+            "proxies": {
+                "proxy": {},
+                "auto": { "history": [] },
+                "n-1": { "history": [{ "time": "2026-01-01T00:00:00Z" }] }
+            }
+        }))
+        .unwrap();
+        let proxies = proxies.into_snapshot();
+        assert_eq!(proxies.selection.selected, None);
+        assert_eq!(proxies.selection.auto_now, None);
+        assert_eq!(proxies.selection.auto_delay, None);
+        assert!(proxies.node_delays.is_empty());
     }
 
     #[test]
