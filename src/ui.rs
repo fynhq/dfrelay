@@ -13,7 +13,7 @@ use crate::app::{
     SettingsItem, SubscriptionForm, MAIN_PAGES,
 };
 use crate::i18n::Text;
-use crate::logging::{LogLevel, LogLine};
+use crate::logging::{LogLevel, LogLine, LogSource};
 use crate::theme::Palette;
 use crate::view::{BinaryStatus, View};
 
@@ -678,15 +678,21 @@ fn render_logs(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pale
         text.common_off
     };
     let title = format!(
-        "{}  [{}]  {}:{}",
+        "{}  [{}] [{}]  {}:{}",
         text.logs_title,
+        view.log_source.label(),
         view.log_filter.label(),
         text.logs_follow,
         follow
     );
     let block = titled_block(title);
     if view.logs.is_empty() {
-        frame.render_widget(Paragraph::new(text.logs_empty).block(block), area);
+        let empty = if view.log_source == LogSource::All {
+            text.logs_empty
+        } else {
+            text.logs_empty_source
+        };
+        frame.render_widget(Paragraph::new(empty).block(block), area);
         return;
     }
     let selected = view.selected.min(view.logs.len().saturating_sub(1));
@@ -2895,6 +2901,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logs_source_filter_scopes_lines_and_title() {
+        let (mut app, _dir) = test_app(Lang::Zh).await;
+        app.page = Page::Logs;
+        app.logger.app(LogLevel::Info, "app only line");
+        app.logger.singbox(LogLevel::Info, "sing-box only line");
+
+        app.log_source = LogSource::App;
+        let content = rendered(&app, 30);
+        assert!(content.contains("[app] [INFO]"), "{content}");
+        assert!(content.contains("app only line"), "{content}");
+        assert!(!content.contains("sing-box only line"), "{content}");
+
+        app.log_source = LogSource::Singbox;
+        let content = rendered(&app, 30);
+        assert!(content.contains("[sing-box] [INFO]"), "{content}");
+        assert!(content.contains("sing-box only line"), "{content}");
+        assert!(!content.contains("app only line"), "{content}");
+
+        app.logger.clear_view();
+        app.log_source = LogSource::App;
+        let content = rendered(&app, 30);
+        let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains(app.text().logs_empty_source), "{compact}");
+    }
+
+    #[tokio::test]
     async fn tabs_use_compact_spacing() {
         let (app, _dir) = test_app(Lang::En).await;
         let content = rendered(&app, 30);
@@ -2979,7 +3011,7 @@ mod tests {
         app.logger.app(LogLevel::Info, "logs title test");
         let content = rendered(&app, 24);
         let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(compact.contains("日志[INFO]"), "{compact}");
+        assert!(compact.contains("日志[all][INFO]"), "{compact}");
         assert!(!compact.contains("dfrelay-"), "{compact}");
     }
 

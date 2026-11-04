@@ -61,6 +61,41 @@ impl Component {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogSource {
+    #[default]
+    All,
+    App,
+    Singbox,
+}
+
+impl LogSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::App => "app",
+            Self::Singbox => "sing-box",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::App,
+            Self::App => Self::Singbox,
+            Self::Singbox => Self::All,
+        }
+    }
+
+    pub fn matches(self, component: Component) -> bool {
+        match self {
+            Self::All => true,
+            Self::App => component == Component::App,
+            Self::Singbox => component == Component::Singbox,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LogTimestamp {
     #[default]
@@ -382,32 +417,39 @@ impl Logger {
         inner.lines.iter().skip(skip).cloned().collect()
     }
 
-    pub fn recent_filtered(&self, limit: usize, filter: LogLevel) -> Vec<LogLine> {
+    pub fn recent_filtered(
+        &self,
+        limit: usize,
+        filter: LogLevel,
+        source: LogSource,
+    ) -> Vec<LogLine> {
         let inner = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let skip = inner.lines.len().saturating_sub(limit);
-        inner
+        let mut lines: Vec<LogLine> = inner
             .lines
             .iter()
-            .skip(skip)
-            .filter(|line| line.level <= filter)
+            .rev()
+            .filter(|line| line.level <= filter && source.matches(line.component))
+            .take(limit)
             .cloned()
-            .collect()
+            .collect();
+        lines.reverse();
+        lines
     }
 
-    pub fn count_recent(&self, limit: usize, filter: LogLevel) -> usize {
+    pub fn count_recent(&self, limit: usize, filter: LogLevel, source: LogSource) -> usize {
         let inner = match self.inner.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let skip = inner.lines.len().saturating_sub(limit);
         inner
             .lines
             .iter()
-            .skip(skip)
-            .filter(|line| line.level <= filter)
+            .rev()
+            .filter(|line| line.level <= filter && source.matches(line.component))
+            .take(limit)
             .count()
     }
 
@@ -547,9 +589,50 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].message, "shown");
         assert_eq!(lines[1].message, "shown error");
-        assert_eq!(logger.count_recent(10, LogLevel::Info), 2);
-        assert_eq!(logger.recent_filtered(10, LogLevel::Info).len(), 2);
-        assert_eq!(logger.count_recent(10, LogLevel::Warn), 1);
+        assert_eq!(logger.count_recent(10, LogLevel::Info, LogSource::All), 2);
+        assert_eq!(
+            logger
+                .recent_filtered(10, LogLevel::Info, LogSource::All)
+                .len(),
+            2
+        );
+        assert_eq!(logger.count_recent(10, LogLevel::Warn, LogSource::All), 1);
+    }
+
+    #[test]
+    fn filters_by_source_before_truncating_the_view() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Trace).unwrap();
+        logger.app(LogLevel::Info, "app before flood");
+        for index in 0..600 {
+            logger.singbox(LogLevel::Debug, format!("sing-box {index}"));
+        }
+
+        let app = logger.recent_filtered(500, LogLevel::Info, LogSource::App);
+        assert_eq!(app.len(), 1);
+        assert_eq!(app[0].message, "app before flood");
+        assert_eq!(logger.count_recent(500, LogLevel::Info, LogSource::App), 1);
+
+        let singbox = logger.recent_filtered(3, LogLevel::Trace, LogSource::Singbox);
+        assert_eq!(singbox.len(), 3);
+        assert_eq!(singbox[2].message, "sing-box 599");
+
+        let all = logger.recent_filtered(500, LogLevel::Info, LogSource::All);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].component, Component::App);
+    }
+
+    #[test]
+    fn source_cycles_all_app_singbox() {
+        assert_eq!(LogSource::default(), LogSource::All);
+        assert_eq!(LogSource::All.next(), LogSource::App);
+        assert_eq!(LogSource::App.next(), LogSource::Singbox);
+        assert_eq!(LogSource::Singbox.next(), LogSource::All);
+        assert!(LogSource::All.matches(Component::Singbox));
+        assert!(LogSource::App.matches(Component::App));
+        assert!(!LogSource::App.matches(Component::Singbox));
+        assert!(LogSource::Singbox.matches(Component::Singbox));
+        assert!(!LogSource::Singbox.matches(Component::App));
     }
 
     #[test]

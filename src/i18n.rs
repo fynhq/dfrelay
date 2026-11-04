@@ -113,7 +113,9 @@ pub struct Text {
 
     pub logs_title: &'static str,
     pub logs_empty: &'static str,
+    pub logs_empty_source: &'static str,
     pub logs_level: &'static str,
+    pub logs_source: &'static str,
     pub logs_follow: &'static str,
     pub logs_detail_title: &'static str,
     pub logs_detail_hint: &'static str,
@@ -311,7 +313,9 @@ static ZH: Text = Text {
 
     logs_title: "日志",
     logs_empty: "暂无日志。",
+    logs_empty_source: "该来源暂无日志。",
     logs_level: "级别",
+    logs_source: "来源",
     logs_follow: "跟随",
     logs_detail_title: "日志详情",
     logs_detail_hint: "j/k 滚动   g/G 首尾   Esc/Enter 关闭",
@@ -414,6 +418,7 @@ static ZH: Text = Text {
                 "f  跟随开关",
                 "d  切换时间显示（时间/日期时间/隐藏）",
                 "v  循环级别",
+                "x  切换来源（全部/app/sing-box）",
                 "c  清空视图（不删文件）",
                 "Enter  查看详情（j/k、g/G 滚动）",
             ],
@@ -594,7 +599,9 @@ static EN: Text = Text {
 
     logs_title: "Logs",
     logs_empty: "No logs.",
+    logs_empty_source: "No logs from this source.",
     logs_level: "Level",
+    logs_source: "Source",
     logs_follow: "Follow",
     logs_detail_title: "Log detail",
     logs_detail_hint: "j/k scroll   g/G top/bottom   Esc/Enter close",
@@ -697,6 +704,7 @@ static EN: Text = Text {
                 "f  follow tail",
                 "d  cycle time display (time/datetime/hidden)",
                 "v  cycle level",
+                "x  cycle source (all/app/sing-box)",
                 "c  clear view (files kept)",
                 "Enter  detail (j/k, g/G)",
             ],
@@ -821,6 +829,19 @@ mod tests {
         assert_eq!(Lang::Zh.toggle(), Lang::En);
         assert_eq!(Lang::En.toggle(), Lang::Zh);
         assert_ne!(Lang::Zh.text().logs_title, Lang::En.text().logs_title);
+    }
+
+    #[test]
+    fn help_documents_the_log_source_cycle() {
+        for (lang, needle) in [(Lang::Zh, "切换来源"), (Lang::En, "cycle source")] {
+            assert!(
+                lang.text()
+                    .help_sections
+                    .iter()
+                    .any(|section| section.lines.iter().any(|line| line.contains(needle))),
+                "{needle}"
+            );
+        }
     }
 
     #[test]

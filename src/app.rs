@@ -15,7 +15,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::config::{Config, Paths, SubscriptionConfig};
 use crate::i18n::Text;
 use crate::ipc::{self, ServerMsg};
-use crate::logging::{LogLevel, LogLine, LogTimestamp, Logger};
+use crate::logging::{LogLevel, LogLine, LogSource, LogTimestamp, Logger};
 use crate::netinfo;
 use crate::service::ServiceIdentity;
 use crate::singbox::binary::{is_newer_version, BinaryManager, BinaryMetadata, InboxCandidate};
@@ -613,6 +613,7 @@ pub struct App {
     pub overlay: Option<Overlay>,
     log_detail_max_scroll: usize,
     pub subscription_delete: Option<String>,
+    pub log_source: LogSource,
     pub log_filter: LogLevel,
     pub log_follow: bool,
     pub log_timestamp: LogTimestamp,
@@ -838,6 +839,7 @@ impl App {
             overlay: None,
             log_detail_max_scroll: 0,
             subscription_delete: None,
+            log_source: LogSource::All,
             log_filter: LogLevel::Info,
             log_follow: true,
             log_timestamp: LogTimestamp::Time,
@@ -1032,6 +1034,7 @@ impl App {
             },
             overlay: self.overlay.clone(),
             subscription_delete: self.subscription_delete.is_some(),
+            log_source: self.log_source,
             log_filter: self.log_filter,
             log_follow: self.log_follow,
             log_timestamp: self.log_timestamp,
@@ -1949,6 +1952,7 @@ impl App {
             KeyCode::Char('f') if self.page == Page::Logs => self.toggle_log_follow(),
             KeyCode::Char('d') if self.page == Page::Logs => self.cycle_log_timestamp(),
             KeyCode::Char('v') if self.page == Page::Logs => self.cycle_log_filter(),
+            KeyCode::Char('x') if self.page == Page::Logs => self.cycle_log_source(),
             KeyCode::Char('c') if self.page == Page::Logs => {
                 self.logger.clear_view();
                 self.selected = 0;
@@ -2189,11 +2193,13 @@ impl App {
     }
 
     pub fn log_lines(&self) -> Vec<LogLine> {
-        self.logger.recent_filtered(500, self.log_filter)
+        self.logger
+            .recent_filtered(500, self.log_filter, self.log_source)
     }
 
     fn log_count(&self) -> usize {
-        self.logger.count_recent(500, self.log_filter)
+        self.logger
+            .count_recent(500, self.log_filter, self.log_source)
     }
 
     fn toggle_log_follow(&mut self) {
@@ -2215,17 +2221,31 @@ impl App {
 
     fn cycle_log_filter(&mut self) {
         self.log_filter = self.log_filter.next_filter();
+        self.reset_log_selection();
+        self.notify(format!(
+            "{}: {}",
+            self.text().logs_level,
+            self.log_filter.label()
+        ));
+    }
+
+    fn cycle_log_source(&mut self) {
+        self.log_source = self.log_source.next();
+        self.reset_log_selection();
+        self.notify(format!(
+            "{}: {}",
+            self.text().logs_source,
+            self.log_source.label()
+        ));
+    }
+
+    fn reset_log_selection(&mut self) {
         let max = self.max_selection();
         if self.log_follow {
             self.selected = max.saturating_sub(1);
         } else {
             self.selected = self.selected.min(max.saturating_sub(1));
         }
-        self.notify(format!(
-            "{}: {}",
-            self.text().logs_level,
-            self.log_filter.label()
-        ));
     }
 
     async fn refresh_current(&mut self) {
@@ -4557,6 +4577,38 @@ mod tests {
         assert_eq!(app.selected, 19);
         app.handle_key(key(KeyCode::Char('f'))).await;
         assert!(!app.log_follow);
+    }
+
+    #[tokio::test]
+    async fn logs_source_cycles_and_filters_lines() {
+        let (mut app, _dir) = test_app().await;
+        app.logger.app(LogLevel::Info, "app line");
+        app.logger.singbox(LogLevel::Info, "sing-box line");
+        app.page = Page::Logs;
+        app.log_follow = true;
+        app.selected = app.max_selection().saturating_sub(1);
+
+        assert_eq!(app.log_source, LogSource::All);
+        assert_eq!(app.log_lines().len(), 2);
+
+        app.handle_key(key(KeyCode::Char('x'))).await;
+        assert_eq!(app.log_source, LogSource::App);
+        assert_eq!(
+            app.message.as_deref(),
+            Some(format!("{}: app", app.text().logs_source).as_str())
+        );
+        assert_eq!(app.log_lines().len(), 1);
+        assert_eq!(app.log_lines()[0].message, "app line");
+        assert_eq!(app.selected, 0);
+
+        app.handle_key(key(KeyCode::Char('x'))).await;
+        assert_eq!(app.log_source, LogSource::Singbox);
+        assert_eq!(app.log_lines().len(), 1);
+        assert_eq!(app.log_lines()[0].message, "sing-box line");
+
+        app.handle_key(key(KeyCode::Char('x'))).await;
+        assert_eq!(app.log_source, LogSource::All);
+        assert_eq!(app.log_lines().len(), 2);
     }
 
     #[tokio::test]

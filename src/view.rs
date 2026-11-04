@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{Overlay, Page, ProxyStatus, SetupState};
 use crate::config::Config;
 use crate::i18n::{Lang, Text};
-use crate::logging::{LogLevel, LogLine, LogTimestamp};
+use crate::logging::{LogLevel, LogLine, LogSource, LogTimestamp};
 use crate::service::ServiceIdentity;
 use crate::singbox::clash::MetricsSnapshot;
 
@@ -80,6 +80,7 @@ pub struct View {
     pub setup: SetupState,
     pub overlay: Option<Overlay>,
     pub subscription_delete: bool,
+    pub log_source: LogSource,
     pub log_filter: LogLevel,
     pub log_follow: bool,
     pub log_timestamp: LogTimestamp,

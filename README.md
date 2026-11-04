@@ -16,8 +16,9 @@ English | [中文](#dfrelay-zh)
 - Clash/Mihomo YAML, Base64 URI lists, sing-box JSON, and plain URI
   subscriptions; automatic latency-based selection, keyword filters, manual
   switching, and failed-node recovery.
-- TUI with live traffic, connection counts, current node, local/proxy IP, logs,
-  and a sing-box download/update page.
+- TUI with live traffic, connection counts, current node, local/proxy IP, logs
+  with level and app/sing-box source filters, and a sing-box download/update
+  page.
 - Headless daemon for systemd/launchd, with foreground `dfr serve`; the TUI is a
   client and never owns the daemon lifecycle.
 
@@ -295,7 +296,8 @@ DFRelay 是一个面向 Linux、macOS 与 Android Termux（arm64）的终端 TUI
   `[::1]:12000`）；可选局域网访问与 HTTP/SOCKS 认证。
 - 订阅：Clash/Mihomo YAML、Base64 URI 列表、sing-box JSON、纯 URI；支持延迟自动选路、
   关键词过滤、手动切换和失败节点恢复。
-- TUI：网速、连接数、当前节点、本机/代理 IP、日志，以及 sing-box 下载/更新页。
+- TUI：网速、连接数、当前节点、本机/代理 IP、日志（级别与 app/sing-box 来源过滤），
+  以及 sing-box 下载/更新页。
 - 无界面 daemon 可由 systemd/launchd 托管；TUI 只是客户端，不负责 daemon 生命周期。
 
 ## 平台
