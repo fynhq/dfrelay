@@ -485,14 +485,14 @@ impl BinaryManager {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DownloadChannel {
+pub(crate) enum DownloadChannel {
     Direct,
     EnvProxy,
     LocalProxy,
 }
 
 impl DownloadChannel {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Direct => "direct",
             Self::EnvProxy => "env-proxy",
@@ -501,12 +501,12 @@ impl DownloadChannel {
     }
 }
 
-struct ChannelClient {
-    channel: DownloadChannel,
-    client: Client,
+pub(crate) struct ChannelClient {
+    pub(crate) channel: DownloadChannel,
+    pub(crate) client: Client,
 }
 
-fn download_clients(config: &Config) -> Result<Vec<ChannelClient>, BinaryError> {
+pub(crate) fn download_clients(config: &Config) -> Result<Vec<ChannelClient>, BinaryError> {
     let mut clients = vec![ChannelClient {
         channel: DownloadChannel::Direct,
         client: download_client()?,
@@ -689,7 +689,7 @@ pub fn mirror_url(prefix: &str, github_url: &str) -> String {
     format!("{}/{}", prefix.trim_end_matches('/'), github_url)
 }
 
-async fn download_and_verify(
+pub(crate) async fn download_and_verify(
     client: &Client,
     url: &str,
     expected_digest: &str,
@@ -702,6 +702,11 @@ async fn download_and_verify(
     let status = response.status();
     if !status.is_success() {
         return Err(BinaryError::Http(status.as_u16()));
+    }
+    if response.url().scheme() != "https" {
+        return Err(BinaryError::Network(
+            "download redirected to a non-HTTPS URL".to_string(),
+        ));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
@@ -1097,6 +1102,7 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
+            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
@@ -1122,6 +1128,7 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
+            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
@@ -1174,6 +1181,7 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
+            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
@@ -1218,6 +1226,7 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
+            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let binary = paths.bin_dir.join("fake-sing-box");
@@ -1242,6 +1251,7 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
+            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         fs::write(paths.inbox_dir.join("sing-box-1.14.4.tar.gz"), b"x").unwrap();

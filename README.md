@@ -19,6 +19,10 @@ English | [中文](#dfrelay-zh)
 - TUI with live traffic, connection counts, current node, local/proxy IP, logs
   with level and app/sing-box source filters, and a sing-box download/update
   page.
+- Optional DFRelay self-update: daily official-release check, digest/SHA256SUMS
+  verification, staged install with automatic rollback, and an
+  `off`/`notify`/`auto` policy (default `notify`). sing-box updates remain
+  manual.
 - Headless daemon for systemd/launchd, with foreground `dfr serve`; the TUI is a
   client and never owns the daemon lifecycle.
 
@@ -80,7 +84,17 @@ dfr restart         # restart an ad-hoc daemon, or the configured service
 dfr status          # show daemon mode, proxy state, node, and listen address
 dfr serve           # run the daemon in the foreground for systemd/launchd
 dfr service forget  # remove the service marker after removing the service
+dfr update check    # check the latest DFRelay release
+dfr update apply    # download, verify, install, and restart
+dfr update rollback # restore the previous binary
+dfr update status   # show the update policy and last result
 ```
+
+`dfr update` verifies the official release digest or `SHA256SUMS`, keeps the
+previous binary for rollback, and restarts the daemon. Automatic updates are
+opt-in (`app_update = "auto"`; default `notify`), apply only to release builds,
+and wait for the TUI to detach or activity to settle. Service-managed daemons
+skip automatic replacement; run `dfr update apply` outside the service.
 
 `dfr` is a pure client. If the daemon is not running, start it with `dfr start`
 or with your service manager. `q` / `Ctrl-C` only exit the TUI; the daemon,
@@ -299,6 +313,8 @@ DFRelay 是一个面向 Linux、macOS 与 Android Termux（arm64）的终端 TUI
   关键词过滤、手动切换和失败节点恢复。
 - TUI：网速、连接数、当前节点、本机/代理 IP、日志（级别与 app/sing-box 来源过滤），
   以及 sing-box 下载/更新页。
+- 可选应用自更新：每日检查官方 Release，校验 digest/SHA256SUMS 后暂存安装，失败自动回滚；
+  支持 `off`/`notify`/`auto`（默认 `notify`）。sing-box 更新仍为手动。
 - 无界面 daemon 可由 systemd/launchd 托管；TUI 只是客户端，不负责 daemon 生命周期。
 
 ## 平台
@@ -354,7 +370,16 @@ dfr restart         # 重启 ad-hoc daemon，或重启已配置的系统服务
 dfr status          # 查看模式、代理状态、当前节点和监听地址
 dfr serve           # 前台运行 daemon，供 systemd/launchd 托管
 dfr service forget  # 移除服务后清理 service marker
+dfr update check    # 检查 DFRelay 最新版本
+dfr update apply    # 下载、校验、安装并重启
+dfr update rollback # 恢复上一版二进制
+dfr update status   # 查看更新策略与最近结果
 ```
+
+`dfr update` 校验官方 Release 的 digest 或 `SHA256SUMS`，保留上一版用于回滚，然后重启
+daemon。自动更新需显式开启（`app_update = "auto"`，默认 `notify`），仅对发布构建生效，
+并等待 TUI 断开或连接空闲后应用；服务托管模式跳过自动替换，需在服务外执行
+`dfr update apply`。
 
 `dfr` 只是客户端。daemon 没运行时应执行 `dfr start` 或通过服务管理器启动。
 `q` / `Ctrl-C` 只退出界面，daemon、代理、订阅和日志继续运行。

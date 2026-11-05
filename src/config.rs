@@ -34,10 +34,38 @@ pub struct Config {
     pub subscription_refresh_hours: u64,
     pub app_log_level: LogLevel,
     pub singbox_log_level: LogLevel,
+    pub app_update: UpdatePolicy,
     pub github_mirrors: Vec<String>,
     pub proxy_ip_v4_url: String,
     pub proxy_ip_v6_url: String,
     pub subscriptions: Vec<SubscriptionConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdatePolicy {
+    Off,
+    #[default]
+    Notify,
+    Auto,
+}
+
+impl UpdatePolicy {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Notify,
+            Self::Notify => Self::Auto,
+            Self::Auto => Self::Off,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Notify => "notify",
+            Self::Auto => "auto",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,6 +223,7 @@ impl Default for Config {
             subscription_refresh_hours: 24,
             app_log_level: LogLevel::Info,
             singbox_log_level: LogLevel::Info,
+            app_update: UpdatePolicy::Notify,
             github_mirrors: default_mirrors(),
             proxy_ip_v4_url: "https://api.ipify.org".to_string(),
             proxy_ip_v6_url: "https://api6.ipify.org".to_string(),
@@ -274,6 +303,7 @@ pub struct Paths {
     pub runtime_dir: PathBuf,
     pub logs_dir: PathBuf,
     pub inbox_dir: PathBuf,
+    pub updates_dir: PathBuf,
 }
 
 impl Paths {
@@ -308,6 +338,7 @@ impl Paths {
             runtime_dir: app_data.join("runtime"),
             logs_dir: app_data.join("logs"),
             inbox_dir: app_data.join("inbox"),
+            updates_dir: app_data.join("updates"),
             data_dir: app_data,
         })
     }
@@ -320,6 +351,7 @@ impl Paths {
             &self.runtime_dir,
             &self.logs_dir,
             &self.inbox_dir,
+            &self.updates_dir,
         ] {
             fsutil::ensure_private_dir(dir)?;
         }
@@ -657,5 +689,22 @@ mod tests {
         .unwrap();
         assert!(paths.config_file.is_absolute());
         assert!(paths.data_dir.is_absolute());
+    }
+
+    #[test]
+    fn update_policy_defaults_to_notify_and_parses_known_values() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.app_update, UpdatePolicy::Notify);
+        let config: Config = toml::from_str("app_update = \"auto\"").unwrap();
+        assert_eq!(config.app_update, UpdatePolicy::Auto);
+        let config: Config = toml::from_str("app_update = \"off\"").unwrap();
+        assert_eq!(config.app_update, UpdatePolicy::Off);
+    }
+
+    #[test]
+    fn update_policy_cycles_in_order() {
+        assert_eq!(UpdatePolicy::Notify.next(), UpdatePolicy::Auto);
+        assert_eq!(UpdatePolicy::Auto.next(), UpdatePolicy::Off);
+        assert_eq!(UpdatePolicy::Off.next(), UpdatePolicy::Notify);
     }
 }

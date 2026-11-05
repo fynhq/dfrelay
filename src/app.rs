@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::config::{Config, Paths, SubscriptionConfig};
+use crate::config::{Config, Paths, SubscriptionConfig, UpdatePolicy};
 use crate::i18n::Text;
 use crate::ipc::{self, ServerMsg};
 use crate::logging::{LogLevel, LogLine, LogSource, LogTimestamp, Logger};
@@ -24,6 +24,7 @@ use crate::singbox::supervisor::{self, RunningProxy};
 use crate::subscription::model::Node;
 use crate::subscription::{self, merge_nodes, FetchOptions, SubscriptionRuntime};
 use crate::text::sanitize_display;
+use crate::update;
 use crate::view::{BinaryStatus, DaemonStatus, View};
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -315,12 +316,13 @@ pub enum SettingsItem {
     KeywordsInclude,
     KeywordsExclude,
     AppLogLevel,
+    AppUpdate,
     BinaryInfo,
     ConfigPath,
     LogFile,
 }
 
-pub const SETTINGS_ITEMS: [SettingsItem; 12] = [
+pub const SETTINGS_ITEMS: [SettingsItem; 13] = [
     SettingsItem::Language,
     SettingsItem::Port,
     SettingsItem::AllowLan,
@@ -330,6 +332,7 @@ pub const SETTINGS_ITEMS: [SettingsItem; 12] = [
     SettingsItem::KeywordsInclude,
     SettingsItem::KeywordsExclude,
     SettingsItem::AppLogLevel,
+    SettingsItem::AppUpdate,
     SettingsItem::BinaryInfo,
     SettingsItem::ConfigPath,
     SettingsItem::LogFile,
@@ -558,6 +561,8 @@ pub enum AppEvent {
     HelpViewport(usize),
     LogDetailViewport(usize),
     UpdateCheckDone(Result<String, String>),
+    AppUpdateChecked(Result<Option<update::ReleaseInfo>, String>),
+    AppUpdateStaged(Result<(update::ReleaseInfo, PathBuf), String>),
     RollbackDone(Result<BinaryMetadata, String>),
     Info(String),
     Error(String),
@@ -582,6 +587,12 @@ pub enum AppEvent {
 struct ClientHandle {
     viewer: bool,
     tx: mpsc::Sender<ServerMsg>,
+}
+
+struct PendingAppUpdate {
+    version: String,
+    staged: PathBuf,
+    since: Instant,
 }
 
 pub struct App {
@@ -665,6 +676,13 @@ pub struct App {
     subscription_seq: u64,
     subscription_refresh_seq: HashMap<String, u64>,
     pub last_subscription_refresh: Option<Instant>,
+    app_update_in_flight: bool,
+    app_update_downloading: bool,
+    pending_app_update: Option<PendingAppUpdate>,
+    app_update_deferred_logged: bool,
+    last_app_update_check: Option<Instant>,
+    app_update_retry_at: Option<Instant>,
+    app_update_apply_started: Option<Instant>,
     pub preferred_node: Option<String>,
     runtime_has_auto: bool,
     selection_generation: Arc<AtomicU64>,
@@ -817,6 +835,13 @@ impl App {
         let cached_nodes = merge_nodes(&cached_subscriptions);
         let startup_cache_fresh = cached_subscription_age(&cached_subscriptions)
             .is_some_and(|age| age < SUBSCRIPTION_STARTUP_MAX_AGE);
+        let update_state = update::load_state(&paths);
+        let staged_update = update::discover_staged(&paths)
+            .filter(|(version, _)| !update_state.failed_recently(version));
+        let last_app_update_check = update_state.last_check_unix.and_then(|at| {
+            let age = chrono::Local::now().timestamp().saturating_sub(at);
+            (age >= 0 && (age as u64) < update::CHECK_INTERVAL.as_secs()).then(Instant::now)
+        });
         let has_enabled = config.enabled_subscriptions().next().is_some();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut app = Self {
@@ -900,6 +925,17 @@ impl App {
             subscription_seq: 0,
             subscription_refresh_seq: HashMap::new(),
             last_subscription_refresh: startup_cache_fresh.then(Instant::now),
+            app_update_in_flight: false,
+            app_update_downloading: false,
+            pending_app_update: staged_update.map(|(version, staged)| PendingAppUpdate {
+                version,
+                staged,
+                since: Instant::now(),
+            }),
+            app_update_deferred_logged: false,
+            last_app_update_check,
+            app_update_retry_at: None,
+            app_update_apply_started: None,
             preferred_node: None,
             runtime_has_auto: false,
             selection_generation: Arc::new(AtomicU64::new(0)),
@@ -919,6 +955,12 @@ impl App {
         };
         if has_enabled && !startup_cache_fresh {
             app.refresh_subscriptions();
+        }
+        if let Some(pending) = &app.pending_app_update {
+            app.logger.app(
+                LogLevel::Info,
+                format!("app update: v{} is staged", pending.version),
+            );
         }
         app.refresh_previous_binary_state();
         app.maybe_check_binary_update();
@@ -1055,6 +1097,10 @@ impl App {
             },
             log_file: self.logger.current_file(),
             last_error: self.last_error.as_deref().map(sanitize_display),
+            pending_app_update: self
+                .pending_app_update
+                .as_ref()
+                .map(|pending| sanitize_display(&pending.version)),
             toast,
             restart_confirm: self.restart_confirm,
             rollback_confirm: self.rollback_confirm,
@@ -1618,6 +1664,89 @@ impl App {
                     }
                 }
             }
+            AppEvent::AppUpdateChecked(result) => {
+                self.app_update_in_flight = false;
+                self.app_update_retry_at = None;
+                match result {
+                    Ok(Some(release)) => {
+                        let mut state = update::load_state(&self.paths);
+                        state.last_check_unix = Some(chrono::Local::now().timestamp());
+                        let _ = update::save_state(&self.paths, &state);
+                        if update::load_state(&self.paths).failed_recently(&release.version) {
+                            self.logger.app(
+                                LogLevel::Info,
+                                format!(
+                                    "app update: v{} failed before; skipped until cooldown ends",
+                                    release.version
+                                ),
+                            );
+                            return;
+                        }
+                        if self.app_update_downloading {
+                            return;
+                        }
+                        self.app_update_downloading = true;
+                        self.logger.app(
+                            LogLevel::Info,
+                            format!("app update: v{} available", release.version),
+                        );
+                        let config = self.config.clone();
+                        let paths = self.paths.clone();
+                        let logger = self.logger.clone();
+                        let tx = self.events_tx.clone();
+                        tokio::spawn(async move {
+                            let result =
+                                update::download_and_stage(&config, &paths, &release, &logger)
+                                    .await;
+                            let event = match result {
+                                Ok(staged) => Ok((release, staged)),
+                                Err(err) => Err(err.to_string()),
+                            };
+                            let _ = tx.send(AppEvent::AppUpdateStaged(event));
+                        });
+                    }
+                    Ok(None) => {
+                        let mut state = update::load_state(&self.paths);
+                        state.last_check_unix = Some(chrono::Local::now().timestamp());
+                        let _ = update::save_state(&self.paths, &state);
+                        self.logger
+                            .app(LogLevel::Debug, "app update: already up to date");
+                    }
+                    Err(err) => {
+                        self.last_app_update_check = None;
+                        self.app_update_retry_at = Some(Instant::now() + Duration::from_secs(3600));
+                        self.logger.app(
+                            LogLevel::Debug,
+                            format!("app update check failed: {err}; retrying in 1h"),
+                        );
+                    }
+                }
+            }
+            AppEvent::AppUpdateStaged(result) => {
+                self.app_update_downloading = false;
+                match result {
+                    Ok((release, staged)) => {
+                        self.pending_app_update = Some(PendingAppUpdate {
+                            version: release.version.clone(),
+                            staged,
+                            since: Instant::now(),
+                        });
+                        self.app_update_deferred_logged = false;
+                        self.notify(format!(
+                            "{}: v{}",
+                            self.text().msg_app_update_ready,
+                            release.version
+                        ));
+                        self.logger.app(
+                            LogLevel::Info,
+                            format!("app update: v{} downloaded and verified", release.version),
+                        );
+                    }
+                    Err(err) => self
+                        .logger
+                        .app(LogLevel::Warn, format!("app update failed: {err}")),
+                }
+            }
             AppEvent::RollbackDone(result) => {
                 self.setup.rollback_in_flight = false;
                 self.rollback_confirm = false;
@@ -1717,6 +1846,7 @@ impl App {
                 .unwrap_or(0),
             listen: self.listen_addresses(),
             current_node: self.current_node(),
+            version: crate::version::DISPLAY.to_string(),
         };
         let _ = client.tx.try_send(ServerMsg::Status(Box::new(status)));
     }
@@ -2098,6 +2228,136 @@ impl App {
                 .map_err(|err| err.to_string());
             let _ = tx.send(AppEvent::UpdateCheckDone(result));
         });
+    }
+
+    fn maybe_check_app_update(&mut self) {
+        if self.config.app_update == UpdatePolicy::Off
+            || self.app_update_in_flight
+            || self.app_update_downloading
+            || self.pending_app_update.is_some()
+            || !update::is_release_build()
+        {
+            return;
+        }
+        if self
+            .last_app_update_check
+            .is_some_and(|at| at.elapsed() < update::CHECK_INTERVAL)
+        {
+            return;
+        }
+        if self
+            .app_update_retry_at
+            .is_some_and(|at| at > Instant::now())
+        {
+            return;
+        }
+        self.app_update_in_flight = true;
+        self.last_app_update_check = Some(Instant::now());
+        let config = self.config.clone();
+        let tx = self.events_tx.clone();
+        tokio::spawn(async move {
+            let result = update::check_for_update(&config)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(AppEvent::AppUpdateChecked(result));
+        });
+    }
+
+    fn maybe_apply_app_update(&mut self) {
+        if self.config.app_update != UpdatePolicy::Auto || !update::is_release_build() {
+            return;
+        }
+        if self.app_update_in_flight {
+            if self
+                .app_update_apply_started
+                .is_some_and(|at| at.elapsed() > Duration::from_secs(600))
+            {
+                self.app_update_in_flight = false;
+                self.app_update_apply_started = None;
+                self.logger.app(
+                    LogLevel::Warn,
+                    "app update: applier did not restart the daemon; retrying",
+                );
+            } else {
+                return;
+            }
+        }
+        let Some(pending) = self.pending_app_update.as_ref() else {
+            return;
+        };
+        if self.managed {
+            if !self.app_update_deferred_logged {
+                self.logger.app(
+                    LogLevel::Info,
+                    "app update: service-managed daemon; run `dfr update apply` to install",
+                );
+                self.app_update_deferred_logged = true;
+            }
+            return;
+        }
+        if !update::auto_apply_allowed(
+            self.has_viewer(),
+            !self.metrics.connections.is_empty(),
+            pending.since.elapsed(),
+        ) {
+            if !self.app_update_deferred_logged {
+                self.logger.app(
+                    LogLevel::Info,
+                    "app update: deferred until the TUI detaches or activity settles",
+                );
+                self.app_update_deferred_logged = true;
+            }
+            return;
+        }
+        let target = match update::target_binary() {
+            Ok(target) => target,
+            Err(err) => {
+                self.logger.app(
+                    LogLevel::Warn,
+                    format!("app update: cannot resolve the installed binary: {err}"),
+                );
+                self.app_update_deferred_logged = true;
+                return;
+            }
+        };
+        let staged = pending.staged.clone();
+        let version = pending.version.clone();
+        match update::spawn_apply_helper(&self.paths, &staged, &target, &version) {
+            Ok(()) => {
+                self.app_update_in_flight = true;
+                self.app_update_apply_started = Some(Instant::now());
+                self.logger.app(
+                    LogLevel::Info,
+                    format!("app update: applying v{version}; daemon will restart"),
+                );
+                self.notify(self.text().msg_app_update_applying);
+            }
+            Err(err) => {
+                self.logger.app(
+                    LogLevel::Warn,
+                    format!("app update: cannot start the applier: {err}"),
+                );
+                self.app_update_deferred_logged = true;
+            }
+        }
+    }
+
+    fn cycle_app_update_policy(&mut self) {
+        let mut config = self.config.clone();
+        config.app_update = config.app_update.next();
+        if let Err(err) = config.save(&self.paths.config_file) {
+            self.last_error = Some(err.to_string());
+            return;
+        }
+        self.config = config;
+        self.last_app_update_check = None;
+        self.app_update_retry_at = None;
+        self.app_update_deferred_logged = false;
+        self.notify(self.text().settings_saved);
+        self.logger.app(
+            LogLevel::Info,
+            format!("app update policy: {}", self.config.app_update.as_str()),
+        );
     }
 
     fn open_log_detail(&mut self) {
@@ -2657,6 +2917,7 @@ impl App {
             SettingsItem::KeywordsInclude => self.open_keyword_form(KeywordField::Include),
             SettingsItem::KeywordsExclude => self.open_keyword_form(KeywordField::Exclude),
             SettingsItem::AppLogLevel => self.cycle_app_log_level(),
+            SettingsItem::AppUpdate => self.cycle_app_update_policy(),
             SettingsItem::BinaryInfo => self.open_setup_overlay(),
             SettingsItem::Port
             | SettingsItem::DnsServers
@@ -2673,6 +2934,7 @@ impl App {
             SettingsItem::TestUrl => self.config.test_url.clone(),
             SettingsItem::ConfigPath => self.paths.config_file.display().to_string(),
             SettingsItem::LogFile => self.logger.current_file().display().to_string(),
+            SettingsItem::AppUpdate => self.config.app_update.as_str().to_string(),
             _ => String::new(),
         }
     }
@@ -3992,6 +4254,8 @@ impl App {
             }
         }
         self.maybe_probe_health();
+        self.maybe_check_app_update();
+        self.maybe_apply_app_update();
         if self.config.subscription_refresh_hours > 0
             && self.config.enabled_subscriptions().next().is_some()
             && self.last_subscription_refresh.is_none_or(|last| {
@@ -5750,6 +6014,37 @@ mod tests {
         assert!(app.health_pause_until.is_some_and(|at| at > Instant::now()));
         app.invalidate_health_tasks();
         assert!(app.health_pause_until.is_none());
+    }
+
+    #[tokio::test]
+    async fn app_update_policy_cycles_and_persists() {
+        let (mut app, _dir) = test_app().await;
+        assert_eq!(app.config.app_update, UpdatePolicy::Notify);
+        app.cycle_app_update_policy();
+        assert_eq!(app.config.app_update, UpdatePolicy::Auto);
+        app.cycle_app_update_policy();
+        assert_eq!(app.config.app_update, UpdatePolicy::Off);
+        app.cycle_app_update_policy();
+        assert_eq!(app.config.app_update, UpdatePolicy::Notify);
+        let (saved, _) = Config::load_or_default(&app.paths.config_file);
+        assert_eq!(saved.app_update, UpdatePolicy::Notify);
+    }
+
+    #[tokio::test]
+    async fn staged_app_update_is_visible_in_the_settings_view() {
+        let (mut app, _dir) = test_app().await;
+        let release = update::ReleaseInfo {
+            version: "9.9.9".to_string(),
+            asset_name: "dfrelay_test.tar.gz".to_string(),
+            asset_url: "https://example.com/dfrelay_test.tar.gz".to_string(),
+            digest: None,
+            sums_url: None,
+        };
+        let staged = app.paths.updates_dir.join("dfr-9.9.9");
+        app.handle_event(AppEvent::AppUpdateStaged(Ok((release, staged))))
+            .await;
+        assert!(app.pending_app_update.is_some());
+        assert_eq!(app.view().pending_app_update.as_deref(), Some("9.9.9"));
     }
 
     #[tokio::test]

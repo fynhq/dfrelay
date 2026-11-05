@@ -47,6 +47,8 @@ pub struct DaemonStatus {
     pub uptime_secs: u64,
     pub listen: String,
     pub current_node: Option<String>,
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +89,8 @@ pub struct View {
     pub logs: Vec<LogLine>,
     pub log_file: PathBuf,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub pending_app_update: Option<String>,
     pub toast: Option<String>,
     pub restart_confirm: bool,
     pub rollback_confirm: bool,

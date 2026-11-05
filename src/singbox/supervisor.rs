@@ -387,6 +387,7 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
+            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let binary = paths.binary();

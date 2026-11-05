@@ -260,7 +260,15 @@ fn set_socket_permissions(path: &Path) -> io::Result<()> {
 }
 
 pub fn spawn_daemon(config: Option<PathBuf>, data_dir: Option<PathBuf>) -> io::Result<()> {
-    let mut command = Command::new(std::env::current_exe()?);
+    spawn_daemon_at(&std::env::current_exe()?, config, data_dir)
+}
+
+pub fn spawn_daemon_at(
+    executable: &Path,
+    config: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+) -> io::Result<()> {
+    let mut command = Command::new(executable);
     command.arg("serve");
     if let Some(config) = config {
         command.arg("--config").arg(config);
@@ -410,6 +418,7 @@ mod tests {
             uptime_secs: 61,
             listen: "127.0.0.1:12000".into(),
             current_node: Some("node".into()),
+            version: "1.0.0".into(),
         };
         let line = serde_json::to_string(&ServerMsg::Status(Box::new(status))).unwrap();
         let Ok(ServerMsg::Status(status)) = serde_json::from_str::<ServerMsg>(&line) else {
