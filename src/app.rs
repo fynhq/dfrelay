@@ -35,8 +35,10 @@ const HEALTH_ACTIVE_WINDOW: Duration = Duration::from_secs(120);
 const HEALTH_PROBE_STALE: Duration = Duration::from_secs(5);
 const HEALTH_FAILURE_THRESHOLD: u32 = 3;
 const HEALTH_RECOVERY_COOLDOWN: Duration = Duration::from_secs(120);
-const HEALTH_NO_NODE_PAUSE: Duration = Duration::from_secs(300);
+const HEALTH_NO_NODE_BACKOFF_SECS: [u64; 3] = [60, 120, 300];
 const HEALTH_REFRESH_COOLDOWN: Duration = Duration::from_secs(600);
+const PROXY_IP_STARTUP_GRACE: Duration = Duration::from_secs(30);
+const SUBSCRIPTION_STARTUP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_METRICS_INTERVAL: Duration = Duration::from_secs(3);
@@ -444,18 +446,18 @@ impl EditForm {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Overlay {
     Edit(EditForm),
+    Setup { selected: usize },
     LogDetail { line: LogLine, scroll: usize },
 }
-    Setup { selected: usize },
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverlayKind {
     Subscription,
     Keyword,
     Settings,
+    Setup,
     LogDetail,
 }
-    Setup,
 
 impl Overlay {
     fn kind(&self) -> OverlayKind {
@@ -463,9 +465,9 @@ impl Overlay {
             Self::Edit(EditForm::Subscription(_)) => OverlayKind::Subscription,
             Self::Edit(EditForm::Keyword(_)) => OverlayKind::Keyword,
             Self::Edit(EditForm::Settings(_)) => OverlayKind::Settings,
+            Self::Setup { .. } => OverlayKind::Setup,
             Self::LogDetail { .. } => OverlayKind::LogDetail,
         }
-            Self::Setup { .. } => OverlayKind::Setup,
     }
 
     pub fn log_detail(&self) -> Option<(&LogLine, usize)> {
@@ -531,7 +533,10 @@ pub enum AppEvent {
     ProxyStarted(Result<RunningProxy, String>),
     ProxyStopped,
     Metrics(MetricsSnapshot),
-    ProxyIps(Vec<String>),
+    ProxyIps {
+        ips: Vec<String>,
+        errors: Vec<String>,
+    },
     HealthProbe {
         generation: u64,
         tag: String,
@@ -634,6 +639,7 @@ pub struct App {
     pub last_proxy_ips: Instant,
     proxy_ips_in_flight: bool,
     proxy_ip_backoff_secs: u64,
+    proxy_ip_failures: u32,
     delay_sweep_running: bool,
     last_delay_sweep: Option<Instant>,
     health_failures: u32,
@@ -647,6 +653,7 @@ pub struct App {
     recovery_in_flight: bool,
     last_recovery: Option<Instant>,
     health_pause_until: Option<Instant>,
+    health_no_node_level: u8,
     recovery_refresh_pending: bool,
     last_recovery_refresh: Option<Instant>,
     pub started_at: Option<Instant>,
@@ -750,6 +757,11 @@ impl App {
     }
 
     fn close_overlay(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Setup { .. })) {
+            self.setup.pending_install = None;
+            self.setup.message = None;
+            self.rollback_confirm = false;
+        }
         self.overlay = None;
         self.log_detail_max_scroll = 0;
     }
@@ -757,11 +769,6 @@ impl App {
     fn set_edit_error(&mut self, message: String) {
         if let Some(form) = self.edit_form_mut() {
             form.set_error(Some(message));
-        if matches!(self.overlay, Some(Overlay::Setup { .. })) {
-            self.setup.pending_install = None;
-            self.setup.message = None;
-            self.rollback_confirm = false;
-        }
         }
     }
 
@@ -808,6 +815,8 @@ impl App {
             }
         }
         let cached_nodes = merge_nodes(&cached_subscriptions);
+        let startup_cache_fresh = cached_subscription_age(&cached_subscriptions)
+            .is_some_and(|age| age < SUBSCRIPTION_STARTUP_MAX_AGE);
         let has_enabled = config.enabled_subscriptions().next().is_some();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut app = Self {
@@ -865,6 +874,7 @@ impl App {
             last_proxy_ips: Instant::now(),
             proxy_ips_in_flight: false,
             proxy_ip_backoff_secs: 5,
+            proxy_ip_failures: 0,
             delay_sweep_running: false,
             last_delay_sweep: None,
             health_failures: 0,
@@ -878,6 +888,7 @@ impl App {
             recovery_in_flight: false,
             last_recovery: None,
             health_pause_until: None,
+            health_no_node_level: 0,
             recovery_refresh_pending: false,
             last_recovery_refresh: None,
             started_at: None,
@@ -888,7 +899,7 @@ impl App {
             refreshing_subscriptions: false,
             subscription_seq: 0,
             subscription_refresh_seq: HashMap::new(),
-            last_subscription_refresh: None,
+            last_subscription_refresh: startup_cache_fresh.then(Instant::now),
             preferred_node: None,
             runtime_has_auto: false,
             selection_generation: Arc::new(AtomicU64::new(0)),
@@ -906,7 +917,7 @@ impl App {
             clients: HashMap::new(),
             help_return: None,
         };
-        if has_enabled {
+        if has_enabled && !startup_cache_fresh {
             app.refresh_subscriptions();
         }
         app.refresh_previous_binary_state();
@@ -1177,10 +1188,13 @@ impl App {
                     "{}: {node_count}",
                     self.text().msg_subscriptions_refreshed
                 ));
-                self.logger.app(
-                    LogLevel::Info,
-                    format!("subscriptions refreshed: {node_count} nodes"),
-                );
+                let unique_count = self.nodes.len();
+                let count_detail = if unique_count == node_count {
+                    format!("subscriptions refreshed: {node_count} nodes")
+                } else {
+                    format!("subscriptions refreshed: {node_count} nodes ({unique_count} unique)")
+                };
+                self.logger.app(LogLevel::Info, count_detail);
                 if self.pending_restart_subscription.is_some() {
                     self.pending_restart_subscription = None;
                     self.auto_restart_after_change();
@@ -1310,6 +1324,7 @@ impl App {
                     self.last_error = None;
                     self.reset_health_state();
                     self.proxy_ip_backoff_secs = 5;
+                    self.proxy_ip_failures = 0;
                     self.start_metrics(clash.port, clash.secret.clone());
                     self.apply_pending_selection(clash.port, clash.secret);
                     self.refresh_proxy_ips();
@@ -1411,8 +1426,20 @@ impl App {
                 }
                 match outcome {
                     HealthOutcome::Healthy(delay) => {
+                        let recovered = self.health_pause_until.take().is_some()
+                            || self.health_no_node_level > 0;
+                        self.health_no_node_level = 0;
                         self.health_failures = 0;
                         self.health_failure_tag = None;
+                        if self.last_error.as_deref() == Some(self.text().msg_health_no_nodes) {
+                            self.last_error = None;
+                        }
+                        if recovered {
+                            self.logger.app(
+                                LogLevel::Info,
+                                format!("health restored: {tag} ({delay} ms)"),
+                            );
+                        }
                         self.node_delays.insert(tag, delay);
                         self.sort_nodes_if_visible();
                     }
@@ -1489,6 +1516,8 @@ impl App {
                 self.selection_generation.fetch_add(1, Ordering::Relaxed);
                 self.health_failures = 0;
                 self.health_failure_tag = None;
+                self.health_no_node_level = 0;
+                self.health_pause_until = None;
                 self.last_error = None;
                 self.logger.app(
                     LogLevel::Warn,
@@ -1512,7 +1541,7 @@ impl App {
                     }
                 });
             }
-            AppEvent::ProxyIps(ips) => {
+            AppEvent::ProxyIps { ips, errors } => {
                 self.proxy_ips_in_flight = false;
                 if self.proxy.is_none() {
                     return;
@@ -1520,9 +1549,20 @@ impl App {
                 if ips.is_empty() {
                     self.proxy_ips.clear();
                     self.proxy_ip_backoff_secs = (self.proxy_ip_backoff_secs * 2).min(60);
+                    let in_grace = self
+                        .started_at
+                        .is_some_and(|at| at.elapsed() < PROXY_IP_STARTUP_GRACE);
+                    if !in_grace {
+                        self.proxy_ip_failures = self.proxy_ip_failures.saturating_add(1);
+                    }
+                    self.logger.app(
+                        proxy_ip_failure_level(self.proxy_ip_failures, in_grace),
+                        format!("proxy IP lookup failed: {}", errors.join("; ")),
+                    );
                 } else {
                     self.proxy_ips = ips;
                     self.proxy_ip_backoff_secs = 5;
+                    self.proxy_ip_failures = 0;
                 }
             }
             AppEvent::NodeDelay { tag, delay } => {
@@ -1818,6 +1858,27 @@ impl App {
             }
             return;
         }
+        if let Some(kind) = self.overlay.as_ref().map(Overlay::kind) {
+            self.handle_overlay_key(kind, key).await;
+            return;
+        }
+        if self.restart_confirm {
+            match key.code {
+                KeyCode::Char('R') => {
+                    self.restart_confirm = false;
+                    self.perform_restart();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.restart_confirm = false;
+                    return;
+                }
+                _ => {
+                    self.restart_confirm = false;
+                    return;
+                }
+            }
+        }
         if let Some(id) = self.subscription_delete.clone() {
             match key.code {
                 KeyCode::Char('d') => {
@@ -1858,27 +1919,6 @@ impl App {
                 }
                 _ => {}
             }
-        if let Some(kind) = self.overlay.as_ref().map(Overlay::kind) {
-            self.handle_overlay_key(kind, key).await;
-            return;
-        }
-        if self.restart_confirm {
-            match key.code {
-                KeyCode::Char('R') => {
-                    self.restart_confirm = false;
-                    self.perform_restart();
-                    return;
-                }
-                KeyCode::Esc => {
-                    self.restart_confirm = false;
-                    return;
-                }
-                _ => {
-                    self.restart_confirm = false;
-                    return;
-                }
-            }
-        }
         }
         if self.page == Page::Help {
             match key.code {
@@ -2345,51 +2385,11 @@ impl App {
             OverlayKind::Subscription => self.handle_form_key(key),
             OverlayKind::Keyword => self.handle_keyword_form_key(key),
             OverlayKind::Settings => self.handle_settings_form_key(key),
+            OverlayKind::Setup => self.handle_setup_overlay_key(key).await,
             OverlayKind::LogDetail => self.handle_log_detail_key(key),
         }
     }
 
-    fn handle_log_detail_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Enter => self.close_overlay(),
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_log_detail(1),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll_log_detail(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.scroll_log_detail_to(0),
-            KeyCode::Char('G') | KeyCode::End => {
-                self.scroll_log_detail_to(self.log_detail_max_scroll)
-            }
-            _ => {}
-        }
-    }
-
-    fn scroll_log_detail(&mut self, delta: i32) {
-        let max = self.log_detail_max_scroll;
-        if let Some(Overlay::LogDetail { scroll, .. }) = self.overlay.as_mut() {
-            *scroll = if delta >= 0 {
-                scroll.saturating_add(delta as usize).min(max)
-            } else {
-                scroll.saturating_sub((-delta) as usize)
-            };
-        }
-    }
-
-    fn scroll_log_detail_to(&mut self, offset: usize) {
-        if let Some(Overlay::LogDetail { scroll, .. }) = self.overlay.as_mut() {
-            *scroll = offset.min(self.log_detail_max_scroll);
-        }
-    }
-
-    fn handle_form_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.close_overlay();
-                return;
-            }
-            OverlayKind::Setup => self.handle_setup_overlay_key(key).await,
-            KeyCode::Enter => {
-                self.save_subscription_form();
-                return;
-            }
     fn setup_overlay_selected(&self) -> Option<usize> {
         match &self.overlay {
             Some(Overlay::Setup { selected }) => Some(*selected),
@@ -2440,6 +2440,46 @@ impl App {
         }
     }
 
+    fn handle_log_detail_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => self.close_overlay(),
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_log_detail(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_log_detail(-1),
+            KeyCode::Char('g') | KeyCode::Home => self.scroll_log_detail_to(0),
+            KeyCode::Char('G') | KeyCode::End => {
+                self.scroll_log_detail_to(self.log_detail_max_scroll)
+            }
+            _ => {}
+        }
+    }
+
+    fn scroll_log_detail(&mut self, delta: i32) {
+        let max = self.log_detail_max_scroll;
+        if let Some(Overlay::LogDetail { scroll, .. }) = self.overlay.as_mut() {
+            *scroll = if delta >= 0 {
+                scroll.saturating_add(delta as usize).min(max)
+            } else {
+                scroll.saturating_sub((-delta) as usize)
+            };
+        }
+    }
+
+    fn scroll_log_detail_to(&mut self, offset: usize) {
+        if let Some(Overlay::LogDetail { scroll, .. }) = self.overlay.as_mut() {
+            *scroll = offset.min(self.log_detail_max_scroll);
+        }
+    }
+
+    fn handle_form_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_overlay();
+                return;
+            }
+            KeyCode::Enter => {
+                self.save_subscription_form();
+                return;
+            }
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(form) = self.subscription_form_mut() {
                     form.focus = (form.focus + 1) % SubscriptionForm::FOCUS_COUNT;
@@ -3139,7 +3179,6 @@ impl App {
         self.proxy_ips_in_flight = true;
         self.last_proxy_ips = Instant::now();
         let tx = self.events_tx.clone();
-        let logger = self.logger.clone();
         let v4_url = self.config.proxy_ip_v4_url.clone();
         let v6_url = self.config.proxy_ip_v6_url.clone();
         let proxy_url = match self
@@ -3175,13 +3214,7 @@ impl App {
                 Ok(ip) => ips.push(format!("v6 {ip}")),
                 Err(err) => errors.push(format!("v6 {err}")),
             }
-            if ips.is_empty() {
-                logger.app(
-                    LogLevel::Warn,
-                    format!("proxy IP lookup failed: {}", errors.join("; ")),
-                );
-            }
-            let _ = tx.send(AppEvent::ProxyIps(ips));
+            let _ = tx.send(AppEvent::ProxyIps { ips, errors });
         });
     }
 
@@ -3566,11 +3599,23 @@ impl App {
         self.health_failure_tag = None;
     }
 
+    fn schedule_no_node_pause(&mut self) {
+        let index = (self.health_no_node_level as usize)
+            .min(HEALTH_NO_NODE_BACKOFF_SECS.len().saturating_sub(1));
+        self.health_pause_until =
+            Some(Instant::now() + Duration::from_secs(HEALTH_NO_NODE_BACKOFF_SECS[index]));
+        self.health_no_node_level = self
+            .health_no_node_level
+            .saturating_add(1)
+            .min(HEALTH_NO_NODE_BACKOFF_SECS.len() as u8 - 1);
+    }
+
     fn invalidate_health_tasks(&mut self) {
         self.health_generation = self.health_generation.wrapping_add(1);
         self.health_probe_in_flight = false;
         self.recovery_in_flight = false;
         self.health_pause_until = None;
+        self.health_no_node_level = 0;
         self.recovery_refresh_pending = false;
         self.reset_health_failures();
         self.last_recovery = None;
@@ -3698,7 +3743,7 @@ impl App {
     fn on_no_healthy_nodes(&mut self) {
         self.recovery_in_flight = false;
         self.reset_health_failures();
-        self.health_pause_until = Some(Instant::now() + HEALTH_NO_NODE_PAUSE);
+        self.schedule_no_node_pause();
         let message = self.text().msg_health_no_nodes.to_string();
         self.last_error = Some(message.clone());
         self.logger
@@ -3736,7 +3781,6 @@ impl App {
             .any(|node| !self.proxy_node_tags.contains(&node.tag));
         if !has_new {
             self.last_error = Some(self.text().msg_health_no_nodes.to_string());
-            self.health_pause_until = Some(Instant::now() + HEALTH_NO_NODE_PAUSE);
             self.logger.app(
                 LogLevel::Warn,
                 "health failover: subscription refresh added no auto candidates",
@@ -4065,6 +4109,28 @@ fn report_clash_error(
     }
 }
 
+fn proxy_ip_failure_level(failures: u32, in_startup_grace: bool) -> LogLevel {
+    if in_startup_grace || failures > 1 {
+        LogLevel::Debug
+    } else {
+        LogLevel::Warn
+    }
+}
+
+fn cached_subscription_age(runtimes: &[SubscriptionRuntime]) -> Option<Duration> {
+    let now = chrono::Local::now().naive_local();
+    let mut oldest = 0i64;
+    let mut count = 0usize;
+    for runtime in runtimes.iter().filter(|runtime| runtime.config.enabled) {
+        count += 1;
+        let updated = runtime.last_updated.as_deref().and_then(|value| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
+        })?;
+        oldest = oldest.max((now - updated).num_seconds().max(0));
+    }
+    (count > 0).then(|| Duration::from_secs(oldest as u64))
+}
+
 fn sort_nodes(
     nodes: &mut [Node],
     mode: NodeSort,
@@ -4359,6 +4425,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_binary_opens_the_setup_popup_on_startup() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        paths.ensure().unwrap();
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+        let app = App::new(Config::default(), paths, logger).await;
+        assert_eq!(app.page, Page::Dashboard);
+        assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
+    }
+
+    #[tokio::test]
     async fn binary_status_tracks_install_and_upgrade() {
         let (mut app, _dir) = test_app().await;
         assert_eq!(app.view().binary_status, BinaryStatus::NotInstalled);
@@ -4424,21 +4505,6 @@ mod tests {
         app.handle_key(key(KeyCode::Enter)).await;
         assert_eq!(app.setup.pending_install.as_ref(), Some(&expected));
         assert!(app.setup.message.is_none());
-    #[tokio::test]
-    async fn missing_binary_opens_the_setup_popup_on_startup() {
-        let dir = TempDir::new().unwrap();
-        let paths = Paths::discover(
-            Some(dir.path().join("config.toml")),
-            Some(dir.path().join("data")),
-        )
-        .unwrap();
-        paths.ensure().unwrap();
-        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
-        let app = App::new(Config::default(), paths, logger).await;
-        assert_eq!(app.page, Page::Dashboard);
-        assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
-    }
-
         assert!(!app.should_quit);
 
         app.handle_key(key(KeyCode::Char('j'))).await;
@@ -5684,5 +5750,133 @@ mod tests {
         assert!(app.health_pause_until.is_some_and(|at| at > Instant::now()));
         app.invalidate_health_tasks();
         assert!(app.health_pause_until.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_node_pause_backs_off_progressively() {
+        let (mut app, _dir) = test_app().await;
+        app.status = ProxyStatus::Running;
+        for expected in HEALTH_NO_NODE_BACKOFF_SECS {
+            app.on_no_healthy_nodes();
+            let remaining = app
+                .health_pause_until
+                .expect("pause")
+                .saturating_duration_since(Instant::now())
+                .as_secs();
+            assert!(
+                remaining <= expected && remaining + 1 >= expected,
+                "{remaining} vs {expected}"
+            );
+        }
+        app.on_no_healthy_nodes();
+        let remaining = app
+            .health_pause_until
+            .expect("pause")
+            .saturating_duration_since(Instant::now())
+            .as_secs();
+        let capped = *HEALTH_NO_NODE_BACKOFF_SECS.last().unwrap();
+        assert!(remaining <= capped && remaining + 1 >= capped);
+    }
+
+    #[tokio::test]
+    async fn healthy_probe_clears_no_node_error_and_backoff() {
+        let (mut app, _dir) = test_app().await;
+        app.status = ProxyStatus::Running;
+        app.nodes = vec![tagged_node("A", "n1")];
+        app.proxy_node_tags = vec!["n1".to_string()];
+        app.metrics.selection.selected = Some("n1".to_string());
+        app.health_no_node_level = 2;
+        app.health_pause_until = Some(Instant::now() - Duration::from_secs(1));
+        let no_nodes = app.text().msg_health_no_nodes.to_string();
+        app.last_error = Some(no_nodes);
+        let generation = app.health_generation;
+
+        app.handle_event(AppEvent::HealthProbe {
+            generation,
+            tag: "n1".to_string(),
+            outcome: HealthOutcome::Healthy(42),
+        })
+        .await;
+
+        assert!(app.last_error.is_none());
+        assert!(app.health_pause_until.is_none());
+        assert_eq!(app.health_no_node_level, 0);
+    }
+
+    #[test]
+    fn proxy_ip_failure_warnings_are_throttled() {
+        assert_eq!(proxy_ip_failure_level(1, false), LogLevel::Warn);
+        assert_eq!(proxy_ip_failure_level(2, false), LogLevel::Debug);
+        assert_eq!(proxy_ip_failure_level(1, true), LogLevel::Debug);
+    }
+
+    #[test]
+    fn cached_subscription_age_uses_oldest_enabled_entry() {
+        let config = |id: &str, enabled: bool| SubscriptionConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            url: "https://example.com/sub".to_string(),
+            enabled,
+        };
+        let now = chrono::Local::now();
+        let stamp = |minutes: i64| {
+            (now - chrono::Duration::minutes(minutes))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        };
+        let mut fresh = empty_runtime(config("a", true));
+        fresh.last_updated = Some(stamp(10));
+        let mut old = empty_runtime(config("b", true));
+        old.last_updated = Some(stamp(120));
+        let disabled = empty_runtime(config("c", false));
+
+        assert!(cached_subscription_age(&[fresh.clone()]).unwrap() < SUBSCRIPTION_STARTUP_MAX_AGE);
+        assert!(
+            cached_subscription_age(&[fresh.clone(), old]).unwrap() > SUBSCRIPTION_STARTUP_MAX_AGE
+        );
+        assert!(
+            cached_subscription_age(&[fresh.clone(), disabled]).unwrap()
+                < SUBSCRIPTION_STARTUP_MAX_AGE
+        );
+        assert!(cached_subscription_age(&[empty_runtime(config("d", true))]).is_none());
+        assert!(cached_subscription_age(&[]).is_none());
+    }
+
+    async fn app_with_cached_subscription(last_updated: Option<String>) -> (App, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        paths.ensure().unwrap();
+        let mut config = Config::default();
+        let subscription = SubscriptionConfig {
+            id: "s-1".to_string(),
+            name: "test".to_string(),
+            url: "https://example.com/sub".to_string(),
+            enabled: true,
+        };
+        config.subscriptions.push(subscription.clone());
+        let mut runtime = empty_runtime(subscription);
+        runtime.nodes = vec![node("cached")];
+        runtime.last_updated = last_updated;
+        subscription::cache::save(&paths.subscription_cache(), &[runtime]).unwrap();
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+        (App::new(config, paths, logger).await, dir)
+    }
+
+    #[tokio::test]
+    async fn fresh_subscription_cache_skips_startup_refresh() {
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let (app, _dir) = app_with_cached_subscription(Some(now)).await;
+        assert!(!app.refreshing_subscriptions);
+        assert!(app.last_subscription_refresh.is_some());
+
+        let old = (chrono::Local::now() - chrono::Duration::hours(2))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let (app, _dir) = app_with_cached_subscription(Some(old)).await;
+        assert!(app.refreshing_subscriptions);
     }
 }

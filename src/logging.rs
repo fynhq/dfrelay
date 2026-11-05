@@ -487,7 +487,7 @@ impl Logger {
             };
             inner.dir.clone()
         };
-        let cutoff = Local::now().date_naive() - Duration::days(RETENTION_DAYS);
+        let cutoff = Local::now().date_naive() - Duration::days(RETENTION_DAYS - 1);
         let Ok(entries) = fs::read_dir(&dir) else {
             return;
         };
@@ -636,13 +636,18 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_old_logs() {
+    fn cleanup_keeps_exactly_seven_days_of_logs() {
         let dir = TempDir::new().unwrap();
-        let old = Local::now().date_naive() - Duration::days(8);
-        let old_path = dir.path().join(format!("dfrelay-{old}.log"));
+        let boundary = Local::now().date_naive() - Duration::days(RETENTION_DAYS - 1);
+        let kept_path = dir.path().join(format!("dfrelay-{boundary}.log"));
+        fs::write(&kept_path, "keep").unwrap();
+        let old_path = dir
+            .path()
+            .join(format!("dfrelay-{}.log", boundary - Duration::days(1)));
         fs::write(&old_path, "old").unwrap();
         let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
         logger.cleanup_old();
+        assert!(kept_path.exists());
         assert!(!old_path.exists());
     }
 
