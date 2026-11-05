@@ -17,6 +17,8 @@ use crate::logging::{LogLevel, LogLine, LogSource};
 use crate::theme::Palette;
 use crate::view::{BinaryStatus, View};
 
+const HEADER_HEIGHT: u16 = 4;
+
 #[cfg(test)]
 pub fn render(frame: &mut Frame, view: &View) {
     render_at(frame, view, 0, Palette::Dark);
@@ -34,9 +36,8 @@ pub fn render_at(frame: &mut Frame, view: &View, tick: u64, palette: Palette) {
         return;
     }
 
-    let header_height = if view.last_error.is_some() { 5 } else { 4 };
     let chunks = Layout::vertical([
-        Constraint::Length(header_height),
+        Constraint::Length(HEADER_HEIGHT),
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
@@ -45,7 +46,9 @@ pub fn render_at(frame: &mut Frame, view: &View, tick: u64, palette: Palette) {
 
     render_header(frame, view, chunks[0], palette);
     render_tabs(frame, view, chunks[1]);
-    render_page(frame, view, chunks[2], tick, palette);
+    if view.overlay.is_none() {
+        render_page(frame, view, chunks[2], tick, palette);
+    }
     render_footer(frame, view, chunks[3], palette);
     render_overlay(frame, view, area, palette);
 }
@@ -118,17 +121,10 @@ fn render_header(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pa
         first_line.push(Span::styled(right_text, right_style));
     }
 
-    let mut lines = vec![
+    let lines = vec![
         Line::from(first_line),
         Line::from(format!("{prefix}{current}{middle}{suffix}")),
     ];
-    if let Some(error) = &view.last_error {
-        lines.push(Line::from(Span::styled(
-            format!("{}: {error}", text.last_error),
-            Style::default().fg(Color::Red),
-        )));
-    }
-
     let paragraph = Paragraph::new(lines)
         .block(titled_block(text.app_title))
         .wrap(Wrap { trim: true });
@@ -171,7 +167,6 @@ fn render_page(
         Page::Connections => render_connections(frame, view, area),
         Page::Logs => render_logs(frame, view, area, palette),
         Page::Settings => render_settings(frame, view, area, palette),
-        Page::Setup => render_setup(frame, view, area, palette),
         Page::Help => render_help(frame, view, area),
     }
 }
@@ -265,14 +260,19 @@ fn dashboard_lines(view: &View, width: usize) -> Vec<Line<'static>> {
         ),
         width,
     );
-    push_key_value(
-        &mut lines,
+    let error_lines = key_value_wrapped(
         text.last_error,
         view.last_error
             .clone()
             .unwrap_or_else(|| text.no_error.to_string()),
         width,
     );
+    let error_style = if view.last_error.is_some() {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default()
+    };
+    lines.extend(error_lines.into_iter().map(|line| line.style(error_style)));
     lines
 }
 
@@ -905,10 +905,14 @@ fn setup_lines(
         .collect()
 }
 
-fn render_setup(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, palette: Palette) {
+fn setup_content_lines(
+    view: &View,
+    inner_width: usize,
+    selected: usize,
+    palette: Palette,
+) -> (Vec<Line<'static>>, usize) {
     let text = view.text();
     let installed = view.binary_status != BinaryStatus::NotInstalled;
-    let inner_width = area.width.saturating_sub(4) as usize;
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     if installed {
         let current =
@@ -989,7 +993,7 @@ fn render_setup(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pal
     } else {
         let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
         for (index, candidate) in view.setup.candidates.iter().enumerate() {
-            let selected = index == view.selected;
+            let is_selected = index == selected;
             let suffix = if candidate.has_checksum {
                 " [sha256]"
             } else {
@@ -999,7 +1003,7 @@ fn render_setup(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pal
             let label_available = inner_width.saturating_sub(2 + suffix_width).max(1);
             let label = truncate_to_width(&candidate.label, label_available);
             let mut spans = Vec::new();
-            if selected {
+            if is_selected {
                 let content_width = 2 + UnicodeWidthStr::width(label.as_str()) + suffix_width;
                 spans.push(Span::styled("▸ ", selected_style));
                 spans.push(Span::styled(label, selected_style));
@@ -1021,15 +1025,36 @@ fn render_setup(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pal
             lines.push(Line::from(spans));
         }
     }
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let selected_line = candidate_start.saturating_add(view.selected);
-    let offset = selected_line.saturating_sub(inner_height.saturating_sub(1));
+    (lines, candidate_start)
+}
+
+fn render_setup_popup(
+    frame: &mut Frame,
+    view: &View,
+    selected: usize,
+    area: ratatui::layout::Rect,
+    palette: Palette,
+) {
+    let text = view.text();
+    let width = popup_width(area, 12, 72, 100);
+    let inner_width = width.saturating_sub(4) as usize;
+    let (lines, candidate_start) = setup_content_lines(view, inner_width, selected, palette);
+    let height = popup_height(area, &lines);
+    let inner_height = height.saturating_sub(2) as usize;
+    let selected_line = candidate_start.saturating_add(selected);
+    let offset = if view.setup.candidates.is_empty() {
+        0
+    } else {
+        selected_line.saturating_sub(inner_height.saturating_sub(1))
+    };
+    let popup = centered_rect(area, width, height);
+    frame.render_widget(Clear, popup);
     let title = format!("{}  {}", text.setup_title, text.setup_key_hints);
     let paragraph = Paragraph::new(lines)
         .block(titled_block(title))
         .wrap(Wrap { trim: false })
         .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0));
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, popup);
 }
 
 fn help_content_lines(view: &View, width: usize) -> Vec<Line<'static>> {
@@ -1108,8 +1133,7 @@ pub fn help_max_scroll(view: &View, width: u16, height: u16) -> usize {
     if view.page != crate::app::Page::Help || width < 60 || height < 16 {
         return 0;
     }
-    let header = if view.last_error.is_some() { 5 } else { 4 };
-    let page_height = height.saturating_sub(header + 2);
+    let page_height = height.saturating_sub(HEADER_HEIGHT + 2);
     help_page_max_scroll(view, width, page_height)
 }
 
@@ -1117,8 +1141,7 @@ pub fn dashboard_max_scroll(view: &View, width: u16, height: u16) -> usize {
     if view.page != crate::app::Page::Dashboard || width < 60 || height < 16 {
         return 0;
     }
-    let header = if view.last_error.is_some() { 5 } else { 4 };
-    let page_height = height.saturating_sub(header + 2);
+    let page_height = height.saturating_sub(HEADER_HEIGHT + 2);
     let inner_height = page_height.saturating_sub(2) as usize;
     let inner_width = width.saturating_sub(4) as usize;
     dashboard_lines(view, inner_width)
@@ -1324,6 +1347,7 @@ fn render_overlay(frame: &mut Frame, view: &View, area: Rect, palette: Palette) 
     };
     match overlay {
         Overlay::Edit(form) => render_edit_form(frame, view.text(), form, area, palette),
+        Overlay::Setup { selected } => render_setup_popup(frame, view, *selected, area, palette),
         Overlay::LogDetail { line, scroll } => {
             render_log_detail(frame, view.text(), line, *scroll, area, palette)
         }
@@ -1398,7 +1422,7 @@ fn subscription_form_lines(
             field_label_style(form.focus == 2, palette),
         ),
         Span::raw(": "),
-        Span::raw(if form.enabled { "[◉]" } else { "[ ]" }),
+        Span::raw(if form.enabled { "[✓]" } else { "[ ]" }),
         Span::raw("  Space"),
     ]));
     lines
@@ -1578,7 +1602,7 @@ fn render_footer(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pa
             text.msg_rollback_confirm,
             Style::default().fg(Color::Yellow),
         )]
-    } else if view.page == Page::Setup && view.setup.pending_install.is_some() {
+    } else if view.setup.pending_install.is_some() {
         vec![Span::styled(
             text.setup_confirm_unverified,
             Style::default().fg(Color::Yellow),
@@ -1762,7 +1786,8 @@ mod tests {
         let mut config = Config::default();
         config.language = lang;
         let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
-        let app = App::new(config, paths, logger).await;
+        let mut app = App::new(config, paths, logger).await;
+        app.overlay = None;
         (app, dir)
     }
 
@@ -1851,20 +1876,20 @@ mod tests {
         let content = rendered(&app, 30);
         assert!(content.contains("DFRelay"));
         let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(compact.contains("官方地址"));
+        assert!(compact.contains("监听"));
     }
 
     #[tokio::test]
     async fn renders_english_when_selected() {
         let (app, _dir) = test_app(Lang::En).await;
         let content = rendered(&app, 30);
-        assert!(content.contains("sing-box info"));
+        assert!(content.contains("Listen"));
     }
 
     #[tokio::test]
     async fn setup_wrapped_values_stay_aligned_with_the_value_column() {
         let (mut app, _dir) = test_app(Lang::En).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         app.paths.bin_dir = std::path::PathBuf::from(format!("/tmp/{}", "a".repeat(100)));
@@ -1893,7 +1918,7 @@ mod tests {
     #[tokio::test]
     async fn setup_page_shows_versions_status_and_neutral_hint() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         let content = rendered(&app, 30);
@@ -1940,7 +1965,7 @@ mod tests {
         assert!(compact.contains("j/kselect"), "{compact}");
         assert!(compact.contains("Enteraction"), "{compact}");
 
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         let content = rendered_with_width(&app, 80, 24);
@@ -1958,7 +1983,7 @@ mod tests {
     #[tokio::test]
     async fn setup_fits_key_hints_at_eighty_columns() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         app.latest_binary_version = Some("1.15.0".to_string());
@@ -1977,7 +2002,7 @@ mod tests {
     #[tokio::test]
     async fn setup_shows_binary_verification_state() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         app.binary_verified = Some(false);
@@ -1998,7 +2023,7 @@ mod tests {
     #[tokio::test]
     async fn setup_hides_current_version_when_not_installed() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = false;
         app.latest_binary_version = Some("1.15.0".to_string());
         let content = rendered(&app, 30);
@@ -2013,7 +2038,7 @@ mod tests {
     #[tokio::test]
     async fn setup_keeps_two_spaces_between_english_labels_and_values() {
         let (mut app, _dir) = test_app(Lang::En).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         app.previous_binary_available = true;
@@ -2025,7 +2050,7 @@ mod tests {
     #[tokio::test]
     async fn setup_candidates_use_the_standard_selection_style() {
         let (mut app, _dir) = test_app(Lang::En).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         app.setup.candidates = vec![
@@ -2040,7 +2065,6 @@ mod tests {
                 has_checksum: false,
             },
         ];
-        app.selected = 0;
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let view = app.view();
@@ -2052,10 +2076,20 @@ mod tests {
             .iter()
             .find(|row| row.iter().any(|cell| cell.symbol() == "▸"))
             .expect("selected candidate row");
-        assert_eq!(selected_row[2].symbol(), "▸");
-        assert_eq!(selected_row[2].fg, Color::Black);
-        assert_eq!(selected_row[2].bg, Color::Cyan);
-        assert_eq!(selected_row[97].bg, Color::Cyan);
+        let marker = selected_row
+            .iter()
+            .position(|cell| cell.symbol() == "▸")
+            .expect("selection marker");
+        assert_eq!(marker, 8);
+        assert_eq!(selected_row[marker].fg, Color::Black);
+        assert_eq!(selected_row[marker].bg, Color::Cyan);
+        assert_eq!(
+            selected_row
+                .iter()
+                .filter(|cell| cell.bg == Color::Cyan)
+                .count(),
+            84
+        );
 
         let unselected_row = rows
             .iter()
@@ -2071,7 +2105,7 @@ mod tests {
     #[tokio::test]
     async fn setup_unverified_install_confirmation_is_in_the_footer() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.setup.pending_install = Some(std::path::PathBuf::from("/inbox/raw"));
         let content = rendered(&app, 30);
         let last_line: String = content.chars().skip(100 * 29).collect();
@@ -2083,7 +2117,7 @@ mod tests {
     #[tokio::test]
     async fn setup_shows_installing_status() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.setup.installing = true;
         let content = rendered(&app, 30);
         let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
@@ -2098,7 +2132,7 @@ mod tests {
             (Lang::En, "j/kselectEnterinstallbprev"),
         ] {
             let (mut app, _dir) = test_app(lang).await;
-            app.page = Page::Setup;
+            app.overlay = Some(Overlay::Setup { selected: 0 });
             app.binary_installed = true;
             app.binary_version = Some("1.14.4".to_string());
             let content = rendered_with_width(&app, 60, 24);
@@ -2110,7 +2144,7 @@ mod tests {
     #[tokio::test]
     async fn setup_download_status_is_not_duplicated() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.setup.downloading = true;
         app.setup.message = None;
         let content = rendered(&app, 30);
@@ -2961,7 +2995,7 @@ mod tests {
     #[tokio::test]
     async fn setup_scrolls_the_selected_candidate_into_view() {
         let (mut app, _dir) = test_app(Lang::En).await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.setup.candidates = (0..30)
             .map(|index| crate::singbox::binary::InboxCandidate {
                 path: std::path::PathBuf::from(format!("/inbox/cand-{index}")),
@@ -2969,7 +3003,7 @@ mod tests {
                 has_checksum: true,
             })
             .collect();
-        app.selected = 29;
+        app.overlay = Some(Overlay::Setup { selected: 29 });
         let content = rendered(&app, 30);
         assert!(content.contains("cand-29"), "{content}");
     }
@@ -3031,6 +3065,17 @@ mod tests {
         assert!(compact.contains("←/→光标"), "{compact}");
         assert!(compact.contains("Enter保存"), "{compact}");
         assert!(compact.contains("Esc取消"), "{compact}");
+    }
+
+    #[tokio::test]
+    async fn overlays_hide_the_page_background_but_keep_the_header() {
+        let (mut app, _dir) = test_app(Lang::En).await;
+        app.page = Page::Settings;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
+        let content = rendered(&app, 30);
+        assert!(content.contains("DFRelay"));
+        assert!(content.contains("sing-box info"));
+        assert!(!content.contains("Language"), "{content}");
     }
 
     #[tokio::test]
@@ -3225,7 +3270,15 @@ mod tests {
         let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains("新增订阅"));
         assert!(compact.contains("启用"));
-        assert!(compact.contains("[◉]"));
+        assert!(compact.contains("[✓]"));
+        assert!(!content.contains("[ ]"));
+
+        if let Some(Overlay::Edit(EditForm::Subscription(form))) = &mut app.overlay {
+            form.enabled = false;
+        }
+        let content = rendered(&app, 30);
+        assert!(content.contains("[ ]"));
+        assert!(!content.contains("[✓]"));
     }
 
     #[tokio::test]
@@ -3258,14 +3311,14 @@ mod tests {
             .expect("url value");
         let enabled_row = rows
             .iter()
-            .position(|row| find_cell(row, "[◉]").is_some())
+            .position(|row| find_cell(row, "[✓]").is_some())
             .expect("enabled value");
         let name_column = find_cell(rows[name_row], "alpha").unwrap();
         assert_eq!(
             name_column,
             find_cell(rows[url_row], "https://example.com/sub").unwrap()
         );
-        assert_eq!(name_column, find_cell(rows[enabled_row], "[◉]").unwrap());
+        assert_eq!(name_column, find_cell(rows[enabled_row], "[✓]").unwrap());
     }
 
     #[test]
@@ -3382,6 +3435,95 @@ mod tests {
                 "line exceeds dashboard width: {line:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dashboard_marks_the_last_error_red_and_the_header_stays_clean() {
+        let (mut app, _dir) = test_app(Lang::En).await;
+        app.page = Page::Dashboard;
+        app.last_error = Some(
+            "a deliberately long error message that must wrap instead of being cropped by the dashboard"
+                .to_string(),
+        );
+        let view = app.view();
+        let lines = dashboard_lines(&view, 40);
+        let error_index = lines
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("Last error"))
+            })
+            .expect("last error line");
+        assert!(error_index + 1 < lines.len(), "long error should wrap");
+        for line in &lines[error_index..] {
+            assert_eq!(
+                line.style.fg,
+                Some(Color::Red),
+                "last error line is not red: {line:?}"
+            );
+        }
+
+        let compact: String = rendered(&app, 30)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(
+            compact.matches("Lasterror").count(),
+            1,
+            "header repeats the persistent error: {compact}"
+        );
+
+        for (width, height) in [(80, 24), (120, 40)] {
+            let rows = rendered_rows(&view, width, height);
+            let tabs: String = rows[4].join("");
+            assert!(
+                tabs.contains("Dashboard"),
+                "header grew past two lines at {width}x{height}: {tabs}"
+            );
+            let all: String = rows.concat().join("");
+            assert_eq!(
+                all.matches("Last error").count(),
+                1,
+                "persistent error rendered outside the dashboard at {width}x{height}"
+            );
+        }
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &view)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut found_error_row = false;
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer.content[(y * buffer.area.width + x) as usize].symbol())
+                .collect();
+            if !row.contains("Last error") {
+                continue;
+            }
+            found_error_row = true;
+            for x in 0..buffer.area.width {
+                let cell = &buffer.content[(y * buffer.area.width + x) as usize];
+                if cell.symbol().trim().is_empty() || cell.symbol() == "│" {
+                    continue;
+                }
+                assert_eq!(cell.fg, Color::Red, "last error row is not red: {row}");
+            }
+        }
+        assert!(found_error_row, "dashboard did not render the last error");
+
+        app.last_error = None;
+        let view = app.view();
+        let lines = dashboard_lines(&view, 80);
+        let error_index = lines
+            .iter()
+            .position(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("Last error"))
+            })
+            .expect("last error line");
+        assert_ne!(lines[error_index].style.fg, Some(Color::Red));
     }
 
     #[tokio::test]
@@ -3809,12 +3951,14 @@ mod tests {
             Page::Connections,
             Page::Logs,
             Page::Settings,
-            Page::Setup,
         ] {
             app.page = page;
             let content = rendered_with_width(&app, 60, 20);
             assert!(!content.is_empty(), "{page:?}");
         }
+        app.overlay = Some(Overlay::Setup { selected: 0 });
+        let content = rendered_with_width(&app, 60, 20);
+        assert!(content.contains("DFRelay"), "{content}");
     }
 
     #[tokio::test]

@@ -54,7 +54,6 @@ pub enum Page {
     Connections,
     Logs,
     Settings,
-    Setup,
     Help,
 }
 
@@ -76,7 +75,6 @@ impl Page {
             Self::Connections => text.nav_connections,
             Self::Logs => text.nav_logs,
             Self::Settings => text.nav_settings,
-            Self::Setup => text.nav_setup,
             Self::Help => text.nav_help,
         }
     }
@@ -448,6 +446,7 @@ pub enum Overlay {
     Edit(EditForm),
     LogDetail { line: LogLine, scroll: usize },
 }
+    Setup { selected: usize },
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverlayKind {
@@ -456,6 +455,7 @@ enum OverlayKind {
     Settings,
     LogDetail,
 }
+    Setup,
 
 impl Overlay {
     fn kind(&self) -> OverlayKind {
@@ -465,12 +465,13 @@ impl Overlay {
             Self::Edit(EditForm::Settings(_)) => OverlayKind::Settings,
             Self::LogDetail { .. } => OverlayKind::LogDetail,
         }
+            Self::Setup { .. } => OverlayKind::Setup,
     }
 
     pub fn log_detail(&self) -> Option<(&LogLine, usize)> {
         match self {
             Self::LogDetail { line, scroll } => Some((line, *scroll)),
-            Self::Edit(_) => None,
+            Self::Edit(_) | Self::Setup { .. } => None,
         }
     }
 }
@@ -590,7 +591,7 @@ pub struct App {
     node_sort: NodeSort,
     pub subscriptions: Vec<SubscriptionRuntime>,
     pub selected: usize,
-    page_selection: [usize; 8],
+    page_selection: [usize; 7],
     pub metrics: MetricsSnapshot,
     pub node_delays: HashMap<String, u64>,
     pub delay_testing: HashSet<String>,
@@ -673,7 +674,6 @@ pub struct App {
     events_rx: UnboundedReceiver<AppEvent>,
     clients: HashMap<u64, ClientHandle>,
     help_return: Option<Page>,
-    setup_return: Option<Page>,
 }
 
 impl App {
@@ -757,6 +757,11 @@ impl App {
     fn set_edit_error(&mut self, message: String) {
         if let Some(form) = self.edit_form_mut() {
             form.set_error(Some(message));
+        if matches!(self.overlay, Some(Overlay::Setup { .. })) {
+            self.setup.pending_install = None;
+            self.setup.message = None;
+            self.rollback_confirm = false;
+        }
         }
     }
 
@@ -786,10 +791,11 @@ impl App {
                 .or_else(|| metadata.as_ref().map(|metadata| metadata.version.clone()));
             binary_verified = metadata.map(|metadata| metadata.verified);
         }
-        let page = if locator.is_none() {
-            Page::Setup
+        let page = Page::Dashboard;
+        let overlay = if locator.is_none() {
+            Some(Overlay::Setup { selected: 0 })
         } else {
-            Page::Dashboard
+            None
         };
         let mut cached_subscriptions =
             subscription::cache::load(&paths.subscription_cache(), &config.subscriptions);
@@ -816,7 +822,7 @@ impl App {
             node_sort: NodeSort::default(),
             subscriptions: cached_subscriptions,
             selected: 0,
-            page_selection: [0; 8],
+            page_selection: [0; 7],
             metrics: MetricsSnapshot::default(),
             node_delays: HashMap::new(),
             delay_testing: HashSet::new(),
@@ -836,7 +842,7 @@ impl App {
             setup,
             install_in_flight: false,
             pending_restart_subscription: None,
-            overlay: None,
+            overlay,
             log_detail_max_scroll: 0,
             subscription_delete: None,
             log_source: LogSource::All,
@@ -899,7 +905,6 @@ impl App {
             events_rx,
             clients: HashMap::new(),
             help_return: None,
-            setup_return: None,
         };
         if has_enabled {
             app.refresh_subscriptions();
@@ -960,13 +965,7 @@ impl App {
         };
         let tab_page = match self.page {
             Page::Help => self.help_return.unwrap_or(Page::Dashboard),
-            Page::Setup => self.setup_return.unwrap_or(Page::Dashboard),
             _ => self.page,
-        };
-        let tab_page = if tab_page == Page::Setup {
-            self.setup_return.unwrap_or(Page::Dashboard)
-        } else {
-            tab_page
         };
         View {
             config,
@@ -1793,27 +1792,6 @@ impl App {
         {
             return;
         }
-        if let Some(kind) = self.overlay.as_ref().map(Overlay::kind) {
-            self.handle_overlay_key(kind, key);
-            return;
-        }
-        if self.restart_confirm {
-            match key.code {
-                KeyCode::Char('R') => {
-                    self.restart_confirm = false;
-                    self.perform_restart();
-                    return;
-                }
-                KeyCode::Esc => {
-                    self.restart_confirm = false;
-                    return;
-                }
-                _ => {
-                    self.restart_confirm = false;
-                    return;
-                }
-            }
-        }
         if self.rollback_confirm {
             match key.code {
                 KeyCode::Char('b') => {
@@ -1880,6 +1858,27 @@ impl App {
                 }
                 _ => {}
             }
+        if let Some(kind) = self.overlay.as_ref().map(Overlay::kind) {
+            self.handle_overlay_key(kind, key).await;
+            return;
+        }
+        if self.restart_confirm {
+            match key.code {
+                KeyCode::Char('R') => {
+                    self.restart_confirm = false;
+                    self.perform_restart();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.restart_confirm = false;
+                    return;
+                }
+                _ => {
+                    self.restart_confirm = false;
+                    return;
+                }
+            }
+        }
         }
         if self.page == Page::Help {
             match key.code {
@@ -1904,11 +1903,11 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => self.detach_clients(),
-            KeyCode::Esc => match self.page {
-                Page::Help => self.return_from_help(),
-                Page::Setup => self.return_from_setup(),
-                _ => {}
-            },
+            KeyCode::Esc => {
+                if self.page == Page::Help {
+                    self.return_from_help();
+                }
+            }
             KeyCode::Char('l') | KeyCode::Right => {
                 let target = if MAIN_PAGES.contains(&self.page) {
                     self.page.next_main()
@@ -1930,9 +1929,6 @@ impl App {
             KeyCode::Char('s') => self.start_or_stop(),
             KeyCode::Char('R') => self.request_restart(),
             KeyCode::Char('r') => self.refresh_current().await,
-            KeyCode::Char('d') if self.page == Page::Setup => self.start_download(),
-            KeyCode::Char('b') if self.page == Page::Setup => self.request_rollback(),
-            KeyCode::Char('p') if self.page == Page::Setup => self.copy_binary_path(),
             KeyCode::Char('d') if self.page == Page::Subscriptions => {
                 self.request_delete_subscription();
             }
@@ -1973,7 +1969,6 @@ impl App {
                     self.switch_page(Page::Logs);
                 }
             }
-            Page::Setup => self.install_selected().await,
             Page::Nodes => self.select_node().await,
             Page::Subscriptions => self.open_edit_subscription_form(),
             Page::Connections => self.copy_connection_target(),
@@ -1999,20 +1994,12 @@ impl App {
         self.switch_page(target);
     }
 
-    fn return_from_setup(&mut self) {
-        let target = self.setup_return.take().unwrap_or(Page::Dashboard);
-        self.setup.pending_install = None;
-        self.switch_page(target);
-    }
-
-    fn open_setup(&mut self) {
-        if self.page != Page::Setup {
-            self.switch_page(Page::Setup);
-        }
+    fn open_setup_overlay(&mut self) {
+        self.close_overlay();
+        self.overlay = Some(Overlay::Setup { selected: 0 });
         self.setup.pending_install = None;
         self.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
         self.setup.message = None;
-        self.selected = 0;
         self.refresh_previous_binary_state();
         self.maybe_check_binary_update();
     }
@@ -2089,12 +2076,6 @@ impl App {
         if self.page == page {
             return;
         }
-        if page == Page::Setup && self.page != Page::Setup && self.page != Page::Help {
-            self.setup_return = Some(self.page);
-        }
-        if self.page == Page::Setup && page != Page::Setup && page != Page::Help {
-            self.setup_return = None;
-        }
         self.page_selection[self.page.index()] = self.selected;
         if self.page == Page::Help && page != Page::Help {
             self.help_return = None;
@@ -2113,7 +2094,7 @@ impl App {
             self.sort_nodes_preserving_selection();
             self.maybe_test_node_delays(false);
         }
-        if matches!(page, Page::Settings | Page::Setup) {
+        if page == Page::Settings {
             self.maybe_check_binary_update();
         }
     }
@@ -2148,7 +2129,6 @@ impl App {
 
     fn max_selection_for(&self, page: Page) -> usize {
         match page {
-            Page::Setup => self.setup.candidates.len(),
             Page::Nodes => self.nodes.len(),
             Page::Connections => self.metrics.connections.len(),
             Page::Subscriptions => self.subscriptions.len(),
@@ -2250,11 +2230,6 @@ impl App {
 
     async fn refresh_current(&mut self) {
         match self.page {
-            Page::Setup => {
-                self.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
-                self.selected = 0;
-                self.setup.message = None;
-            }
             Page::Nodes => self.maybe_test_node_delays(true),
             Page::Subscriptions | Page::Dashboard => self.refresh_subscriptions(),
             _ => {
@@ -2365,7 +2340,7 @@ impl App {
             .app(LogLevel::Info, format!("subscription deleted: {id}"));
     }
 
-    fn handle_overlay_key(&mut self, kind: OverlayKind, key: KeyEvent) {
+    async fn handle_overlay_key(&mut self, kind: OverlayKind, key: KeyEvent) {
         match kind {
             OverlayKind::Subscription => self.handle_form_key(key),
             OverlayKind::Keyword => self.handle_keyword_form_key(key),
@@ -2410,10 +2385,61 @@ impl App {
                 self.close_overlay();
                 return;
             }
+            OverlayKind::Setup => self.handle_setup_overlay_key(key).await,
             KeyCode::Enter => {
                 self.save_subscription_form();
                 return;
             }
+    fn setup_overlay_selected(&self) -> Option<usize> {
+        match &self.overlay {
+            Some(Overlay::Setup { selected }) => Some(*selected),
+            _ => None,
+        }
+    }
+
+    fn move_setup_selection(&mut self, delta: i32) {
+        let count = self.setup.candidates.len();
+        if let Some(Overlay::Setup { selected }) = self.overlay.as_mut() {
+            if count == 0 {
+                *selected = 0;
+                return;
+            }
+            let next = *selected as i32 + delta;
+            *selected = next.clamp(0, count as i32 - 1) as usize;
+        }
+    }
+
+    fn jump_setup_selection(&mut self, bottom: bool) {
+        let count = self.setup.candidates.len();
+        if let Some(Overlay::Setup { selected }) = self.overlay.as_mut() {
+            *selected = if bottom { count.saturating_sub(1) } else { 0 };
+        }
+    }
+
+    fn rescan_inbox(&mut self) {
+        self.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
+        if let Some(Overlay::Setup { selected }) = self.overlay.as_mut() {
+            *selected = 0;
+        }
+        self.setup.message = None;
+    }
+
+    async fn handle_setup_overlay_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_overlay(),
+            KeyCode::Char('j') | KeyCode::Down => self.move_setup_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => self.move_setup_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => self.jump_setup_selection(false),
+            KeyCode::Char('G') | KeyCode::End => self.jump_setup_selection(true),
+            KeyCode::Enter => self.install_selected().await,
+            KeyCode::Char('d') => self.start_download(),
+            KeyCode::Char('b') => self.request_rollback(),
+            KeyCode::Char('p') => self.copy_binary_path(),
+            KeyCode::Char('r') => self.rescan_inbox(),
+            _ => {}
+        }
+    }
+
             KeyCode::Tab | KeyCode::Down => {
                 if let Some(form) = self.subscription_form_mut() {
                     form.focus = (form.focus + 1) % SubscriptionForm::FOCUS_COUNT;
@@ -2591,7 +2617,7 @@ impl App {
             SettingsItem::KeywordsInclude => self.open_keyword_form(KeywordField::Include),
             SettingsItem::KeywordsExclude => self.open_keyword_form(KeywordField::Exclude),
             SettingsItem::AppLogLevel => self.cycle_app_log_level(),
-            SettingsItem::BinaryInfo => self.open_setup(),
+            SettingsItem::BinaryInfo => self.open_setup_overlay(),
             SettingsItem::Port
             | SettingsItem::DnsServers
             | SettingsItem::TestUrl
@@ -2940,7 +2966,7 @@ impl App {
             return Err(self.text().msg_proxy_busy.to_string());
         }
         if self.binary_manager.locate().is_none() {
-            self.open_setup();
+            self.open_setup_overlay();
             self.last_error = Some(self.text().msg_singbox_missing.to_string());
             return Err(self.text().msg_singbox_missing.to_string());
         }
@@ -3226,7 +3252,10 @@ impl App {
             self.notify(self.text().setup_busy);
             return;
         }
-        let Some(candidate) = self.setup.candidates.get(self.selected).cloned() else {
+        let Some(selected) = self.setup_overlay_selected() else {
+            return;
+        };
+        let Some(candidate) = self.setup.candidates.get(selected).cloned() else {
             return;
         };
         if !candidate.has_checksum && self.setup.pending_install.as_ref() != Some(&candidate.path) {
@@ -4166,7 +4195,9 @@ mod tests {
         paths.ensure().unwrap();
         let config = Config::default();
         let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
-        (App::new(config, paths, logger).await, dir)
+        let mut app = App::new(config, paths, logger).await;
+        app.overlay = None;
+        (app, dir)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -4312,25 +4343,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_install_entry_opens_setup_and_returns_to_settings() {
+    async fn settings_install_entry_opens_setup_popup() {
         let (mut app, _dir) = test_app().await;
         app.page = Page::Settings;
         app.selected = setting_index(&app, SettingsItem::BinaryInfo);
         app.handle_key(key(KeyCode::Enter)).await;
-        assert_eq!(app.page, Page::Setup);
-        assert_eq!(app.setup_return, Some(Page::Settings));
-        assert_eq!(app.view().tab_page, Page::Settings);
-
-        app.handle_key(key(KeyCode::Char('?'))).await;
-        assert_eq!(app.page, Page::Help);
-        assert_eq!(app.view().tab_page, Page::Settings);
-        app.handle_key(key(KeyCode::Esc)).await;
-        assert_eq!(app.page, Page::Setup);
+        assert_eq!(app.page, Page::Settings);
+        assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
         assert_eq!(app.view().tab_page, Page::Settings);
 
         app.handle_key(key(KeyCode::Esc)).await;
         assert_eq!(app.page, Page::Settings);
-        assert_eq!(app.setup_return, None);
+        assert!(app.overlay.is_none());
         assert_eq!(app.view().tab_page, Page::Settings);
     }
 
@@ -4367,7 +4391,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_requires_previous_binary() {
         let (mut app, _dir) = test_app().await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.handle_key(key(KeyCode::Char('b'))).await;
         assert_eq!(
             app.message.as_deref(),
@@ -4379,7 +4403,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_confirmation_is_consumed_by_other_keys() {
         let (mut app, _dir) = test_app().await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         std::fs::write(app.paths.previous_binary(), b"previous").unwrap();
         app.handle_key(key(KeyCode::Char('b'))).await;
         assert!(app.rollback_confirm);
@@ -4390,7 +4414,7 @@ mod tests {
     #[tokio::test]
     async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
         let (mut app, _dir) = test_app().await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.setup.candidates = vec![InboxCandidate {
             path: PathBuf::from("/inbox/raw-sing-box"),
             label: "raw-sing-box".to_string(),
@@ -4400,11 +4424,26 @@ mod tests {
         app.handle_key(key(KeyCode::Enter)).await;
         assert_eq!(app.setup.pending_install.as_ref(), Some(&expected));
         assert!(app.setup.message.is_none());
+    #[tokio::test]
+    async fn missing_binary_opens_the_setup_popup_on_startup() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        paths.ensure().unwrap();
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+        let app = App::new(Config::default(), paths, logger).await;
+        assert_eq!(app.page, Page::Dashboard);
+        assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
+    }
+
         assert!(!app.should_quit);
 
         app.handle_key(key(KeyCode::Char('j'))).await;
         assert!(app.setup.pending_install.is_none());
-        assert_eq!(app.page, Page::Setup);
+        assert!(matches!(app.overlay, Some(Overlay::Setup { .. })));
 
         app.handle_key(key(KeyCode::Enter)).await;
         assert!(app.setup.pending_install.is_some());
@@ -4416,13 +4455,13 @@ mod tests {
         assert!(app.setup.pending_install.is_some());
         app.handle_key(key(KeyCode::Esc)).await;
         assert!(app.setup.pending_install.is_none());
-        assert_eq!(app.page, Page::Setup);
+        assert!(matches!(app.overlay, Some(Overlay::Setup { .. })));
     }
 
     #[tokio::test]
     async fn ctrl_c_clears_unverified_install_confirmation() {
         let (mut app, _dir) = test_app().await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         app.setup.pending_install = Some(PathBuf::from("/inbox/raw-sing-box"));
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
             .await;
@@ -4539,7 +4578,7 @@ mod tests {
             tx,
         })
         .await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         let expected = app.paths.binary().display().to_string();
         app.handle_key(key(KeyCode::Char('p'))).await;
         assert_eq!(app.message.as_deref(), Some(app.text().settings_copied));
@@ -4999,7 +5038,7 @@ mod tests {
     #[tokio::test]
     async fn singbox_log_level_is_read_only_on_setup() {
         let (mut app, _dir) = test_app().await;
-        app.page = Page::Setup;
+        app.overlay = Some(Overlay::Setup { selected: 0 });
         let before = app.config.singbox_log_level;
         app.handle_key(key(KeyCode::Char('v'))).await;
         assert_eq!(app.config.singbox_log_level, before);

@@ -86,9 +86,10 @@ dfr service forget  # remove the service marker after removing the service
 or with your service manager. `q` / `Ctrl-C` only exit the TUI; the daemon,
 proxy, subscriptions, and logs keep running.
 
-On first use, run `dfr start`, then `dfr`; install sing-box from Setup, add a
-subscription with `n`, select nodes, and start the proxy with `s`. Point
-applications at `http://127.0.0.1:12000` or `socks5://127.0.0.1:12000`.
+On first use, run `dfr start`, then `dfr`; install sing-box from the sing-box
+info popup, add a subscription with `n`, select nodes, and start the proxy with
+`s`. Point applications at `http://127.0.0.1:12000` or
+`socks5://127.0.0.1:12000`.
 
 The main keys are `q` (exit TUI), `s` (start/stop proxy), `R` (restart proxy,
 twice), `L` (language), `?` (help), `h`/`l` or the arrow keys (pages), and
@@ -122,10 +123,10 @@ edited only in `config.toml`; restart the daemon after changing them. For an
 ad-hoc daemon use `dfr restart`; for a service use `dfr restart` (which invokes
 the supervisor) or the service manager.
 
-The managed sing-box binary can be downloaded or updated from Setup. Downloads
-try a direct connection first, then the environment proxy, then DFRelay's local
-mixed proxy, and finally GitHub mirrors; the official release digest is always
-the trust anchor. The previous binary is kept for rollback. `--config` (`-c`) and `--data` (`-d`)
+The managed sing-box binary can be downloaded or updated from the sing-box info
+popup. Downloads try a direct connection first, then the environment proxy, then
+DFRelay's local mixed proxy, and finally GitHub mirrors; the official release
+digest is always the trust anchor. The previous binary is kept for rollback. `--config` (`-c`) and `--data` (`-d`)
 override the XDG paths.
 
 <a id="service-templates"></a>
@@ -358,7 +359,7 @@ dfr service forget  # 移除服务后清理 service marker
 `dfr` 只是客户端。daemon 没运行时应执行 `dfr start` 或通过服务管理器启动。
 `q` / `Ctrl-C` 只退出界面，daemon、代理、订阅和日志继续运行。
 
-首次使用先执行 `dfr start`，再执行 `dfr`；在 Setup 页安装 sing-box，按 `n` 添加订阅，
+首次使用先执行 `dfr start`，再执行 `dfr`；在 sing-box 信息弹窗中安装 sing-box，按 `n` 添加订阅，
 选择节点后按 `s` 启动。应用代理指向 `http://127.0.0.1:12000` 或
 `socks5://127.0.0.1:12000`。
 
@@ -386,8 +387,8 @@ $XDG_DATA_HOME/dfrelay/                # 兜底：~/.local/share/dfrelay/
 数据目录包含受管 sing-box、订阅缓存、运行时配置、inbox 和按天日志（保留 7 天）。
 大部分设置可在 TUI 修改；端口、DNS、测试 URL、sing-box 日志级别和 `bypass_lan`
 只能编辑 `config.toml`，改后需要重启 daemon：ad-hoc 用 `dfr restart`，服务模式用
-`dfr restart`（自动调用服务管理器）或服务管理器。受管 sing-box 可在 Setup 页下载/
-更新：先直连，失败后依次尝试环境代理、本机 mixed 代理，最后才用 GitHub 反代；
+`dfr restart`（自动调用服务管理器）或服务管理器。受管 sing-box 可在 sing-box 信息
+弹窗中下载/更新：先直连，失败后依次尝试环境代理、本机 mixed 代理，最后才用 GitHub 反代；
 始终以官方 release digest 校验，上一版保留用于回滚。
 `--config`（`-c`）、`--data`（`-d`）可覆盖 XDG 路径。
 

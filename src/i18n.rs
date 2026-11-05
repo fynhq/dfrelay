@@ -49,7 +49,6 @@ pub struct Text {
     pub nav_connections: &'static str,
     pub nav_logs: &'static str,
     pub nav_settings: &'static str,
-    pub nav_setup: &'static str,
     pub nav_help: &'static str,
 
     pub status_running: &'static str,
@@ -249,7 +248,6 @@ static ZH: Text = Text {
     nav_connections: "连接",
     nav_logs: "日志",
     nav_settings: "设置",
-    nav_setup: "安装",
     nav_help: "帮助",
 
     status_running: "运行中",
@@ -428,7 +426,7 @@ static ZH: Text = Text {
             lines: &[
                 "j/k  选择",
                 "Enter  切换/编辑/复制/打开",
-                "sing-box 信息：状态；Enter 进入安装页",
+                "sing-box 信息：状态；Enter 打开弹窗",
                 "端口/DNS/测试 URL 需改 config.toml；路径只读",
                 "局域网认证：用户名和密码同时设置才启用",
                 "弹窗：Tab/↑↓ 切字段，←/→ 光标，▸ 当前字段",
@@ -535,7 +533,6 @@ static EN: Text = Text {
     nav_connections: "Connections",
     nav_logs: "Logs",
     nav_settings: "Settings",
-    nav_setup: "Setup",
     nav_help: "Help",
 
     status_running: "Running",
@@ -714,7 +711,7 @@ static EN: Text = Text {
             lines: &[
                 "j/k  select",
                 "Enter  toggle/edit/copy/open",
-                "sing-box info: status; Enter opens Setup",
+                "sing-box info: status; Enter opens the popup",
                 "Port/DNS/Test URL need config.toml; paths read-only",
                 "LAN auth: set both username and password",
                 "Popup: Tab/↑↓ field, ←/→ cursor, ▸ active",
@@ -786,7 +783,7 @@ static EN: Text = Text {
     msg_ipv6_fallback: "IPv6 unavailable; using IPv4 only",
     msg_binary_installed: "sing-box installed",
     msg_binary_switched: "switched sing-box",
-    msg_singbox_missing: "sing-box not installed; open Setup",
+    msg_singbox_missing: "sing-box not installed; open the sing-box info popup",
     msg_rollback_confirm: "b again to switch version, Esc to cancel",
     msg_rollback_unavailable: "no previous version",
     msg_clash_api: "Clash API",
