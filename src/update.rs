@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ use crate::config::{Config, Paths};
 use crate::fsutil;
 use crate::ipc;
 use crate::logging::{LogLevel, Logger};
-use crate::service::{self, ServiceAction, ServiceIdentity, ServiceMarkerState};
+use crate::service::{self, ServiceAction, ServiceIdentity, ServiceManager, ServiceMarkerState};
 use crate::singbox::binary::{self, BinaryError};
 use crate::version;
 
@@ -51,6 +52,8 @@ pub enum UpdateError {
     Restart,
     #[error("another update is already in progress")]
     Busy,
+    #[error("automatic apply is not supported for this service manager: {0:?}")]
+    Unsupported(ServiceManager),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -871,41 +874,124 @@ async fn wait_for_stable_daemon(
     None
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum HelperLaunch {
+    Direct,
+    Command {
+        program: PathBuf,
+        args: Vec<OsString>,
+    },
+}
+
+fn helper_args(paths: &Paths, staged: &Path, target: &Path, version: &str) -> Vec<OsString> {
+    vec![
+        OsString::from("update"),
+        OsString::from("helper"),
+        OsString::from("--staged"),
+        staged.as_os_str().to_os_string(),
+        OsString::from("--target"),
+        target.as_os_str().to_os_string(),
+        OsString::from("--version"),
+        OsString::from(version),
+        OsString::from("--config"),
+        paths.config_file.as_os_str().to_os_string(),
+        OsString::from("--data"),
+        paths.data_dir.as_os_str().to_os_string(),
+    ]
+}
+
+fn helper_launch_plan(
+    identity: Option<&ServiceIdentity>,
+    executable: &Path,
+    args: &[OsString],
+    suffix: &str,
+) -> Result<HelperLaunch, UpdateError> {
+    let Some(identity) = identity else {
+        return Ok(HelperLaunch::Direct);
+    };
+    match identity.manager {
+        ServiceManager::SystemdUser => {
+            let mut command_args: Vec<OsString> = vec![
+                OsString::from("--user"),
+                OsString::from(format!("--unit=dfrelay-update-{suffix}")),
+                OsString::from("--collect"),
+                OsString::from("--no-block"),
+                OsString::from("--"),
+                executable.as_os_str().to_os_string(),
+            ];
+            command_args.extend(args.iter().cloned());
+            Ok(HelperLaunch::Command {
+                program: systemd_run_path(),
+                args: command_args,
+            })
+        }
+        ServiceManager::LaunchdGui => {
+            let mut command_args: Vec<OsString> = vec![
+                OsString::from("submit"),
+                OsString::from("-l"),
+                OsString::from(format!("com.dfrelay.update.{suffix}")),
+                OsString::from("--"),
+                executable.as_os_str().to_os_string(),
+            ];
+            command_args.extend(args.iter().cloned());
+            Ok(HelperLaunch::Command {
+                program: PathBuf::from("/bin/launchctl"),
+                args: command_args,
+            })
+        }
+        manager => Err(UpdateError::Unsupported(manager)),
+    }
+}
+
+fn systemd_run_path() -> PathBuf {
+    for path in ["/usr/bin/systemd-run", "/bin/systemd-run"] {
+        let path = Path::new(path);
+        if path.is_file() {
+            return path.to_path_buf();
+        }
+    }
+    PathBuf::from("systemd-run")
+}
+
 pub fn spawn_apply_helper(
     paths: &Paths,
     staged: &Path,
     target: &Path,
     version: &str,
-) -> std::io::Result<()> {
+    identity: Option<&ServiceIdentity>,
+) -> Result<(), UpdateError> {
     let executable = std::env::current_exe()?;
-    let mut command = Command::new(executable);
-    command
-        .arg("update")
-        .arg("helper")
-        .arg("--staged")
-        .arg(staged)
-        .arg("--target")
-        .arg(target)
-        .arg("--version")
-        .arg(version)
-        .arg("--config")
-        .arg(&paths.config_file)
-        .arg("--data")
-        .arg(&paths.data_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
+    let args = helper_args(paths, staged, target, version);
+    let suffix = format!("{}-{}", std::process::id(), Local::now().timestamp());
+    match helper_launch_plan(identity, &executable, &args, &suffix)? {
+        HelperLaunch::Direct => {
+            let mut command = Command::new(&executable);
+            command
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                unsafe {
+                    command.pre_exec(|| {
+                        libc::setsid();
+                        Ok(())
+                    });
+                }
+            }
+            command.spawn()?;
+        }
+        HelperLaunch::Command { program, args } => {
+            Command::new(program)
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
         }
     }
-    command.spawn()?;
     Ok(())
 }
 
@@ -1037,6 +1123,92 @@ mod tests {
         }
         let bytes = encoder.finish().unwrap();
         assert_eq!(extract_dfrt(&bytes).unwrap(), b"bin");
+    }
+
+    fn service_identity(manager: ServiceManager) -> ServiceIdentity {
+        ServiceIdentity {
+            manager,
+            unit: "dfrelay.service".to_string(),
+            target: None,
+            uid: 1000,
+        }
+    }
+
+    #[test]
+    fn helper_launch_plan_uses_the_service_manager() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        let args = helper_args(
+            &paths,
+            Path::new("/tmp/staged"),
+            Path::new("/tmp/target"),
+            "1.2.3",
+        );
+        let executable = Path::new("/usr/local/bin/dfr");
+
+        assert_eq!(
+            helper_launch_plan(None, executable, &args, "1-2").unwrap(),
+            HelperLaunch::Direct
+        );
+
+        let plan = helper_launch_plan(
+            Some(&service_identity(ServiceManager::SystemdUser)),
+            executable,
+            &args,
+            "1-2",
+        )
+        .unwrap();
+        let HelperLaunch::Command { program, args } = plan else {
+            panic!("expected a command plan");
+        };
+        assert_eq!(
+            program.file_name().and_then(|name| name.to_str()),
+            Some("systemd-run")
+        );
+        for expected in [
+            "--user",
+            "--collect",
+            "--no-block",
+            "--unit=dfrelay-update-1-2",
+            "/usr/local/bin/dfr",
+            "--staged",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg.to_string_lossy() == expected),
+                "missing {expected}"
+            );
+        }
+
+        let plan = helper_launch_plan(
+            Some(&service_identity(ServiceManager::LaunchdGui)),
+            executable,
+            &args,
+            "1-2",
+        )
+        .unwrap();
+        let HelperLaunch::Command { program, args } = plan else {
+            panic!("expected a command plan");
+        };
+        assert_eq!(program, PathBuf::from("/bin/launchctl"));
+        assert_eq!(args[0], OsString::from("submit"));
+        assert_eq!(args[1], OsString::from("-l"));
+        assert_eq!(args[2], OsString::from("com.dfrelay.update.1-2"));
+        assert_eq!(args[3], OsString::from("--"));
+        assert_eq!(args[4], OsString::from("/usr/local/bin/dfr"));
+
+        assert!(matches!(
+            helper_launch_plan(
+                Some(&service_identity(ServiceManager::SystemdSystem)),
+                executable,
+                &args,
+                "1-2"
+            ),
+            Err(UpdateError::Unsupported(ServiceManager::SystemdSystem))
+        ));
     }
 
     #[test]

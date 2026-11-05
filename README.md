@@ -93,8 +93,10 @@ dfr update status   # show the update policy and last result
 `dfr update` verifies the official release digest or `SHA256SUMS`, keeps the
 previous binary for rollback, and restarts the daemon. Automatic updates are
 opt-in (`app_update = "auto"`; default `notify`), apply only to release builds,
-and wait for the TUI to detach or activity to settle. Service-managed daemons
-skip automatic replacement; run `dfr update apply` outside the service.
+and wait for the TUI to detach or activity to settle. For systemd user and
+launchd GUI services, the applier runs as a transient service/job outside the
+main service, so no unit or plist changes are required; system-level services
+still fall back to manual `dfr update apply`.
 
 `dfr` is a pure client. If the daemon is not running, start it with `dfr start`
 or with your service manager. `q` / `Ctrl-C` only exit the TUI; the daemon,
@@ -378,7 +380,8 @@ dfr update status   # 查看更新策略与最近结果
 
 `dfr update` 校验官方 Release 的 digest 或 `SHA256SUMS`，保留上一版用于回滚，然后重启
 daemon。自动更新需显式开启（`app_update = "auto"`，默认 `notify`），仅对发布构建生效，
-并等待 TUI 断开或连接空闲后应用；服务托管模式跳过自动替换，需在服务外执行
+并等待 TUI 断开或连接空闲后应用。systemd user / launchd GUI 服务会以瞬时服务或
+临时 job 在服务外执行应用，无需修改 unit/plist；system 级服务仍需手动
 `dfr update apply`。
 
 `dfr` 只是客户端。daemon 没运行时应执行 `dfr start` 或通过服务管理器启动。

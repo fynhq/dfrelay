@@ -2285,16 +2285,6 @@ impl App {
         let Some(pending) = self.pending_app_update.as_ref() else {
             return;
         };
-        if self.managed {
-            if !self.app_update_deferred_logged {
-                self.logger.app(
-                    LogLevel::Info,
-                    "app update: service-managed daemon; run `dfr update apply` to install",
-                );
-                self.app_update_deferred_logged = true;
-            }
-            return;
-        }
         if !update::auto_apply_allowed(
             self.has_viewer(),
             !self.metrics.connections.is_empty(),
@@ -2304,6 +2294,16 @@ impl App {
                 self.logger.app(
                     LogLevel::Info,
                     "app update: deferred until the TUI detaches or activity settles",
+                );
+                self.app_update_deferred_logged = true;
+            }
+            return;
+        }
+        if self.managed && self.service.is_none() {
+            if !self.app_update_deferred_logged {
+                self.logger.app(
+                    LogLevel::Info,
+                    "app update: service-managed daemon without identity; run `dfr update apply`",
                 );
                 self.app_update_deferred_logged = true;
             }
@@ -2322,7 +2322,13 @@ impl App {
         };
         let staged = pending.staged.clone();
         let version = pending.version.clone();
-        match update::spawn_apply_helper(&self.paths, &staged, &target, &version) {
+        match update::spawn_apply_helper(
+            &self.paths,
+            &staged,
+            &target,
+            &version,
+            self.service.as_ref(),
+        ) {
             Ok(()) => {
                 self.app_update_in_flight = true;
                 self.app_update_apply_started = Some(Instant::now());
