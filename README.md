@@ -77,10 +77,6 @@ Main keys: `q` exit, `s` start/stop proxy, `R` restart proxy (twice), `L`
 language, `?` help, `h`/`l` or arrows switch pages, and `j`/`k` or arrows
 move/scroll.
 
-On Android/Termux, only programs inside Termux or apps with a manual HTTP/SOCKS
-proxy can use DFRelay. Run `termux-wake-lock` while keeping the daemon in the
-background; there is no VPN or Android system-wide proxy.
-
 ## Configuration and logs
 
 Linux, macOS, and Termux use XDG paths:
@@ -113,8 +109,7 @@ templates set `DFRELAY_SERVICE=1` and the service identity; keep the same
 stopped; `dfr start` on a running daemon only asks it to start the proxy.
 Without the identity they refuse and print the supervisor command. System-level
 services require root and are not controlled automatically; DFRelay never runs
-`sudo`. Existing units that set only `DFRELAY_SERVICE=1` keep the refusal
-behavior. A recorded service marker never falls back to ad-hoc: after removing
+`sudo`. A recorded service marker never falls back to ad-hoc: after removing
 a service, delete `<data-dir>/service.json` or run `dfr service forget` (daemon
 stopped) before using `dfr start` ad hoc.
 
@@ -218,9 +213,7 @@ path in `DFRELAY_SERVICE_UNIT`/`DFRELAY_SERVICE_TARGET` equal to the plist
 `launchctl bootout`; the plist remains and is loaded again at the next login,
 and the target path is required to bootstrap the job again after a stop. A
 system-wide LaunchDaemon in `/Library/LaunchDaemons` is not controlled by
-`dfr`. The plist omits `StandardOutPath`/`StandardErrorPath` because
-`dfr serve` writes daily logs to the data directory; redirected output stays
-empty.
+`dfr`.
 
 ## Security
 
@@ -316,9 +309,6 @@ dfr update status   # 查看更新策略与最近结果
 主要键位：`q` 退出，`s` 启动/停止代理，`R` 重启代理（两次确认），`L` 切换语言，
 `?` 帮助，`h`/`l` 或方向键切页，`j`/`k` 或方向键移动/滚动。
 
-Android/Termux 只提供本地代理：只有 Termux 内程序或手动设置 HTTP/SOCKS 代理的
-App 可用；没有 VPN 或 Android 全局代理；后台运行时建议执行 `termux-wake-lock`。
-
 ## 配置与日志
 
 Linux、macOS 与 Termux 遵循 XDG：
@@ -345,10 +335,9 @@ $XDG_DATA_HOME/dfrelay/                # 兜底：~/.local/share/dfrelay/
 `DFRELAY_SERVICE=1` 与服务身份；服务与 CLI 应使用相同的 `--data` 目录。配置身份
 后，daemon 停止时 `dfr start/stop/restart` 会调用服务管理器；daemon 运行中
 `dfr start` 只请求启动代理。身份缺失时拒绝并打印手动命令。系统级服务需要 root，
-DFRelay 不会自动控制，也不会自动执行 `sudo`。仅设置 `DFRELAY_SERVICE=1` 的旧
-unit 仍保持拒绝行为。marker 存在时不会回退 ad-hoc：移除服务后，请先删除
-`<data-dir>/service.json`，或在 daemon 停止后执行 `dfr service forget`，再使用
-`dfr start`。
+DFRelay 不会自动控制，也不会自动执行 `sudo`。marker 存在时不会回退 ad-hoc：
+移除服务后，请先删除 `<data-dir>/service.json`，或在 daemon 停止后执行
+`dfr service forget`，再使用 `dfr start`。
 
 ### Linux systemd（用户服务）
 
@@ -447,8 +436,7 @@ launchctl bootout gui/$(id -u)/io.github.fynhq.dfrelay
 `Label` 一致，`DFRELAY_SERVICE_TARGET` 必须指向该 plist。LaunchAgent 在登录时启动。
 `dfr stop` 使用 `launchctl bootout`，plist 仍在，下次登录会重新加载；target 路径用于
 停止后再次 bootstrap。系统级 LaunchDaemon（`/Library/LaunchDaemons`）不受
-DFRelay 自动控制。plist 不配置 stdout/stderr 重定向，因为 `dfr serve` 自己把
-日志按天写入数据目录，重定向文件只会是空的。
+DFRelay 自动控制。
 
 ## 安全
 
