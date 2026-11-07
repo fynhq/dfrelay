@@ -14,7 +14,7 @@ pub fn stable_tag(protocol: &str, server: &str, port: u16, material: &str) -> St
     hasher.update(material.as_bytes());
     let digest = hasher.finalize();
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("n-{}", &hex[..8])
+    format!("n-{}", &hex[..16])
 }
 
 pub fn node_material(outbound: &Value) -> String {
@@ -80,7 +80,7 @@ mod tests {
         let b = stable_tag("ss", "example.com", 443, "material");
         assert_eq!(a, b);
         assert!(a.starts_with("n-"));
-        assert_eq!(a.len(), 10);
+        assert_eq!(a.len(), 18);
         assert_ne!(a, stable_tag("ss", "example.com", 444, "material"));
     }
 
