@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -140,13 +140,7 @@ impl BinaryManager {
             })?;
         let digest = asset.digest.clone().ok_or(BinaryError::ManualRequired)?;
 
-        let mut attempts = Vec::new();
-        for channel in &clients {
-            attempts.push((channel.channel.label(), &channel.client, asset.url.clone()));
-        }
-        for prefix in &config.github_mirrors {
-            attempts.push(("mirror", &clients[0].client, mirror_url(prefix, &asset.url)));
-        }
+        let attempts = download_attempts(&clients, &config.github_mirrors, &asset.url);
 
         for (kind, client, url) in attempts {
             logger.app(LogLevel::Info, format!("download attempt {kind}: {url}"));
@@ -506,6 +500,25 @@ pub(crate) struct ChannelClient {
     pub(crate) client: Client,
 }
 
+/// Ordered download attempts: direct/environment/local-proxy channel clients
+/// first, then configured GitHub mirrors through the direct client.
+pub(crate) fn download_attempts<'a>(
+    clients: &'a [ChannelClient],
+    mirrors: &[String],
+    url: &str,
+) -> Vec<(&'static str, &'a Client, String)> {
+    let mut attempts = Vec::new();
+    for channel in clients {
+        attempts.push((channel.channel.label(), &channel.client, url.to_string()));
+    }
+    if let Some(first) = clients.first() {
+        for prefix in mirrors {
+            attempts.push(("mirror", &first.client, mirror_url(prefix, url)));
+        }
+    }
+    attempts
+}
+
 pub(crate) fn download_clients(config: &Config) -> Result<Vec<ChannelClient>, BinaryError> {
     let mut clients = vec![ChannelClient {
         channel: DownloadChannel::Direct,
@@ -776,7 +789,8 @@ fn extract_tar_gz(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         }) {
             return Err(BinaryError::Archive("unsafe archive path".to_string()));
         }
-        if entry.size() > MAX_MANUAL_BYTES {
+        let size = entry.size();
+        if size > MAX_MANUAL_BYTES {
             return Err(BinaryError::Archive(
                 "archive entry is too large".to_string(),
             ));
@@ -786,16 +800,13 @@ fn extract_tar_gz(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
                 "archive contains multiple sing-box files".to_string(),
             ));
         }
-        let mut binary = Vec::new();
-        entry
-            .take(MAX_MANUAL_BYTES + 1)
-            .read_to_end(&mut binary)
-            .map_err(|err| BinaryError::Archive(err.to_string()))?;
-        if binary.len() as u64 > MAX_MANUAL_BYTES {
-            return Err(BinaryError::Archive(
-                "archive entry is too large".to_string(),
-            ));
-        }
+        let binary = crate::archive::read_limited(
+            entry,
+            size,
+            MAX_MANUAL_BYTES,
+            "archive entry is too large",
+        )
+        .map_err(BinaryError::Archive)?;
         found = Some(binary);
     }
     found.ok_or_else(|| BinaryError::Archive("sing-box not found in archive".to_string()))
@@ -819,7 +830,8 @@ fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
         if !entry.is_file() {
             continue;
         }
-        if entry.size() > MAX_MANUAL_BYTES {
+        let size = entry.size();
+        if size > MAX_MANUAL_BYTES {
             return Err(BinaryError::Archive("zip entry is too large".to_string()));
         }
         if found.is_some() {
@@ -827,14 +839,9 @@ fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
                 "archive contains multiple sing-box files".to_string(),
             ));
         }
-        let mut binary = Vec::new();
-        entry
-            .take(MAX_MANUAL_BYTES + 1)
-            .read_to_end(&mut binary)
-            .map_err(|err| BinaryError::Archive(err.to_string()))?;
-        if binary.len() as u64 > MAX_MANUAL_BYTES {
-            return Err(BinaryError::Archive("zip entry is too large".to_string()));
-        }
+        let binary =
+            crate::archive::read_limited(entry, size, MAX_MANUAL_BYTES, "zip entry is too large")
+                .map_err(BinaryError::Archive)?;
         found = Some(binary);
     }
     found.ok_or_else(|| BinaryError::Archive("sing-box not found in archive".to_string()))

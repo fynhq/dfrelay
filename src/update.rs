@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -266,23 +266,7 @@ pub async fn download_and_stage(
         Some(digest) => digest,
         None => fetch_sums_digest(&clients, release).await?,
     };
-    let mut attempts: Vec<(&str, &reqwest::Client, String)> = clients
-        .iter()
-        .map(|channel| {
-            (
-                channel.channel.label(),
-                &channel.client,
-                release.asset_url.clone(),
-            )
-        })
-        .collect();
-    for prefix in &config.github_mirrors {
-        attempts.push((
-            "mirror",
-            &clients[0].client,
-            binary::mirror_url(prefix, &release.asset_url),
-        ));
-    }
+    let attempts = binary::download_attempts(&clients, &config.github_mirrors, &release.asset_url);
     for (kind, client, url) in attempts {
         logger.app(
             LogLevel::Info,
@@ -405,7 +389,8 @@ fn extract_dfrt(bytes: &[u8]) -> Result<Vec<u8>, UpdateError> {
         }) {
             return Err(UpdateError::Archive("unsafe archive path".into()));
         }
-        if entry.size() > MAX_BINARY_BYTES {
+        let size = entry.size();
+        if size > MAX_BINARY_BYTES {
             return Err(UpdateError::Archive("archive entry is too large".into()));
         }
         if found.is_some() {
@@ -413,14 +398,13 @@ fn extract_dfrt(bytes: &[u8]) -> Result<Vec<u8>, UpdateError> {
                 "archive contains multiple dfr files".into(),
             ));
         }
-        let mut binary = Vec::new();
-        entry
-            .take(MAX_BINARY_BYTES + 1)
-            .read_to_end(&mut binary)
-            .map_err(|err| UpdateError::Archive(err.to_string()))?;
-        if binary.len() as u64 > MAX_BINARY_BYTES {
-            return Err(UpdateError::Archive("archive entry is too large".into()));
-        }
+        let binary = crate::archive::read_limited(
+            entry,
+            size,
+            MAX_BINARY_BYTES,
+            "archive entry is too large",
+        )
+        .map_err(UpdateError::Archive)?;
         found = Some(binary);
     }
     found.ok_or_else(|| UpdateError::Archive("dfr not found in archive".into()))
@@ -891,7 +875,11 @@ async fn stop_daemon(paths: &Paths, socket: &Path) -> Result<Option<ServiceIdent
         return Err(UpdateError::Restart);
     }
     if let Some(identity) = &identity {
-        service::control(identity, ServiceAction::Stop, None).map_err(|_| UpdateError::Restart)?;
+        let identity = identity.clone();
+        tokio::task::spawn_blocking(move || service::control(&identity, ServiceAction::Stop, None))
+            .await
+            .map_err(|_| UpdateError::Restart)?
+            .map_err(|_| UpdateError::Restart)?;
     } else if running {
         ipc::control_shutdown(socket)
             .await
@@ -906,7 +894,13 @@ async fn start_daemon(
     paths: &Paths,
 ) -> Result<(), UpdateError> {
     if let Some(identity) = identity {
-        service::control(identity, ServiceAction::Start, None).map_err(|_| UpdateError::Restart)?;
+        let identity = identity.clone();
+        tokio::task::spawn_blocking(move || {
+            service::control(&identity, ServiceAction::Start, None)
+        })
+        .await
+        .map_err(|_| UpdateError::Restart)?
+        .map_err(|_| UpdateError::Restart)?;
     } else {
         ipc::spawn_daemon_at(
             target,
