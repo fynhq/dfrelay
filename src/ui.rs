@@ -20,6 +20,9 @@ use crate::view::{BinaryStatus, View};
 
 const HEADER_HEIGHT: u16 = 4;
 
+mod format;
+use format::*;
+
 #[cfg(test)]
 pub fn render(frame: &mut Frame, view: &View) {
     render_at(frame, view, 0, Palette::Dark);
@@ -78,7 +81,7 @@ fn render_header(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pa
         ProxyStatus::Stopped => Style::default().fg(palette.muted()),
     };
     let current = view.current_node().unwrap_or(text.no_nodes);
-    let prefix = format!("{}: ", text.nav_nodes);
+    let prefix = format!("{}: ", text.nodes_title);
     let middle = format!(
         "   {}: {}",
         text.connections,
@@ -257,7 +260,7 @@ fn dashboard_lines(view: &View, width: usize) -> Vec<Line<'static>> {
             "{} / {} {}",
             view.subscriptions.len(),
             view.nodes.len(),
-            text.nav_nodes
+            text.nodes_title
         ),
         width,
     );
@@ -294,6 +297,33 @@ fn multi_value_lines(label: &str, values: &[String], width: usize) -> Vec<Line<'
         push_key_value(&mut lines, "", value.clone(), width);
     }
     lines
+}
+
+/// Shared stateful table assembly for the list pages: identical column
+/// spacing, highlight style, and viewport-selected state everywhere.
+#[allow(clippy::too_many_arguments)]
+fn render_table<const N: usize>(
+    frame: &mut Frame,
+    area: Rect,
+    block: Block<'static>,
+    header: Row<'static>,
+    rows: Vec<Row<'static>>,
+    columns: [Constraint; N],
+    selected: usize,
+    start: usize,
+    end: usize,
+) {
+    let table = Table::new(rows, columns)
+        .header(header)
+        .block(block)
+        .column_spacing(TABLE_COLUMN_SPACING)
+        .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
+        .highlight_symbol("▸ ");
+    let mut state = TableState::default();
+    if start < end {
+        state.select(Some(selected - start));
+    }
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tick: u64) {
@@ -357,17 +387,17 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
             row
         }
     });
-    let table = Table::new(rows, NODE_COLUMNS)
-        .header(header)
-        .block(block)
-        .column_spacing(TABLE_COLUMN_SPACING)
-        .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
-        .highlight_symbol("▸ ");
-    let mut state = TableState::default();
-    if start < end {
-        state.select(Some(selected - start));
-    }
-    frame.render_stateful_widget(table, area, &mut state);
+    render_table(
+        frame,
+        area,
+        block,
+        header,
+        rows.collect(),
+        NODE_COLUMNS,
+        selected,
+        start,
+        end,
+    );
 }
 
 /// Tables keep two blank cells between columns; the block padding leaves one
@@ -484,17 +514,17 @@ fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::R
             Cell::from(marquee_text(&status, status_width, tick)),
         ])
     });
-    let table = Table::new(rows, SUBSCRIPTION_COLUMNS)
-        .header(header)
-        .block(block)
-        .column_spacing(TABLE_COLUMN_SPACING)
-        .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
-        .highlight_symbol("▸ ");
-    let mut state = TableState::default();
-    if start < end {
-        state.select(Some(selected - start));
-    }
-    frame.render_stateful_widget(table, area, &mut state);
+    render_table(
+        frame,
+        area,
+        block,
+        header,
+        rows.collect(),
+        SUBSCRIPTION_COLUMNS,
+        selected,
+        start,
+        end,
+    );
 }
 
 const SUBSCRIPTION_NAME_WIDTH: u16 = 14;
@@ -623,17 +653,17 @@ fn render_connections(frame: &mut Frame, view: &View, area: ratatui::layout::Rec
                 Cell::from(format_duration(connection.duration_secs)),
             ])
         });
-    let table = Table::new(rows, CONNECTION_COLUMNS)
-        .header(header)
-        .block(block)
-        .column_spacing(TABLE_COLUMN_SPACING)
-        .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
-        .highlight_symbol("▸ ");
-    let mut state = TableState::default();
-    if start < end {
-        state.select(Some(selected - start));
-    }
-    frame.render_stateful_widget(table, area, &mut state);
+    render_table(
+        frame,
+        area,
+        block,
+        header,
+        rows.collect(),
+        CONNECTION_COLUMNS,
+        selected,
+        start,
+        end,
+    );
 }
 
 const CONNECTION_COLUMNS: [Constraint; 4] = [
@@ -1102,36 +1132,6 @@ fn help_content_lines(view: &View, width: usize) -> Vec<Line<'static>> {
 fn push_help_line(lines: &mut Vec<Line<'static>>, text: &str, style: Style, width: usize) {
     for chunk in wrap_help_text(text, width) {
         lines.push(Line::from(Span::styled(chunk, style)));
-    }
-}
-
-fn wrap_help_text(text: &str, width: usize) -> Vec<String> {
-    if text.trim().is_empty() {
-        return vec![String::new()];
-    }
-    let width = width.max(1);
-    let indent: String = text.chars().take_while(|ch| *ch == ' ').collect();
-    let indent_width = UnicodeWidthStr::width(indent.as_str());
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-    for ch in text.chars() {
-        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if !current.is_empty() && current_width + char_width > width {
-            lines.push(current.trim_end().to_string());
-            current = indent.clone();
-            current_width = indent_width;
-        }
-        current.push(ch);
-        current_width += char_width;
-    }
-    if !current.trim().is_empty() {
-        lines.push(current.trim_end().to_string());
-    }
-    if lines.is_empty() {
-        vec![String::new()]
-    } else {
-        lines
     }
 }
 
@@ -1691,86 +1691,7 @@ const DASHBOARD_LABEL_WIDTH: usize = 15;
 
 fn key_value_wrapped(label: &str, value: String, width: usize) -> Vec<Line<'static>> {
     let value_width = width.saturating_sub(DASHBOARD_LABEL_WIDTH).max(1);
-    let padding = " ".repeat(DASHBOARD_LABEL_WIDTH.saturating_sub(UnicodeWidthStr::width(label)));
-    wrap_display_text(&value, value_width)
-        .into_iter()
-        .enumerate()
-        .map(|(index, chunk)| {
-            if index == 0 {
-                Line::from(vec![
-                    Span::raw(format!("{label}{padding}")),
-                    Span::raw(chunk),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::raw(" ".repeat(DASHBOARD_LABEL_WIDTH)),
-                    Span::raw(chunk),
-                ])
-            }
-        })
-        .collect()
-}
-
-fn wrap_display_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    for raw in text.split('\n') {
-        if raw.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-        let mut current = String::new();
-        let mut current_width = 0;
-        for ch in raw.chars() {
-            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if !current.is_empty() && current_width + char_width > width {
-                lines.push(std::mem::take(&mut current));
-                current_width = 0;
-            }
-            current.push(ch);
-            current_width += char_width;
-        }
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        vec![String::new()]
-    } else {
-        lines
-    }
-}
-
-fn format_rate(bytes_per_second: f64) -> String {
-    if bytes_per_second < 1024.0 {
-        format!("{bytes_per_second:.0} B/s")
-    } else if bytes_per_second < 1024.0 * 1024.0 {
-        format!("{:.1} K/s", bytes_per_second / 1024.0)
-    } else if bytes_per_second < 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.1} M/s", bytes_per_second / (1024.0 * 1024.0))
-    } else if bytes_per_second < 1024.0 * 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.1} G/s", bytes_per_second / (1024.0 * 1024.0 * 1024.0))
-    } else {
-        format!(
-            "{:.1} T/s",
-            bytes_per_second / (1024.0 * 1024.0 * 1024.0 * 1024.0)
-        )
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} K", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} M", bytes as f64 / (1024.0 * 1024.0))
-    } else if bytes < 1024 * 1024 * 1024 * 1024 {
-        format!("{:.1} G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    } else {
-        format!(
-            "{:.1} T",
-            bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0)
-        )
-    }
+    setup_lines(label, value, DASHBOARD_LABEL_WIDTH, value_width)
 }
 
 #[cfg(test)]
@@ -2932,7 +2853,6 @@ mod tests {
             .filter(|c| !c.is_whitespace())
             .collect();
         assert!(content.contains("Subscriptions"), "{content}");
-        assert_eq!(app.text().nav_subscriptions, "Subscriptions");
         assert_eq!(app.text().subscriptions_title, "Subscriptions");
     }
 
@@ -3652,22 +3572,14 @@ mod tests {
 
     #[test]
     fn rates_use_compact_binary_suffixes() {
-        assert_eq!(format_rate(0.0), "0 B/s");
-        assert_eq!(format_rate(1023.0), "1023 B/s");
+        // Formatting itself is covered by ui::format tests; this asserts the
+        // helpers remain reachable from the page renderer.
         assert_eq!(format_rate(1024.0), "1.0 K/s");
-        assert_eq!(format_rate(1024.0 * 1024.0), "1.0 M/s");
-        assert_eq!(format_rate(1024.0f64.powi(3)), "1.0 G/s");
-        assert_eq!(format_rate(1024.0f64.powi(4)), "1.0 T/s");
     }
 
     #[test]
     fn byte_counts_use_compact_binary_suffixes() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1023), "1023 B");
         assert_eq!(format_bytes(1024), "1.0 K");
-        assert_eq!(format_bytes(1024u64.pow(2)), "1.0 M");
-        assert_eq!(format_bytes(1024u64.pow(3)), "1.0 G");
-        assert_eq!(format_bytes(1024u64.pow(4)), "1.0 T");
     }
 
     #[test]
