@@ -64,14 +64,22 @@ jobs:
 
       - name: Check public surface
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            before="${{ github.event.pull_request.base.sha }}"
-            after="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            before="$PR_BASE"
+            after="$PR_HEAD"
           else
-            before="${{ github.event.before }}"
-            after="${{ github.sha }}"
+            before="$BEFORE"
+            after="$AFTER"
           fi
           if ! git cat-file -e "$before" 2>/dev/null; then
             if git cat-file -e "$after^" 2>/dev/null; then
@@ -81,8 +89,8 @@ jobs:
             fi
           fi
           python3 .github/scripts/check_public_surface.py --range "$before..$after" --tree
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            python3 .github/scripts/check_public_surface.py --tag "${{ github.ref_name }}"
+          if [ "$REF_TYPE" = "tag" ]; then
+            python3 .github/scripts/check_public_surface.py --tag "$REF_NAME"
           fi
 
   android:

@@ -337,14 +337,26 @@ jobs:
             echo "::error::release notes are empty"
             exit 1
           fi
-          # Let `gh release create` report an existing release or a missing tag.
-          # `--verify-tag` prevents gh from creating a new tag at the default
-          # branch if the validated tag disappeared between jobs.
-          gh release create "$TAG" \
-            --verify-tag \
-            --title "dfrelay v$VERSION" \
-            --notes "$BODY" \
-            dist/dfrelay_*.tar.gz dist/SHA256SUMS
+          # Let `gh release create` report a missing tag. A workflow_dispatch
+          # retry may find the release already created by a previous run, so
+          # upload the rebuilt assets with --clobber instead of failing after
+          # the full build.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; uploading rebuilt assets"
+            gh release upload "$TAG" \
+              dist/dfrelay_*.tar.gz dist/SHA256SUMS --clobber
+            gh release edit "$TAG" \
+              --title "dfrelay v$VERSION" \
+              --notes "$BODY"
+          else
+            # `--verify-tag` prevents gh from creating a new tag at the default
+            # branch if the validated tag disappeared between jobs.
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "dfrelay v$VERSION" \
+              --notes "$BODY" \
+              dist/dfrelay_*.tar.gz dist/SHA256SUMS
+          fi
 
       - name: Summary
         shell: bash
