@@ -309,23 +309,32 @@ jobs:
           # Let `gh release create` report a missing tag. A workflow_dispatch
           # retry may find the release already created by a previous run, so
           # upload the rebuilt assets with --clobber instead of failing after
-          # the full build.
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG already exists; uploading rebuilt assets"
-            gh release upload "$TAG" \
-              dist/dfrelay_*.tar.gz dist/SHA256SUMS --clobber
-            gh release edit "$TAG" \
-              --title "dfrelay v$VERSION" \
-              --notes "$BODY"
-          else
-            # `--verify-tag` prevents gh from creating a new tag at the default
-            # branch if the validated tag disappeared between jobs.
-            gh release create "$TAG" \
-              --verify-tag \
-              --title "dfrelay v$VERSION" \
-              --notes "$BODY" \
-              dist/dfrelay_*.tar.gz dist/SHA256SUMS
-          fi
+          # the full build. Distinguish 404 from an API outage so a transient
+          # error cannot make us create a duplicate release.
+          release_state=$(gh api -i "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>/dev/null | head -n 1 | awk '{print $2}' || true)
+          case "$release_state" in
+            200)
+              echo "release $TAG already exists; uploading rebuilt assets"
+              gh release upload "$TAG" \
+                dist/dfrelay_*.tar.gz dist/SHA256SUMS --clobber
+              gh release edit "$TAG" \
+                --title "dfrelay v$VERSION" \
+                --notes "$BODY"
+              ;;
+            404)
+              # `--verify-tag` prevents gh from creating a new tag at the default
+              # branch if the validated tag disappeared between jobs.
+              gh release create "$TAG" \
+                --verify-tag \
+                --title "dfrelay v$VERSION" \
+                --notes "$BODY" \
+                dist/dfrelay_*.tar.gz dist/SHA256SUMS
+              ;;
+            *)
+              echo "::error::cannot determine whether release $TAG exists (HTTP ${release_state:-unknown})"
+              exit 1
+              ;;
+          esac
 
       - name: Summary
         shell: bash
