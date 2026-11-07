@@ -2,7 +2,10 @@ use serde_json::{json, Map, Value};
 use serde_yaml_ng::{Mapping, Value as YamlValue};
 
 use super::model::Node;
-use super::outbound::ensure_supported_network;
+use super::outbound::{
+    ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_supported_network,
+    ensure_tuic_congestion, ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
+};
 
 pub type ClashParseOutput = (Vec<Node>, Vec<(String, String)>);
 
@@ -66,6 +69,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
                 return Err("shadowsocks plugin is not supported".to_string());
             }
             let cipher = yaml_str(proxy, "cipher").ok_or("ss missing cipher")?;
+            ensure_shadowsocks_method(cipher)?;
             let password = yaml_str(proxy, "password").ok_or("ss missing password")?;
             if cipher.is_empty() || password.is_empty() {
                 return Err("ss cipher or password is empty".to_string());
@@ -87,7 +91,10 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
                 return Err("vmess missing uuid".to_string());
             }
             let alter_id = yaml_u16(proxy, "alterId").unwrap_or(0);
-            let security = yaml_str(proxy, "cipher").unwrap_or("auto");
+            let security = yaml_str(proxy, "cipher")
+                .filter(|value| !value.is_empty())
+                .unwrap_or("auto");
+            ensure_vmess_security(security)?;
             let mut value = Map::new();
             value.insert("type".into(), json!("vmess"));
             value.insert("server".into(), json!(server));
@@ -110,7 +117,8 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             value.insert("server".into(), json!(server));
             value.insert("server_port".into(), json!(port));
             value.insert("uuid".into(), json!(uuid));
-            if let Some(flow) = yaml_str(proxy, "flow") {
+            if let Some(flow) = yaml_str(proxy, "flow").filter(|value| !value.is_empty()) {
+                ensure_vless_flow(flow)?;
                 value.insert("flow".into(), json!(flow));
             }
             attach_transport_tls(proxy, network, &mut value);
@@ -140,7 +148,8 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             value.insert("server".into(), json!(server));
             value.insert("server_port".into(), json!(port));
             value.insert("password".into(), json!(password));
-            if let Some(obfs) = yaml_str(proxy, "obfs") {
+            if let Some(obfs) = yaml_str(proxy, "obfs").filter(|value| !value.is_empty()) {
+                ensure_hysteria2_obfs(obfs)?;
                 let mut obfs_value = Map::new();
                 obfs_value.insert("type".into(), json!(obfs));
                 if let Some(password) = yaml_str(proxy, "obfs-password") {
@@ -163,10 +172,15 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             value.insert("server_port".into(), json!(port));
             value.insert("uuid".into(), json!(uuid));
             value.insert("password".into(), json!(password));
-            if let Some(congestion) = yaml_str(proxy, "congestion-controller") {
+            if let Some(congestion) =
+                yaml_str(proxy, "congestion-controller").filter(|value| !value.is_empty())
+            {
+                ensure_tuic_congestion(congestion)?;
                 value.insert("congestion_control".into(), json!(congestion));
             }
-            if let Some(mode) = yaml_str(proxy, "udp-relay-mode") {
+            if let Some(mode) = yaml_str(proxy, "udp-relay-mode").filter(|value| !value.is_empty())
+            {
+                ensure_tuic_udp_relay_mode(mode)?;
                 value.insert("udp_relay_mode".into(), json!(mode));
             }
             value.insert("tls".into(), tls_value(proxy, true));
@@ -499,6 +513,52 @@ proxies:
         assert_eq!(nodes[1].outbound["transport"]["type"], "ws");
         assert_eq!(nodes[1].outbound["tls"]["server_name"], "cdn.example.com");
         assert_eq!(nodes[2].outbound["type"], "trojan");
+    }
+
+    #[test]
+    fn skips_unsupported_protocol_enums() {
+        let yaml = r#"
+proxies:
+  - name: legacy-cipher
+    type: ss
+    server: example.com
+    port: 443
+    cipher: rc4-md5
+    password: secret
+  - name: bad-vmess-security
+    type: vmess
+    server: example.com
+    port: 443
+    uuid: uuid
+    cipher: rc4
+  - name: bad-vless-flow
+    type: vless
+    server: example.com
+    port: 443
+    uuid: uuid
+    flow: xtls-rprx-origin
+  - name: bad-hy2-obfs
+    type: hysteria2
+    server: example.com
+    port: 443
+    password: secret
+    obfs: unknown
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert!(nodes.is_empty());
+        assert_eq!(unsupported.len(), 4);
+        assert!(unsupported
+            .iter()
+            .any(|(_, reason)| reason.contains("cipher")));
+        assert!(unsupported
+            .iter()
+            .any(|(_, reason)| reason.contains("vmess security")));
+        assert!(unsupported
+            .iter()
+            .any(|(_, reason)| reason.contains("vless flow")));
+        assert!(unsupported
+            .iter()
+            .any(|(_, reason)| reason.contains("hysteria2 obfs")));
     }
 
     #[test]

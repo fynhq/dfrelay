@@ -13,6 +13,80 @@ pub(super) fn ensure_supported_network(network: &str) -> Result<(), String> {
     }
 }
 
+/// Shadowsocks methods supported by the bundled sing-box baseline. Legacy
+/// stream ciphers are intentionally rejected here: sing-box refuses them, and
+/// one bad node would otherwise fail the whole generated configuration.
+pub(super) fn ensure_shadowsocks_method(method: &str) -> Result<(), String> {
+    match method {
+        "none"
+        | "aes-128-gcm"
+        | "aes-192-gcm"
+        | "aes-256-gcm"
+        | "chacha20-ietf-poly1305"
+        | "xchacha20-ietf-poly1305"
+        | "2022-blake3-aes-128-gcm"
+        | "2022-blake3-aes-256-gcm"
+        | "2022-blake3-chacha20-poly1305" => Ok(()),
+        other => Err(format!("unsupported shadowsocks cipher: {other}")),
+    }
+}
+
+/// VMess security values accepted by sing-box.
+pub(super) fn ensure_vmess_security(security: &str) -> Result<(), String> {
+    match security {
+        "auto" | "none" | "zero" | "aes-128-gcm" | "chacha20-poly1305" => Ok(()),
+        other => Err(format!("unsupported vmess security: {other}")),
+    }
+}
+
+/// VLESS flow values accepted by sing-box.
+pub(super) fn ensure_vless_flow(flow: &str) -> Result<(), String> {
+    match flow {
+        "xtls-rprx-vision" => Ok(()),
+        other => Err(format!("unsupported vless flow: {other}")),
+    }
+}
+
+/// Hysteria2 obfuscation types accepted by sing-box.
+pub(super) fn ensure_hysteria2_obfs(obfs: &str) -> Result<(), String> {
+    match obfs {
+        "salamander" => Ok(()),
+        other => Err(format!("unsupported hysteria2 obfs: {other}")),
+    }
+}
+
+/// TUIC congestion control algorithms accepted by sing-box.
+pub(super) fn ensure_tuic_congestion(congestion: &str) -> Result<(), String> {
+    match congestion {
+        "cubic" | "new_reno" | "bbr" => Ok(()),
+        other => Err(format!("unsupported TUIC congestion control: {other}")),
+    }
+}
+
+/// TUIC UDP relay modes accepted by sing-box.
+pub(super) fn ensure_tuic_udp_relay_mode(mode: &str) -> Result<(), String> {
+    match mode {
+        "native" | "quic" => Ok(()),
+        other => Err(format!("unsupported TUIC UDP relay mode: {other}")),
+    }
+}
+
+fn is_supported_fingerprint(fingerprint: &str) -> bool {
+    matches!(
+        fingerprint,
+        "chrome"
+            | "firefox"
+            | "safari"
+            | "ios"
+            | "android"
+            | "edge"
+            | "360"
+            | "qq"
+            | "random"
+            | "randomized"
+    )
+}
+
 /// Build a sing-box `tls` object.
 ///
 /// `insecure` is `Some(false)` for URI inputs (which always emit the field) and
@@ -37,7 +111,7 @@ pub(super) fn tls_value(
     if !alpn.is_empty() {
         tls.insert("alpn".into(), json!(alpn));
     }
-    if let Some(fingerprint) = fingerprint {
+    if let Some(fingerprint) = fingerprint.filter(|value| is_supported_fingerprint(value)) {
         tls.insert(
             "utls".into(),
             json!({ "enabled": true, "fingerprint": fingerprint }),

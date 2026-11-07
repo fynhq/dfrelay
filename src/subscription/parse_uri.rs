@@ -6,7 +6,10 @@ use serde_json::{json, Map, Value};
 use url::Url;
 
 use super::model::Node;
-use super::outbound::ensure_supported_network;
+use super::outbound::{
+    ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_supported_network,
+    ensure_tuic_congestion, ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
+};
 
 pub fn parse_uri_list(text: &str, source: &str) -> (Vec<Node>, Vec<(String, String)>) {
     let mut nodes = Vec::new();
@@ -108,6 +111,7 @@ fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
     if method.is_empty() || password.is_empty() {
         return Err("ss method or password is empty".to_string());
     }
+    ensure_shadowsocks_method(method)?;
     let (server, port) = parse_host_port(&hostport)?;
     if server.is_empty() {
         return Err("ss missing server".to_string());
@@ -153,7 +157,10 @@ fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{server}:{port}"));
     let alter_id = number_field(object, "aid").unwrap_or(0);
-    let security = string_field(object, "scy").unwrap_or("auto");
+    let security = string_field(object, "scy")
+        .filter(|value| !value.is_empty())
+        .unwrap_or("auto");
+    ensure_vmess_security(security)?;
     let network = string_field(object, "net")
         .filter(|network| !network.is_empty())
         .unwrap_or("tcp");
@@ -233,6 +240,9 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
         .get("flow")
         .map(String::as_str)
         .filter(|s| !s.is_empty());
+    if let Some(flow) = flow {
+        ensure_vless_flow(flow)?;
+    }
     let insecure = bool_query(&query, "allowInsecure");
     let alpn = split_alpn(query.get("alpn"));
     let fingerprint = query
@@ -368,6 +378,9 @@ fn parse_hysteria2(uri: &str, source: &str) -> Result<Node, String> {
         .get("obfs")
         .map(String::as_str)
         .filter(|s| !s.is_empty());
+    if let Some(obfs) = obfs {
+        ensure_hysteria2_obfs(obfs)?;
+    }
 
     let mut outbound = Map::new();
     outbound.insert("type".into(), json!("hysteria2"));
@@ -422,9 +435,11 @@ fn parse_tuic(uri: &str, source: &str) -> Result<Node, String> {
     outbound.insert("uuid".into(), json!(uuid));
     outbound.insert("password".into(), json!(password));
     if let Some(congestion) = query.get("congestion_control") {
+        ensure_tuic_congestion(congestion)?;
         outbound.insert("congestion_control".into(), json!(congestion));
     }
     if let Some(mode) = query.get("udp_relay_mode") {
+        ensure_tuic_udp_relay_mode(mode)?;
         outbound.insert("udp_relay_mode".into(), json!(mode));
     }
     outbound.insert(
@@ -697,10 +712,22 @@ fn number_field(object: &Map<String, Value>, key: &str) -> Option<u16> {
 }
 
 fn short_name(uri: &str) -> String {
-    let scheme = uri
+    let (scheme, rest) = uri
         .split_once("://")
-        .map(|(scheme, _)| scheme)
-        .unwrap_or("unknown");
+        .map_or(("unknown", ""), |(scheme, rest)| (scheme, rest));
+    // VMess payloads are base64 JSON; the base64 is not a host and may encode
+    // the UUID. Legacy Shadowsocks payloads have the same problem. Keep only
+    // the scheme so an unsupported-node name cannot carry credentials into the
+    // cache or an error path.
+    if scheme.eq_ignore_ascii_case("vmess") {
+        return "vmess://…".to_string();
+    }
+    if scheme.eq_ignore_ascii_case("ss") {
+        let authority = rest.split(['?', '#']).next().unwrap_or(rest);
+        if !authority.contains('@') {
+            return "ss://…".to_string();
+        }
+    }
     let host = Url::parse(uri)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string));
@@ -856,6 +883,36 @@ mod tests {
         assert_eq!(unsupported.len(), 1);
         assert_eq!(unsupported[0].0, "trojan://example.com");
         assert!(!unsupported[0].0.contains("secret"));
+    }
+
+    #[test]
+    fn unsupported_base64_names_do_not_expose_credentials() {
+        let (_, unsupported) = parse_uri_list(
+            "vmess://eyJpZCI6InNlY3JldC11dWlkIn0=\nss://YWVzLTEyOC1nY206c2VjcmV0@example.com:0#bad",
+            "test",
+        );
+        assert_eq!(unsupported.len(), 2);
+        assert_eq!(unsupported[0].0, "vmess://…");
+        assert!(!unsupported[0].0.contains("secret"));
+        assert!(!unsupported[1].0.contains("secret"));
+    }
+
+    #[test]
+    fn rejects_unsupported_protocol_enums() {
+        assert!(parse_uri("ss://rc4-md5:secret@example.com:443#a", "test").is_err());
+        let vmess = format!(
+            "vmess://{}",
+            STANDARD.encode(
+                r#"{"add":"example.com","port":"443","id":"uuid","net":"tcp","scy":"rc4"}"#
+            )
+        );
+        assert!(parse_uri(&vmess, "test").is_err());
+        assert!(parse_uri(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?flow=xtls-rprx-origin#v",
+            "test"
+        )
+        .is_err());
+        assert!(parse_uri("hysteria2://pass@example.com:443?obfs=unknown#h", "test").is_err());
     }
 
     #[test]

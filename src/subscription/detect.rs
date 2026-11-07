@@ -3,41 +3,104 @@ use serde_json::Value;
 use serde_yaml_ng::Value as YamlValue;
 
 use super::model::Node;
+use super::outbound::{
+    ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_tuic_congestion,
+    ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
+};
 use super::parse_clash::parse_clash_document;
 use super::parse_uri::{decode_base64_text, parse_uri_list};
 
 /// Maximum number of YAML alias references (`*anchor`) tolerated in a
-/// subscription body before it is rejected.
-///
-/// `serde_yaml_ng` resolves an alias by jumping back to the anchor and
-/// re-deserializing the whole subtree, so nested aliasing expands the document
-/// multiplicatively (a "billion laughs" payload). A 10 MB body can encode an
-/// expansion large enough to exhaust memory and abort the daemon. Real Clash
-/// subscriptions are flat proxy lists and never use aliases, so a small budget
-/// is generous for legitimate input while capping worst-case expansion.
-const MAX_YAML_ALIASES: usize = 16;
+/// subscription body. Aliases are not needed for a Clash proxy list, and
+/// `serde_yaml_ng` expands them by re-parsing anchored subtrees. A single
+/// alias can therefore clone a large subtree; reject all aliases instead of
+/// trying to guess a safe expansion budget.
+const MAX_YAML_ALIASES: usize = 0;
 
-/// Count YAML alias indicators (`*`) outside quoted scalars.
+/// Count YAML alias indicators (`*`) that occur at a node boundary.
 ///
-/// Over-counting is safe (it only rejects sooner); under-counting is the risk,
-/// so the scan errs toward counting a `*` as an alias. Anchors (`&`) alone do
-/// not expand and are not counted.
+/// This scanner deliberately errs toward counting: a `#` comment or a quoted
+/// scalar hides a `*`, and a line break resets the node position. It does not
+/// need to be a complete YAML lexer, because a false positive only rejects an
+/// exotic subscription while a false negative would let an alias bomb through.
+/// In particular, quotes only open a scalar at a node boundary, so an
+/// apostrophe inside a plain scalar (`name: Bob's node`) cannot hide later
+/// aliases.
 fn count_yaml_aliases(text: &str) -> usize {
     let mut count = 0usize;
+    let mut at_node_start = true;
+    let mut after_space = true;
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_comment = false;
     let mut escaped = false;
     for ch in text.chars() {
-        if escaped {
-            escaped = false;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                at_node_start = true;
+                after_space = true;
+            }
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
             continue;
         }
         match ch {
-            '\\' if in_double => escaped = true,
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '*' if !in_single && !in_double => count += 1,
-            _ => {}
+            '\n' => {
+                at_node_start = true;
+                after_space = true;
+            }
+            '#' if at_node_start || after_space => {
+                in_comment = true;
+            }
+            '\'' if at_node_start => {
+                in_single = true;
+                at_node_start = false;
+                after_space = false;
+            }
+            '"' if at_node_start => {
+                in_double = true;
+                at_node_start = false;
+                after_space = false;
+            }
+            '*' if at_node_start => {
+                count += 1;
+                at_node_start = false;
+                after_space = false;
+            }
+            '[' | '{' | ',' | '?' => {
+                at_node_start = true;
+                after_space = true;
+            }
+            ':' => {
+                at_node_start = true;
+                after_space = true;
+            }
+            '-' if at_node_start => {
+                at_node_start = true;
+                after_space = true;
+            }
+            ' ' | '\t' => {
+                after_space = true;
+            }
+            _ => {
+                at_node_start = false;
+                after_space = false;
+            }
         }
     }
     count
@@ -47,7 +110,7 @@ fn ensure_alias_budget(text: &str) -> Result<(), String> {
     let aliases = count_yaml_aliases(text);
     if aliases > MAX_YAML_ALIASES {
         return Err(format!(
-            "subscription uses excessive YAML aliasing ({aliases} aliases); rejected to prevent memory exhaustion"
+            "subscription uses YAML aliasing ({aliases} aliases); rejected to prevent memory exhaustion"
         ));
     }
     Ok(())
@@ -145,27 +208,77 @@ fn validate_sing_box_node(
     object: &serde_json::Map<String, Value>,
     kind: &str,
 ) -> Result<(), String> {
-    let require = |field: &str| {
+    let require = |field: &str| -> Result<&str, String> {
         object
             .get(field)
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .map(|_| ())
             .ok_or_else(|| format!("{kind} missing {field}"))
     };
     match kind {
         "shadowsocks" => {
-            require("method")?;
+            let method = require("method")?;
+            ensure_shadowsocks_method(method)?;
             require("password")?;
         }
-        "vmess" | "vless" => require("uuid")?,
-        "trojan" | "hysteria2" | "anytls" => require("password")?,
+        "vmess" => {
+            require("uuid")?;
+            if let Some(security) = object
+                .get("security")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                ensure_vmess_security(security)?;
+            }
+        }
+        "vless" => {
+            require("uuid")?;
+            if let Some(flow) = object
+                .get("flow")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                ensure_vless_flow(flow)?;
+            }
+        }
+        "trojan" | "hysteria2" | "anytls" => {
+            require("password")?;
+            if kind == "hysteria2" {
+                if let Some(obfs) = object
+                    .get("obfs")
+                    .and_then(Value::as_object)
+                    .and_then(|obfs| obfs.get("type"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    ensure_hysteria2_obfs(obfs)?;
+                }
+            }
+        }
         "tuic" => {
             require("uuid")?;
             require("password")?;
+            if let Some(congestion) = object
+                .get("congestion_control")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                ensure_tuic_congestion(congestion)?;
+            }
+            if let Some(mode) = object
+                .get("udp_relay_mode")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                ensure_tuic_udp_relay_mode(mode)?;
+            }
         }
-        "shadowtls" => require("password")?,
-        "ssh" => require("user")?,
+        "shadowtls" => {
+            require("password")?;
+        }
+        "ssh" => {
+            require("user")?;
+        }
         "http" | "socks" | "hysteria" | "tor" => {}
         other => return Err(format!("unsupported protocol: {other}")),
     }
@@ -214,12 +327,8 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Option<ParseOutcome> {
         let mut outbound = outbound.clone();
         if let Some(object) = outbound.as_object_mut() {
             object.remove("tag");
-            // `detour` references another outbound by its original tag. DFRelay
-            // regenerates node tags as stable hashes, so the reference would be
-            // dangling and fail the whole `sing-box check`. Drop it so a single
-            // chained node cannot block the entire generated configuration.
-            object.remove("detour");
         }
+        strip_detour(&mut outbound);
         nodes.push(Node::new(
             name,
             source.to_string(),
@@ -233,6 +342,29 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Option<ParseOutcome> {
         return None;
     }
     Some(ParseOutcome { nodes, unsupported })
+}
+
+/// Remove every `detour` reference from a single outbound.
+///
+/// sing-box accepts `detour` both at the outbound top level and inside `dial`;
+/// DFRelay rewrites tags to stable hashes, so any retained reference points at
+/// a tag that no longer exists. Dropping it makes one chained node fail alone
+/// instead of failing the whole generated configuration.
+fn strip_detour(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("detour");
+            for nested in object.values_mut() {
+                strip_detour(nested);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_detour(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +403,37 @@ mod tests {
         .to_string();
         let outcome = detect_and_parse(&body, "test").unwrap();
         assert_eq!(outcome.nodes.len(), 1);
+    }
+
+    #[test]
+    fn strips_nested_dial_detour() {
+        let body = serde_json::json!({
+            "outbounds": [{
+                "type": "vless", "tag": "n1", "server": "example.com",
+                "server_port": 443, "uuid": "u",
+                "dial": { "detour": "direct", "bind_interface": "eth0" }
+            }]
+        })
+        .to_string();
+        let outcome = detect_and_parse(&body, "test").unwrap();
+        let outbound = &outcome.nodes[0].outbound;
+        assert!(outbound["dial"].get("detour").is_none());
+        assert_eq!(outbound["dial"]["bind_interface"], "eth0");
+    }
+
+    #[test]
+    fn rejects_unsupported_sing_box_enums() {
+        let body = serde_json::json!({
+            "outbounds": [{
+                "type": "shadowsocks", "tag": "bad", "server": "example.com",
+                "server_port": 443, "method": "rc4-md5", "password": "p"
+            }]
+        })
+        .to_string();
+        let outcome = detect_and_parse(&body, "test").unwrap();
+        assert!(outcome.nodes.is_empty());
+        assert_eq!(outcome.unsupported.len(), 1);
+        assert!(outcome.unsupported[0].reason.contains("cipher"));
     }
 
     #[test]
@@ -317,10 +480,15 @@ mod tests {
     }
 
     #[test]
-    fn counts_aliases_outside_quotes() {
+    fn counts_aliases_at_node_boundaries() {
         assert_eq!(count_yaml_aliases("a: *x\nb: *y"), 2);
         assert_eq!(count_yaml_aliases("name: \"a*b*c\""), 0);
         assert_eq!(count_yaml_aliases("name: 'a*b'"), 0);
+        assert_eq!(count_yaml_aliases("password: a*b"), 0);
+        assert_eq!(count_yaml_aliases("# don't\nb: *x"), 1);
+        assert_eq!(count_yaml_aliases("name: Bob's node\nb: *x"), 1);
+        assert_eq!(count_yaml_aliases("# ****"), 0);
+        assert_eq!(count_yaml_aliases("a: &a [x, x]\nb: [*a]"), 1);
         assert_eq!(count_yaml_aliases(""), 0);
     }
 
@@ -341,10 +509,16 @@ mod tests {
     }
 
     #[test]
-    fn alias_budget_allows_few_and_rejects_many() {
-        assert!(ensure_alias_budget("a: *x\nb: *y").is_ok());
-        let many = "a: *x\n".repeat(MAX_YAML_ALIASES + 1);
-        let err = ensure_alias_budget(&many).unwrap_err();
-        assert!(err.contains("aliasing"));
+    fn rejects_alias_hidden_behind_plain_scalar_apostrophe() {
+        let body = "name: Bob's node\nb: *x\n";
+        let err = detect_and_parse(body, "test").unwrap_err();
+        assert!(err.contains("aliasing"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn alias_budget_rejects_any_alias() {
+        assert!(ensure_alias_budget("a: x").is_ok());
+        assert!(ensure_alias_budget("a: *x").is_err());
+        assert!(ensure_alias_budget("name: \"a*b\"").is_ok());
     }
 }
