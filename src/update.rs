@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -23,11 +23,11 @@ pub const FAILED_COOLDOWN: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const MAX_DEFER: Duration = Duration::from_secs(12 * 60 * 60);
 
 const MAX_SUMS_BYTES: usize = 1024 * 1024;
+const MAX_RELEASE_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const START_TIMEOUT: Duration = Duration::from_secs(25);
 const STABLE_WINDOW: Duration = Duration::from_secs(3);
-const LOCK_STALE: Duration = Duration::from_secs(60 * 60);
 const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +44,8 @@ pub enum UpdateError {
     Binary(String),
     #[error("archive error: {0}")]
     Archive(String),
+    #[error("staged binary failed integrity verification")]
+    StagedIntegrity,
     #[error("staged binary version mismatch: expected {expected}, got {actual}")]
     VersionMismatch { expected: String, actual: String },
     #[error("cannot write the update target: {0}")]
@@ -121,6 +123,10 @@ pub fn discover_staged(paths: &Paths) -> Option<(String, PathBuf)> {
         let Some(version) = name.to_str().and_then(|name| name.strip_prefix("dfr-")) else {
             continue;
         };
+        // The integrity sidecar is not a staged binary.
+        if version.ends_with(".sha256") {
+            continue;
+        }
         if !binary::is_newer_version(version, version::BASE) {
             continue;
         }
@@ -170,7 +176,7 @@ async fn fetch_latest(config: &Config) -> Result<ReleaseInfo, UpdateError> {
 }
 
 async fn fetch_latest_with(client: &reqwest::Client) -> Result<ReleaseInfo, UpdateError> {
-    let response = client
+    let mut response = client
         .get(GITHUB_API_LATEST)
         .send()
         .await
@@ -184,16 +190,21 @@ async fn fetch_latest_with(client: &reqwest::Client) -> Result<ReleaseInfo, Upda
             "release API redirected to a non-HTTPS URL".into(),
         ));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > 4 * 1024 * 1024)
-    {
-        return Err(UpdateError::Api("release response is too large".into()));
-    }
-    let value: serde_json::Value = response
-        .json()
+    // Read with a streaming cap: a chunked response has no Content-Length and
+    // must not be buffered without bound.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|err| UpdateError::Api(err.to_string()))?;
+        .map_err(|err| UpdateError::Api(err.to_string()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RELEASE_JSON_BYTES {
+            return Err(UpdateError::Api("release response is too large".into()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|err| UpdateError::Api(err.to_string()))?;
     let tag = value
         .get("tag_name")
         .and_then(|item| item.as_str())
@@ -415,6 +426,10 @@ fn extract_dfrt(bytes: &[u8]) -> Result<Vec<u8>, UpdateError> {
     found.ok_or_else(|| UpdateError::Archive("dfr not found in archive".into()))
 }
 
+fn staged_sidecar(dir: &Path, version: &str) -> PathBuf {
+    dir.join(format!("dfr-{version}.sha256"))
+}
+
 fn stage_binary(paths: &Paths, version: &str, bytes: &[u8]) -> Result<PathBuf, UpdateError> {
     fsutil::ensure_private_dir(&paths.updates_dir)?;
     let staged = paths.updates_dir.join(format!("dfr-{version}"));
@@ -423,14 +438,40 @@ fn stage_binary(paths: &Paths, version: &str, bytes: &[u8]) -> Result<PathBuf, U
     set_executable(&temp)?;
     fs::File::open(&temp)?.sync_all()?;
     fs::rename(&temp, &staged)?;
+    // Record the digest of the exact staged bytes so a later `apply_staged`
+    // (possibly after a daemon restart) can detect replacement or corruption.
+    let sidecar = staged_sidecar(&paths.updates_dir, version);
+    fsutil::write_private_file(&sidecar, binary::sha256_hex(bytes).as_bytes())?;
     Ok(staged)
 }
 
-pub fn version_of_binary(path: &Path) -> Result<String, UpdateError> {
-    let output = Command::new(path)
-        .arg("--version")
-        .output()
-        .map_err(|err| UpdateError::Binary(err.to_string()))?;
+fn verify_staged_integrity(paths: &Paths, staged: &Path, version: &str) -> Result<(), UpdateError> {
+    let sidecar = staged_sidecar(&paths.updates_dir, version);
+    let expected = fs::read_to_string(&sidecar)
+        .map_err(|_| UpdateError::StagedIntegrity)?
+        .trim()
+        .to_string();
+    if expected.len() != 64 {
+        return Err(UpdateError::StagedIntegrity);
+    }
+    let bytes = fs::read(staged).map_err(|_| UpdateError::StagedIntegrity)?;
+    if binary::sha256_hex(&bytes) != expected {
+        return Err(UpdateError::StagedIntegrity);
+    }
+    Ok(())
+}
+
+pub async fn version_of_binary(path: &Path) -> Result<String, UpdateError> {
+    let output = tokio::time::timeout(
+        VERSION_TIMEOUT,
+        tokio::process::Command::new(path)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| UpdateError::Binary("version check timed out".into()))?
+    .map_err(|err| UpdateError::Binary(err.to_string()))?;
     if !output.status.success() {
         return Err(UpdateError::Binary(format!(
             "`{} --version` exited with {}",
@@ -453,18 +494,10 @@ pub fn version_of_binary(path: &Path) -> Result<String, UpdateError> {
 }
 
 pub async fn verify_binary_version(path: &Path, expected: &str) -> Result<(), UpdateError> {
-    let path = path.to_path_buf();
-    let expected = expected.to_string();
-    let result = tokio::time::timeout(
-        VERSION_TIMEOUT,
-        tokio::task::spawn_blocking(move || version_of_binary(&path)),
-    )
-    .await
-    .map_err(|_| UpdateError::Binary("version check timed out".into()))?
-    .map_err(|err| UpdateError::Binary(err.to_string()))??;
+    let result = version_of_binary(path).await?;
     if result != expected {
         return Err(UpdateError::VersionMismatch {
-            expected,
+            expected: expected.to_string(),
             actual: result,
         });
     }
@@ -475,15 +508,10 @@ pub fn target_binary() -> Result<PathBuf, UpdateError> {
     if !is_release_build() {
         return Err(UpdateError::LocalBuild);
     }
-    let executable = std::env::current_exe()?;
-    let executable = fs::canonicalize(&executable).unwrap_or(executable);
-    if executable
-        .components()
-        .any(|component| component.as_os_str() == "target")
-    {
-        return Err(UpdateError::LocalBuild);
-    }
-    Ok(executable)
+    // The version suffix (absent only for release builds) is the reliable
+    // signal; do not guess from path components, which false-positive for
+    // installations such as `/opt/target/bin/dfr`.
+    Ok(fs::canonicalize(std::env::current_exe()?).unwrap_or(std::env::current_exe()?))
 }
 
 pub fn previous_binary(target: &Path) -> Result<PathBuf, UpdateError> {
@@ -587,6 +615,9 @@ pub fn auto_apply_allowed(
 }
 
 pub struct UpdateLock {
+    #[cfg(unix)]
+    file: std::fs::File,
+    #[cfg(not(unix))]
     path: PathBuf,
 }
 
@@ -594,37 +625,66 @@ impl UpdateLock {
     pub fn acquire(paths: &Paths) -> Result<Self, UpdateError> {
         fsutil::ensure_private_dir(&paths.updates_dir)?;
         let path = paths.updates_dir.join("apply.lock");
-        for attempt in 0..2 {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    let _ = write!(file, "{}", std::process::id());
-                    return Ok(Self { path });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
-                    let stale = fs::metadata(&path)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| modified.elapsed().ok())
-                        .is_some_and(|age| age > LOCK_STALE);
-                    if !stale {
-                        return Err(UpdateError::Busy);
-                    }
-                    let _ = fs::remove_file(&path);
-                }
-                Err(err) => return Err(UpdateError::Io(err)),
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let file = fsutil::open_private_file(&path, false)?;
+            // An advisory lock is released automatically when the file handle
+            // closes, including on process exit, so there is no stale-lock
+            // guesswork or drop-time race.
+            let locked =
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+            if !locked {
+                return Err(UpdateError::Busy);
             }
+            Ok(Self { file })
         }
-        Err(UpdateError::Busy)
+        #[cfg(not(unix))]
+        {
+            use std::io::Write;
+
+            for attempt in 0..2 {
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(mut file) => {
+                        let _ = write!(file, "{}", std::process::id());
+                        return Ok(Self { path });
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                        let stale = fs::metadata(&path)
+                            .and_then(|metadata| metadata.modified())
+                            .ok()
+                            .and_then(|modified| modified.elapsed().ok())
+                            .is_some_and(|age| age > Duration::from_secs(3600));
+                        if !stale {
+                            return Err(UpdateError::Busy);
+                        }
+                        let _ = fs::remove_file(&path);
+                    }
+                    Err(err) => return Err(UpdateError::Io(err)),
+                }
+            }
+            Err(UpdateError::Busy)
+        }
     }
 }
 
 impl Drop for UpdateLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+            // Keep the lock file: removing it can race with another process
+            // that has just opened the same path and is about to lock it.
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -637,6 +697,9 @@ pub async fn apply_staged(
 ) -> Result<(), UpdateError> {
     let _lock = UpdateLock::acquire(paths)?;
     check_target_writable(target)?;
+    // Re-verify the staged bytes before swapping the binary: the file was
+    // written and verified in an earlier process and may have been replaced.
+    verify_staged_integrity(paths, staged, expected_version)?;
     let socket = paths.control_socket();
     let identity = stop_daemon(paths, &socket).await?;
     wait_socket_gone(&socket, SERVICE_STOP_TIMEOUT).await?;
@@ -713,6 +776,7 @@ pub async fn apply_staged(
     state.failed_at_unix = None;
     let _ = save_state(paths, &state);
     let _ = fs::remove_file(staged);
+    let _ = fs::remove_file(staged_sidecar(&paths.updates_dir, expected_version));
     logger.app(
         LogLevel::Info,
         format!("app update: {expected_version} installed and running"),
@@ -768,9 +832,14 @@ async fn rollback(
         LogLevel::Warn,
         format!("app update: rolling back {failed_version}: {cause}"),
     );
+    // The new daemon was already started before verification failed. Stop it
+    // before restoring the previous binary; otherwise it keeps running the bad
+    // version and the restart below fails with an in-use control socket.
+    let socket = paths.control_socket();
+    let _ = stop_daemon(paths, &socket).await;
+    let _ = wait_socket_gone(&socket, SERVICE_STOP_TIMEOUT).await;
     restore_previous(target, previous)?;
     start_daemon(identity, target, paths).await?;
-    let socket = paths.control_socket();
     let restored = wait_for_stable_daemon(&socket, START_TIMEOUT)
         .await
         .is_some();
@@ -1242,5 +1311,32 @@ mod tests {
         ));
         drop(lock);
         assert!(UpdateLock::acquire(&paths).is_ok());
+    }
+
+    #[test]
+    fn staged_integrity_rejects_tampered_bytes() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        let staged = stage_binary(&paths, "9.9.9", b"original").unwrap();
+        assert!(verify_staged_integrity(&paths, &staged, "9.9.9").is_ok());
+
+        // A sidecar must not be mistaken for a staged binary.
+        assert!(discover_staged(&paths).is_some());
+
+        fs::write(&staged, b"tampered").unwrap();
+        assert!(matches!(
+            verify_staged_integrity(&paths, &staged, "9.9.9"),
+            Err(UpdateError::StagedIntegrity)
+        ));
+
+        fs::remove_file(&staged).unwrap();
+        assert!(matches!(
+            verify_staged_integrity(&paths, &staged, "9.9.9"),
+            Err(UpdateError::StagedIntegrity)
+        ));
     }
 }
