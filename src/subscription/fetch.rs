@@ -39,7 +39,7 @@ pub enum FetchError {
     Empty,
     #[error("DNS resolution failed: {0}")]
     Resolve(String),
-    #[error("redirect to a private, loopback, or link-local address is not allowed")]
+    #[error("redirect to a non-public address is not allowed")]
     BlockedRedirect,
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
@@ -56,7 +56,28 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
     // may legitimately point at a LAN address; only provider-controlled
     // redirect targets are restricted.
     for hop in 0..=MAX_REDIRECTS {
-        let response = fetch_hop(&current, options).await?;
+        if current.scheme() != "http" && current.scheme() != "https" {
+            return Err(FetchError::InvalidUrl);
+        }
+        // Resolve once and pin the same addresses for validation and for the
+        // actual connection. Resolving again in `fetch_hop` would leave a
+        // DNS-rebinding window between the redirect check and the request.
+        let host = current.host().ok_or(FetchError::InvalidUrl)?;
+        let port = current
+            .port_or_known_default()
+            .ok_or(FetchError::InvalidUrl)?;
+        let addrs = match &host {
+            Host::Ipv4(ip) => vec![SocketAddr::new(IpAddr::V4(*ip), port)],
+            Host::Ipv6(ip) => vec![SocketAddr::new(IpAddr::V6(*ip), port)],
+            Host::Domain(domain) => resolve_host(domain, port).await?,
+        };
+        // The initial URL is user-provided and may legitimately point at a
+        // LAN address; only provider-controlled redirect targets are
+        // restricted.
+        if hop > 0 && addrs.iter().any(|addr| is_blocked_target(&addr.ip())) {
+            return Err(FetchError::BlockedRedirect);
+        }
+        let response = fetch_hop(&current, options, host, &addrs).await?;
         if response.status().is_redirection() {
             if hop == MAX_REDIRECTS {
                 return Err(FetchError::Http(response.status().as_u16()));
@@ -67,7 +88,6 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
             let target = current
                 .join(location.to_str().map_err(|_| FetchError::InvalidUrl)?)
                 .map_err(|_| FetchError::InvalidUrl)?;
-            ensure_public_redirect_target(&target).await?;
             current = target;
             continue;
         }
@@ -83,17 +103,16 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
 async fn fetch_hop(
     url: &url::Url,
     options: &FetchOptions,
+    host: Host<&str>,
+    addrs: &[SocketAddr],
 ) -> Result<reqwest::Response, FetchError> {
-    let host = url.host().ok_or(FetchError::InvalidUrl)?;
-    let port = url.port_or_known_default().ok_or(FetchError::InvalidUrl)?;
     let mut builder = Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(options.timeout)
         .user_agent(&options.user_agent);
     if let Host::Domain(domain) = host {
-        let addrs = resolve_host(domain, port).await?;
-        builder = builder.resolve_to_addrs(domain, &addrs);
+        builder = builder.resolve_to_addrs(domain, addrs);
     }
     let client = builder.build()?;
     client
@@ -121,21 +140,7 @@ async fn read_body(
     Ok(text)
 }
 
-/// Reject a redirect whose destination resolves into non-public address space.
-async fn ensure_public_redirect_target(url: &url::Url) -> Result<(), FetchError> {
-    let host = url.host().ok_or(FetchError::InvalidUrl)?;
-    let port = url.port_or_known_default().ok_or(FetchError::InvalidUrl)?;
-    let addrs = match host {
-        Host::Ipv4(ip) => vec![SocketAddr::new(IpAddr::V4(ip), port)],
-        Host::Ipv6(ip) => vec![SocketAddr::new(IpAddr::V6(ip), port)],
-        Host::Domain(domain) => resolve_host(domain, port).await?,
-    };
-    if addrs.iter().any(|addr| is_blocked_target(&addr.ip())) {
-        return Err(FetchError::BlockedRedirect);
-    }
-    Ok(())
-}
-
+/// Reject non-public IPv4/IPv6 destinations.
 fn is_blocked_target(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -146,7 +151,11 @@ fn is_blocked_target(ip: &IpAddr) -> bool {
                 || v4.is_unspecified()
                 || v4.is_broadcast()
                 || v4.is_multicast()
-                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || octets[0] == 0 // 0.0.0.0/8 ("this network")
+                || (octets[0] & 0xf0) == 0xf0 // 240.0.0.0/4
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) // 192.0.0.0/24
+                || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)) // 198.18.0.0/15
+                || (octets[0] == 100 && (64..=127).contains(&octets[1])) // CGNAT (RFC 6598)
         }
         IpAddr::V6(v6) => {
             let segments = v6.segments();
@@ -155,7 +164,11 @@ fn is_blocked_target(ip: &IpAddr) -> bool {
                 || v6.is_multicast()
                 || (segments[0] & 0xfe00) == 0xfc00 // unique local (fc00::/7)
                 || (segments[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
-                || v6.to_ipv4_mapped()
+                || (segments[0] & 0xffc0) == 0xfec0 // site-local (fec0::/10)
+                || (segments[0] == 0x0064
+                    && segments[1] == 0xff9b
+                    && segments[2..6].iter().all(|segment| *segment == 0)) // NAT64 (64:ff9b::/96)
+                || v6.to_ipv4()
                     .is_some_and(|v4| is_blocked_target(&IpAddr::V4(v4)))
         }
     }
@@ -216,9 +229,16 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
             IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
             IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)),
             IpAddr::V6(Ipv6Addr::LOCALHOST),
             IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)),
             IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 1)),
+            IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0x7f00, 1)),
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 1)),
         ];
         for ip in blocked {
             assert!(is_blocked_target(&ip), "{ip} should be blocked");
