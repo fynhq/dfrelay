@@ -19,6 +19,9 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hard cap for a single client message; keys/Hello are tiny, but
+/// `BufReader::lines` would otherwise grow without bound.
+const MAX_LINE_BYTES: usize = 1024 * 1024;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,10 +147,50 @@ pub fn spawn_listener(listener: UnixListener, events_tx: UnboundedSender<AppEven
     });
 }
 
+/// Read one newline-terminated UTF-8 line with a hard size cap.
+async fn next_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            return String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8"));
+        }
+        if let Some(position) = available.iter().position(|byte| *byte == b'\n') {
+            if bytes.len() + position > max {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+            }
+            bytes.extend_from_slice(&available[..position]);
+            reader.consume(position + 1);
+            return String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8"));
+        }
+        if bytes.len() + available.len() > max {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
+        }
+        let length = available.len();
+        bytes.extend_from_slice(available);
+        reader.consume(length);
+    }
+}
+
 async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>) {
     let (read_half, write_half) = stream.into_split();
-    let mut lines = BufReader::new(read_half).lines();
-    let viewer = match tokio::time::timeout(HELLO_TIMEOUT, lines.next_line()).await {
+    let mut reader = BufReader::new(read_half);
+    let viewer = match tokio::time::timeout(
+        HELLO_TIMEOUT,
+        next_line_limited(&mut reader, MAX_LINE_BYTES),
+    )
+    .await
+    {
         Ok(Ok(Some(line))) => match serde_json::from_str::<ClientMsg>(&line) {
             Ok(ClientMsg::Hello { viewer }) => viewer,
             _ => return,
@@ -175,7 +218,7 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>)
         Ok(Ok(true)) => {}
         _ => return,
     }
-    while let Ok(Some(line)) = lines.next_line().await {
+    while let Ok(Some(line)) = next_line_limited(&mut reader, MAX_LINE_BYTES).await {
         let Ok(message) = serde_json::from_str::<ClientMsg>(&line) else {
             continue;
         };
