@@ -2,6 +2,7 @@ mod app;
 mod client;
 mod config;
 mod fsutil;
+mod guard;
 mod i18n;
 mod ipc;
 mod logging;
@@ -198,20 +199,6 @@ async fn start_daemon(cli: &Cli, paths: &Paths) -> anyhow::Result<()> {
     let socket = paths.control_socket();
     if ipc::daemon_is_running(&socket).await {
         if let Ok(status) = ipc::control_status(&socket).await {
-            if status.managed {
-                if status.proxy != ProxyStatus::Running {
-                    let ack = ipc::control_start(&socket)
-                        .await
-                        .context("request proxy start")?;
-                    if !ack.ok {
-                        bail!("{}", ack.message);
-                    }
-                    println!("{}", ack.message);
-                } else {
-                    println!("DFRelay is already running.");
-                }
-                return Ok(());
-            }
             if status.proxy != ProxyStatus::Running {
                 let ack = ipc::control_start(&socket)
                     .await

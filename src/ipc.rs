@@ -17,6 +17,8 @@ use crate::view::{DaemonStatus, View};
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,11 +129,17 @@ pub struct Ack {
 pub fn spawn_listener(listener: UnixListener, events_tx: UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                continue;
-            };
-            let events_tx = events_tx.clone();
-            tokio::spawn(handle_client(stream, events_tx));
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let events_tx = events_tx.clone();
+                    tokio::spawn(handle_client(stream, events_tx));
+                }
+                Err(_) => {
+                    // Back off so a persistent accept error (e.g. fd
+                    // exhaustion) cannot spin this task at 100% CPU.
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                }
+            }
         }
     });
 }
@@ -139,8 +147,8 @@ pub fn spawn_listener(listener: UnixListener, events_tx: UnboundedSender<AppEven
 async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>) {
     let (read_half, write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
-    let viewer = match lines.next_line().await {
-        Ok(Some(line)) => match serde_json::from_str::<ClientMsg>(&line) {
+    let viewer = match tokio::time::timeout(HELLO_TIMEOUT, lines.next_line()).await {
+        Ok(Ok(Some(line))) => match serde_json::from_str::<ClientMsg>(&line) {
             Ok(ClientMsg::Hello { viewer }) => viewer,
             _ => return,
         },
@@ -149,15 +157,23 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>)
     let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (out_tx, out_rx) = mpsc::channel(crate::app::VIEW_QUEUE_LIMIT);
     tokio::spawn(write_client(write_half, out_rx, events_tx.clone(), id));
+    let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
     if events_tx
         .send(AppEvent::ClientAttached {
             id,
             viewer,
             tx: out_tx,
+            accept: accept_tx,
         })
         .is_err()
     {
         return;
+    }
+    // Do not forward any message until the daemon accepts this connection. A
+    // rejected second viewer must not be able to send keys or commands.
+    match tokio::time::timeout(HELLO_TIMEOUT, accept_rx).await {
+        Ok(Ok(true)) => {}
+        _ => return,
     }
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(message) = serde_json::from_str::<ClientMsg>(&line) else {
@@ -209,6 +225,20 @@ async fn write_client(
     }
 }
 
+/// Bind a Unix socket with owner-only permissions from the moment it exists.
+/// The umask is process-global, but it is held only across the synchronous
+/// bind call; the subsequent chmod remains as a belt-and-braces measure.
+fn bind_private(socket: &Path) -> io::Result<UnixListener> {
+    #[cfg(unix)]
+    let previous = unsafe { libc::umask(0o077) };
+    let result = UnixListener::bind(socket);
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(previous);
+    }
+    result
+}
+
 pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
     #[cfg(unix)]
     {
@@ -227,7 +257,7 @@ pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    match UnixListener::bind(socket) {
+    match bind_private(socket) {
         Ok(listener) => {
             set_socket_permissions(socket)?;
             Ok(listener)
@@ -240,7 +270,7 @@ pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
                 ));
             }
             let _ = std::fs::remove_file(socket);
-            let listener = UnixListener::bind(socket)?;
+            let listener = bind_private(socket)?;
             set_socket_permissions(socket)?;
             Ok(listener)
         }

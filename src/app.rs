@@ -27,6 +27,9 @@ use crate::text::sanitize_display;
 use crate::update;
 use crate::view::{BinaryStatus, DaemonStatus, View};
 
+mod health;
+mod updates;
+
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const RESTART_DELAYS: [u64; MAX_RESTART_ATTEMPTS as usize] = [1, 2, 5, 10, 30];
 const DELAY_TEST_CONCURRENCY: usize = 4;
@@ -72,13 +75,13 @@ pub const MAIN_PAGES: [Page; 6] = [
 impl Page {
     pub fn title(self, text: &Text) -> &'static str {
         match self {
-            Self::Dashboard => text.nav_dashboard,
-            Self::Nodes => text.nav_nodes,
-            Self::Subscriptions => text.nav_subscriptions,
-            Self::Connections => text.nav_connections,
-            Self::Logs => text.nav_logs,
-            Self::Settings => text.nav_settings,
-            Self::Help => text.nav_help,
+            Self::Dashboard => text.dashboard_title,
+            Self::Nodes => text.nodes_title,
+            Self::Subscriptions => text.subscriptions_title,
+            Self::Connections => text.connections_title,
+            Self::Logs => text.logs_title,
+            Self::Settings => text.settings_title,
+            Self::Help => text.help_title,
         }
     }
 
@@ -384,7 +387,7 @@ impl SettingsForm {
     }
 
     pub fn hint(&self, text: &Text) -> &'static str {
-        text.settings_lan_auth_hint
+        text.edit_form_hint
     }
 
     pub fn active_input_mut(&mut self) -> &mut LineInput {
@@ -429,7 +432,7 @@ impl EditForm {
 
     pub fn hint(&self, text: &Text) -> &'static str {
         match self {
-            Self::Subscription(_) => text.subscription_form_hint,
+            Self::Subscription(_) => text.edit_form_hint,
             Self::Keyword(_) => text.settings_keywords_hint,
             Self::Settings(form) => form.hint(text),
         }
@@ -521,8 +524,32 @@ fn choose_recovery_target(
         .map(|(tag, _)| RecoveryTarget::Node(tag.clone()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundTask {
+    SubscriptionRefresh,
+    ProxyStart,
+    ProxyStop,
+    ProxyIps,
+    DelaySweep,
+    HealthProbe,
+    Recovery,
+    BinaryDownload,
+    BinaryInstall,
+    BinaryRollback,
+    BinaryUpdateCheck,
+    AppUpdateCheck,
+    AppUpdateDownload,
+    Preflight,
+    Other,
+}
+
 pub enum AppEvent {
     Key(KeyEvent),
+    BackgroundPanic {
+        task: BackgroundTask,
+        message: String,
+    },
+    PreflightDone(Result<(), String>),
     Subscriptions {
         seq: u64,
         runtimes: Vec<SubscriptionRuntime>,
@@ -570,6 +597,7 @@ pub enum AppEvent {
         id: u64,
         viewer: bool,
         tx: mpsc::Sender<ServerMsg>,
+        accept: tokio::sync::oneshot::Sender<bool>,
     },
     ClientDetached(u64),
     StartProxyRequest {
@@ -641,6 +669,7 @@ pub struct App {
     pub rollback_confirm: bool,
     pub restart_in_progress: bool,
     restart_after_stop: bool,
+    preflight_in_flight: bool,
     managed: bool,
     service: Option<ServiceIdentity>,
     pub should_quit: bool,
@@ -890,6 +919,7 @@ impl App {
             rollback_confirm: false,
             restart_in_progress: false,
             restart_after_stop: false,
+            preflight_in_flight: false,
             managed: false,
             service: None,
             should_quit: false,
@@ -978,11 +1008,7 @@ impl App {
             .filter(|_| self.message_at.is_none_or(|at| at.elapsed() < TOAST_TTL))
             .map(|message| crate::text::sanitize_display(&message));
         let filtered = if self.page == Page::Nodes {
-            crate::selection::filter_node_tags(
-                &self.nodes,
-                &self.config.keywords_include,
-                &self.config.keywords_exclude,
-            )
+            self.auto_candidate_tags()
         } else {
             Vec::new()
         };
@@ -1176,6 +1202,12 @@ impl App {
     async fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.handle_key(key).await,
+            AppEvent::BackgroundPanic { task, message } => {
+                self.on_background_panic(task, message);
+            }
+            AppEvent::PreflightDone(result) => {
+                self.finish_restart_after_preflight(result);
+            }
             AppEvent::Subscriptions { seq, runtimes } => {
                 self.refreshing_subscriptions = false;
                 let recovery_refresh = self.recovery_refresh_pending;
@@ -1300,6 +1332,7 @@ impl App {
                     self.pending_restart_subscription = None;
                     self.auto_restart_after_change();
                 }
+                self.retry_pending_start();
             }
             AppEvent::DownloadDone(result) => {
                 self.setup.downloading = false;
@@ -1694,7 +1727,7 @@ impl App {
                         let paths = self.paths.clone();
                         let logger = self.logger.clone();
                         let tx = self.events_tx.clone();
-                        tokio::spawn(async move {
+                        self.spawn_guarded(BackgroundTask::AppUpdateDownload, async move {
                             let result =
                                 update::download_and_stage(&config, &paths, &release, &logger)
                                     .await;
@@ -1783,11 +1816,18 @@ impl App {
                 self.last_error = Some(message.clone());
                 self.logger.app(LogLevel::Error, message);
             }
-            AppEvent::ClientAttached { id, viewer, tx } => {
+            AppEvent::ClientAttached {
+                id,
+                viewer,
+                tx,
+                accept,
+            } => {
                 if viewer && self.clients.values().any(|client| client.viewer) {
                     let _ = tx.try_send(ServerMsg::Busy);
+                    let _ = accept.send(false);
                 } else {
                     self.clients.insert(id, ClientHandle { viewer, tx });
+                    let _ = accept.send(true);
                     if viewer {
                         self.viewer_active.store(true, Ordering::Relaxed);
                         self.metrics_wake.notify_one();
@@ -1926,6 +1966,63 @@ impl App {
         for client in self.clients.values().filter(|client| client.viewer) {
             let _ = client.tx.try_send(ServerMsg::View(view.clone()));
         }
+    }
+
+    /// Spawn a background task that reports completion through the event
+    /// channel. If the task panics, the panic is caught and surfaced as
+    /// `AppEvent::BackgroundPanic` so the matching in-flight flag is cleared
+    /// instead of staying set forever.
+    fn spawn_guarded<F>(&self, task: BackgroundTask, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let tx = self.events_tx.clone();
+        let logger = self.logger.clone();
+        tokio::spawn(async move {
+            if let Err(payload) = crate::guard::CatchUnwind::new(fut).await {
+                let message = crate::guard::panic_message(payload.as_ref());
+                logger.app(
+                    LogLevel::Error,
+                    format!("background task panicked: {message}"),
+                );
+                let _ = tx.send(AppEvent::BackgroundPanic { task, message });
+            }
+        });
+    }
+
+    fn on_background_panic(&mut self, task: BackgroundTask, message: String) {
+        match task {
+            BackgroundTask::SubscriptionRefresh => self.refreshing_subscriptions = false,
+            BackgroundTask::ProxyStart => {
+                self.restart_in_progress = false;
+                self.status = ProxyStatus::Failed;
+            }
+            BackgroundTask::ProxyStop => {
+                self.restart_in_progress = false;
+                self.status = ProxyStatus::Stopped;
+            }
+            BackgroundTask::ProxyIps => self.proxy_ips_in_flight = false,
+            BackgroundTask::DelaySweep => self.delay_sweep_running = false,
+            BackgroundTask::HealthProbe => self.health_probe_in_flight = false,
+            BackgroundTask::Recovery => self.recovery_in_flight = false,
+            BackgroundTask::BinaryDownload => self.setup.downloading = false,
+            BackgroundTask::BinaryInstall => {
+                self.install_in_flight = false;
+                self.setup.installing = false;
+            }
+            BackgroundTask::BinaryRollback => self.setup.rollback_in_flight = false,
+            BackgroundTask::BinaryUpdateCheck => self.update_check_in_flight = false,
+            BackgroundTask::AppUpdateCheck => self.app_update_in_flight = false,
+            BackgroundTask::AppUpdateDownload => self.app_update_downloading = false,
+            BackgroundTask::Preflight => {
+                self.preflight_in_flight = false;
+                self.restart_in_progress = false;
+            }
+            BackgroundTask::Other => {}
+        }
+        let text = format!("background task failed: {message}");
+        self.last_error = Some(text.clone());
+        self.notify(text);
     }
 
     fn publish_view(&mut self) {
@@ -2194,178 +2291,6 @@ impl App {
         self.notify(self.text().settings_copied);
     }
 
-    fn refresh_previous_binary_state(&mut self) {
-        let available = self.paths.previous_binary().is_file();
-        self.previous_binary_available = available;
-        self.previous_binary_version = if available {
-            self.binary_manager
-                .previous_metadata()
-                .map(|metadata| metadata.version)
-        } else {
-            None
-        };
-    }
-
-    fn maybe_check_binary_update(&mut self) {
-        if self.update_check_in_flight || !self.binary_installed {
-            return;
-        }
-        if self
-            .last_update_check
-            .is_some_and(|at| at.elapsed() < UPDATE_CHECK_INTERVAL)
-        {
-            return;
-        }
-        self.update_check_in_flight = true;
-        self.last_update_check = Some(Instant::now());
-        let manager = self.binary_manager.clone();
-        let config = self.config.clone();
-        let tx = self.events_tx.clone();
-        tokio::spawn(async move {
-            let result = manager
-                .latest_version(&config)
-                .await
-                .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::UpdateCheckDone(result));
-        });
-    }
-
-    fn maybe_check_app_update(&mut self) {
-        if self.config.app_update == UpdatePolicy::Off
-            || self.app_update_in_flight
-            || self.app_update_downloading
-            || self.pending_app_update.is_some()
-            || !update::is_release_build()
-        {
-            return;
-        }
-        if self
-            .last_app_update_check
-            .is_some_and(|at| at.elapsed() < update::CHECK_INTERVAL)
-        {
-            return;
-        }
-        if self
-            .app_update_retry_at
-            .is_some_and(|at| at > Instant::now())
-        {
-            return;
-        }
-        self.app_update_in_flight = true;
-        self.last_app_update_check = Some(Instant::now());
-        let config = self.config.clone();
-        let tx = self.events_tx.clone();
-        tokio::spawn(async move {
-            let result = update::check_for_update(&config)
-                .await
-                .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::AppUpdateChecked(result));
-        });
-    }
-
-    fn maybe_apply_app_update(&mut self) {
-        if self.config.app_update != UpdatePolicy::Auto || !update::is_release_build() {
-            return;
-        }
-        if self.app_update_in_flight {
-            if self
-                .app_update_apply_started
-                .is_some_and(|at| at.elapsed() > Duration::from_secs(600))
-            {
-                self.app_update_in_flight = false;
-                self.app_update_apply_started = None;
-                self.logger.app(
-                    LogLevel::Warn,
-                    "app update: applier did not restart the daemon; retrying",
-                );
-            } else {
-                return;
-            }
-        }
-        let Some(pending) = self.pending_app_update.as_ref() else {
-            return;
-        };
-        if !update::auto_apply_allowed(
-            self.has_viewer(),
-            !self.metrics.connections.is_empty(),
-            pending.since.elapsed(),
-        ) {
-            if !self.app_update_deferred_logged {
-                self.logger.app(
-                    LogLevel::Info,
-                    "app update: deferred until the TUI detaches or activity settles",
-                );
-                self.app_update_deferred_logged = true;
-            }
-            return;
-        }
-        if self.managed && self.service.is_none() {
-            if !self.app_update_deferred_logged {
-                self.logger.app(
-                    LogLevel::Info,
-                    "app update: service-managed daemon without identity; run `dfr update apply`",
-                );
-                self.app_update_deferred_logged = true;
-            }
-            return;
-        }
-        let target = match update::target_binary() {
-            Ok(target) => target,
-            Err(err) => {
-                self.logger.app(
-                    LogLevel::Warn,
-                    format!("app update: cannot resolve the installed binary: {err}"),
-                );
-                self.app_update_deferred_logged = true;
-                return;
-            }
-        };
-        let staged = pending.staged.clone();
-        let version = pending.version.clone();
-        match update::spawn_apply_helper(
-            &self.paths,
-            &staged,
-            &target,
-            &version,
-            self.service.as_ref(),
-        ) {
-            Ok(()) => {
-                self.app_update_in_flight = true;
-                self.app_update_apply_started = Some(Instant::now());
-                self.logger.app(
-                    LogLevel::Info,
-                    format!("app update: applying v{version}; daemon will restart"),
-                );
-                self.notify(self.text().msg_app_update_applying);
-            }
-            Err(err) => {
-                self.logger.app(
-                    LogLevel::Warn,
-                    format!("app update: cannot start the applier: {err}"),
-                );
-                self.app_update_deferred_logged = true;
-            }
-        }
-    }
-
-    fn cycle_app_update_policy(&mut self) {
-        let mut config = self.config.clone();
-        config.app_update = config.app_update.next();
-        if let Err(err) = config.save(&self.paths.config_file) {
-            self.last_error = Some(err.to_string());
-            return;
-        }
-        self.config = config;
-        self.last_app_update_check = None;
-        self.app_update_retry_at = None;
-        self.app_update_deferred_logged = false;
-        self.notify(self.text().settings_saved);
-        self.logger.app(
-            LogLevel::Info,
-            format!("app update policy: {}", self.config.app_update.as_str()),
-        );
-    }
-
     fn open_log_detail(&mut self) {
         if let Some(line) = self.log_lines().get(self.selected).cloned() {
             self.overlay = Some(Overlay::LogDetail { line, scroll: 0 });
@@ -2460,13 +2385,7 @@ impl App {
 
     fn sort_nodes_preserving_selection(&mut self) {
         let selected_tag = self.nodes.get(self.selected).map(|node| node.tag.clone());
-        let auto_tags: HashSet<String> = crate::selection::filter_node_tags(
-            &self.nodes,
-            &self.config.keywords_include,
-            &self.config.keywords_exclude,
-        )
-        .into_iter()
-        .collect();
+        let auto_tags: HashSet<String> = self.auto_candidate_tags().into_iter().collect();
         sort_nodes(
             &mut self.nodes,
             self.node_sort,
@@ -2565,7 +2484,7 @@ impl App {
         let previous = self.subscriptions.clone();
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
-        tokio::spawn(async move {
+        self.spawn_guarded(BackgroundTask::SubscriptionRefresh, async move {
             logger.app(
                 LogLevel::Info,
                 format!("refreshing {} subscriptions", configs.len()),
@@ -2692,7 +2611,7 @@ impl App {
 
     async fn handle_setup_overlay_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc => self.close_overlay(),
+            KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
             KeyCode::Char('j') | KeyCode::Down => self.move_setup_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_setup_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => self.jump_setup_selection(false),
@@ -2708,7 +2627,7 @@ impl App {
 
     fn handle_log_detail_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => self.close_overlay(),
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.close_overlay(),
             KeyCode::Char('j') | KeyCode::Down => self.scroll_log_detail(1),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_log_detail(-1),
             KeyCode::Char('g') | KeyCode::Home => self.scroll_log_detail_to(0),
@@ -3059,12 +2978,7 @@ impl App {
             return;
         }
         self.close_overlay();
-        let filtered = crate::selection::filter_node_tags(
-            &self.nodes,
-            &self.config.keywords_include,
-            &self.config.keywords_exclude,
-        )
-        .len();
+        let filtered = self.auto_candidate_tags().len();
         let total = self.nodes.len();
         let mut message =
             if self.config.keywords_include.is_empty() && self.config.keywords_exclude.is_empty() {
@@ -3150,7 +3064,7 @@ impl App {
         self.subscription_refresh_seq.insert(config.id.clone(), seq);
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
-        tokio::spawn(async move {
+        self.spawn_guarded(BackgroundTask::Other, async move {
             logger.app(
                 LogLevel::Info,
                 format!("refreshing subscription {}", config.name),
@@ -3228,11 +3142,7 @@ impl App {
             self.notify(self.text().no_nodes);
             return false;
         }
-        let filtered = crate::selection::filter_node_tags(
-            &self.nodes,
-            &self.config.keywords_include,
-            &self.config.keywords_exclude,
-        );
+        let filtered = self.auto_candidate_tags();
         if filtered.is_empty() {
             self.last_error = Some(self.text().no_matching_nodes.to_string());
             self.notify(self.text().no_matching_nodes);
@@ -3242,31 +3152,59 @@ impl App {
     }
 
     fn begin_restart(&mut self) -> bool {
-        // Validate the proposed configuration before tearing down the running
-        // instance. `start` repeats this check after stopping (it is the final
-        // safety net), but a failed proposal must not cause an outage.
-        if let Err(err) = supervisor::preflight(
-            &self.paths,
-            &self.config,
-            &self.nodes,
-            self.preferred_node.as_deref(),
-        ) {
-            let message = format!("{}: {err}", self.text().msg_preflight_failed);
-            self.last_error = Some(message.clone());
-            self.logger.app(LogLevel::Warn, message);
-            self.notify(self.text().msg_preflight_failed);
-            self.restart_confirm = false;
-            self.rollback_confirm = false;
+        if self.preflight_in_flight || self.restart_in_progress {
             return false;
         }
+        // Validate the proposed configuration before tearing down the running
+        // instance. The check runs on a blocking thread so a slow `sing-box
+        // check` cannot stall the daemon event loop.
         self.restart_confirm = false;
         self.rollback_confirm = false;
         self.subscription_delete = None;
+        self.preflight_in_flight = true;
         self.restart_in_progress = true;
-        self.restart_after_stop = true;
         self.notify(self.text().msg_restarting);
-        self.stop_proxy();
+        let paths = self.paths.clone();
+        let config = self.config.clone();
+        let nodes = self.nodes.clone();
+        let preferred = self.preferred_node.clone();
+        let tx = self.events_tx.clone();
+        self.spawn_guarded(BackgroundTask::Preflight, async move {
+            let result = tokio::task::spawn_blocking(move || {
+                supervisor::preflight(&paths, &config, &nodes, preferred.as_deref())
+                    .map_err(|err| err.to_string())
+            })
+            .await
+            .unwrap_or_else(|err| Err(format!("preflight task failed: {err}")));
+            let _ = tx.send(AppEvent::PreflightDone(result));
+        });
         true
+    }
+
+    fn finish_restart_after_preflight(&mut self, result: Result<(), String>) {
+        self.preflight_in_flight = false;
+        match result {
+            Ok(()) => {
+                if self.proxy.is_some() {
+                    self.restart_after_stop = true;
+                    self.stop_proxy();
+                } else {
+                    // The instance disappeared while the check was running;
+                    // avoid leaving the busy flag set with nothing to restart.
+                    self.restart_in_progress = false;
+                    let _ = self.start_proxy();
+                }
+            }
+            Err(err) => {
+                self.restart_in_progress = false;
+                let message = format!("{}: {err}", self.text().msg_preflight_failed);
+                self.last_error = Some(message.clone());
+                self.logger.app(LogLevel::Warn, message);
+                self.notify(self.text().msg_preflight_failed);
+                self.restart_confirm = false;
+                self.rollback_confirm = false;
+            }
+        }
     }
 
     fn start_proxy(&mut self) -> Result<(), String> {
@@ -3283,11 +3221,7 @@ impl App {
             self.switch_page(Page::Subscriptions);
             return Err(self.text().no_nodes.to_string());
         }
-        let filtered = crate::selection::filter_node_tags(
-            &self.nodes,
-            &self.config.keywords_include,
-            &self.config.keywords_exclude,
-        );
+        let filtered = self.auto_candidate_tags();
         if filtered.is_empty() {
             self.last_error = Some(self.text().no_matching_nodes.to_string());
             return Err(self.text().no_matching_nodes.to_string());
@@ -3314,7 +3248,7 @@ impl App {
         let nodes = self.nodes.clone();
         let logger = self.logger.clone();
         let tx = self.events_tx.clone();
-        tokio::spawn(async move {
+        self.spawn_guarded(BackgroundTask::ProxyStart, async move {
             let result = supervisor::start(&paths, &config, &nodes, &logger, preferred.as_deref())
                 .await
                 .map_err(|err| err.to_string());
@@ -3361,7 +3295,7 @@ impl App {
             self.status = ProxyStatus::Stopping;
             let logger = self.logger.clone();
             let tx = self.events_tx.clone();
-            tokio::spawn(async move {
+            self.spawn_guarded(BackgroundTask::ProxyStop, async move {
                 supervisor::stop(proxy, &logger).await;
                 let _ = tx.send(AppEvent::ProxyStopped);
             });
@@ -3467,7 +3401,7 @@ impl App {
                     .map_or(self.config.port, |proxy| proxy.port),
             ),
         };
-        tokio::spawn(async move {
+        self.spawn_guarded(BackgroundTask::ProxyIps, async move {
             let (v4, v6) = tokio::join!(
                 netinfo::fetch_proxy_ip(&v4_url, &proxy_url),
                 netinfo::fetch_proxy_ip(&v6_url, &proxy_url)
@@ -3483,101 +3417,6 @@ impl App {
                 Err(err) => errors.push(format!("v6 {err}")),
             }
             let _ = tx.send(AppEvent::ProxyIps { ips, errors });
-        });
-    }
-
-    fn request_rollback(&mut self) {
-        if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
-            self.notify(self.text().setup_busy);
-            return;
-        }
-        if !self.paths.previous_binary().is_file() {
-            self.notify(self.text().msg_rollback_unavailable);
-            return;
-        }
-        self.rollback_confirm = true;
-        self.message = None;
-    }
-
-    fn perform_rollback(&mut self) {
-        if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
-            self.notify(self.text().setup_busy);
-            return;
-        }
-        if !self.paths.previous_binary().is_file() {
-            self.notify(self.text().msg_rollback_unavailable);
-            return;
-        }
-        self.setup.rollback_in_flight = true;
-        self.setup.message = None;
-        let manager = self.binary_manager.clone();
-        let logger = self.logger.clone();
-        let tx = self.events_tx.clone();
-        tokio::spawn(async move {
-            let result = manager
-                .rollback(&logger)
-                .await
-                .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::RollbackDone(result));
-        });
-    }
-
-    fn start_download(&mut self) {
-        if self.setup.downloading || self.install_in_flight {
-            return;
-        }
-        if self.setup.rollback_in_flight {
-            self.notify(self.text().setup_busy);
-            return;
-        }
-        self.setup.downloading = true;
-        self.setup.message = None;
-        let config = self.config.clone();
-        let logger = self.logger.clone();
-        let manager = self.binary_manager.clone();
-        let tx = self.events_tx.clone();
-        tokio::spawn(async move {
-            let result = manager
-                .download_latest(&config, &logger)
-                .await
-                .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::DownloadDone(result));
-        });
-    }
-
-    async fn install_selected(&mut self) {
-        if self.setup.downloading || self.install_in_flight {
-            return;
-        }
-        if self.setup.rollback_in_flight {
-            self.notify(self.text().setup_busy);
-            return;
-        }
-        let Some(selected) = self.setup_overlay_selected() else {
-            return;
-        };
-        let Some(candidate) = self.setup.candidates.get(selected).cloned() else {
-            return;
-        };
-        if !candidate.has_checksum && self.setup.pending_install.as_ref() != Some(&candidate.path) {
-            self.setup.pending_install = Some(candidate.path.clone());
-            self.setup.message = None;
-            return;
-        }
-        self.setup.pending_install = None;
-        self.install_in_flight = true;
-        self.setup.installing = true;
-        self.setup.message = None;
-        let manager = self.binary_manager.clone();
-        let logger = self.logger.clone();
-        let tx = self.events_tx.clone();
-        let path = candidate.path.clone();
-        tokio::spawn(async move {
-            let result = manager
-                .install_from_inbox(&path, &logger)
-                .await
-                .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::InstallDone(result));
         });
     }
 
@@ -3652,14 +3491,11 @@ impl App {
                     return;
                 };
                 if target == "auto" && !self.runtime_has_auto {
-                    target = crate::selection::filter_node_tags(
-                        &self.nodes,
-                        &self.config.keywords_include,
-                        &self.config.keywords_exclude,
-                    )
-                    .first()
-                    .cloned()
-                    .unwrap_or(target);
+                    target = self
+                        .auto_candidate_tags()
+                        .first()
+                        .cloned()
+                        .unwrap_or(target);
                 }
                 (target, self.text().msg_auto_enabled.to_string())
             }
@@ -3761,7 +3597,7 @@ impl App {
         self.delay_sweep_running = true;
         self.last_delay_sweep = Some(Instant::now());
         self.delay_testing = tags.iter().cloned().collect();
-        tokio::spawn(async move {
+        self.spawn_guarded(BackgroundTask::DelaySweep, async move {
             for chunk in tags.chunks(DELAY_TEST_CONCURRENCY) {
                 let mut tasks = JoinSet::new();
                 for tag in chunk.iter().cloned() {
@@ -3782,296 +3618,18 @@ impl App {
         });
     }
 
-    fn health_target(&self) -> Option<String> {
-        let selected = self.metrics.selection.selected.as_deref()?;
-        let tag = if selected == "auto" {
-            self.metrics
-                .selection
-                .auto_now
-                .as_deref()
-                .filter(|tag| *tag != "auto")?
-        } else {
-            selected
-        };
-        self.proxy_node_tags
-            .iter()
-            .any(|item| item == tag)
-            .then(|| tag.to_string())
-    }
-
-    fn maybe_probe_health(&mut self) {
-        if self.proxy.is_none()
-            || self.status != ProxyStatus::Running
-            || self.recovery_in_flight
-            || self.recovery_refresh_pending
-            || self.health_probe_in_flight
-            || self
-                .health_pause_until
-                .is_some_and(|at| at > Instant::now())
-        {
-            return;
-        }
-        let now = Instant::now();
-        if self
-            .last_metrics_at
-            .is_none_or(|at| at.elapsed() > HEALTH_PROBE_STALE)
-        {
-            return;
-        }
-        if self
-            .last_health_activity
-            .is_none_or(|at| at.elapsed() > HEALTH_ACTIVE_WINDOW)
-        {
-            return;
-        }
-        if self
-            .last_health_probe
-            .is_some_and(|at| at.elapsed() < HEALTH_PROBE_INTERVAL)
-        {
-            return;
-        }
-        let Some(tag) = self.health_target() else {
-            return;
-        };
-        let Some(proxy) = self.proxy.as_ref() else {
-            return;
-        };
-        let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
-        let test_url = self.config.test_url.clone();
-        let tx = self.events_tx.clone();
-        let logger = self.logger.clone();
-        let generation = self.health_generation;
-        self.health_probe_in_flight = true;
-        self.last_health_probe = Some(now);
-        tokio::spawn(async move {
-            let result = client.delay(&tag, &test_url).await;
-            let outcome = health_outcome(&result);
-            if matches!(outcome, HealthOutcome::Unavailable) {
-                if let Err(err) = &result {
-                    logger.app(
-                        LogLevel::Debug,
-                        format!("health probe unavailable for {tag}: {err}"),
-                    );
-                }
-            }
-            let _ = tx.send(AppEvent::HealthProbe {
-                generation,
-                tag,
-                outcome,
-            });
-        });
-    }
-
-    fn reset_health_failures(&mut self) {
-        self.health_failures = 0;
-        self.health_failure_tag = None;
-    }
-
-    fn schedule_no_node_pause(&mut self) {
-        let index = (self.health_no_node_level as usize)
-            .min(HEALTH_NO_NODE_BACKOFF_SECS.len().saturating_sub(1));
-        self.health_pause_until =
-            Some(Instant::now() + Duration::from_secs(HEALTH_NO_NODE_BACKOFF_SECS[index]));
-        self.health_no_node_level = self
-            .health_no_node_level
-            .saturating_add(1)
-            .min(HEALTH_NO_NODE_BACKOFF_SECS.len() as u8 - 1);
-    }
-
-    fn invalidate_health_tasks(&mut self) {
-        self.health_generation = self.health_generation.wrapping_add(1);
-        self.health_probe_in_flight = false;
-        self.recovery_in_flight = false;
-        self.health_pause_until = None;
-        self.health_no_node_level = 0;
-        self.recovery_refresh_pending = false;
-        self.reset_health_failures();
-        self.last_recovery = None;
-    }
-
-    fn reset_health_state(&mut self) {
-        self.invalidate_health_tasks();
-        self.last_health_probe = None;
-        self.last_health_activity = None;
-        self.health_connection_ids.clear();
-        self.last_metrics_at = None;
-        self.recovery_refresh_pending = false;
-    }
-
-    fn recovery_candidates(&self, trigger: &str) -> Vec<String> {
-        let runtime: HashSet<&str> = self.proxy_node_tags.iter().map(String::as_str).collect();
-        let auto_mode = self.metrics.selection.selected.as_deref() == Some("auto");
-        let auto_nodes = if auto_mode {
-            crate::selection::filter_nodes(
-                &self.nodes,
-                &self.config.keywords_include,
-                &self.config.keywords_exclude,
-            )
-        } else {
-            Vec::new()
-        };
-        let source: Vec<&Node> = if auto_mode {
-            auto_nodes
-                .iter()
-                .filter(|node| runtime.contains(node.tag.as_str()))
-                .collect()
-        } else {
-            self.nodes
-                .iter()
-                .filter(|node| runtime.contains(node.tag.as_str()))
-                .collect()
-        };
-        let mut ordered: Vec<&Node> = source
-            .into_iter()
-            .filter(|node| node.tag != trigger)
-            .collect();
-        ordered.sort_by(|left, right| {
-            self.node_delays
-                .get(&left.tag)
-                .copied()
-                .unwrap_or(u64::MAX)
-                .cmp(
-                    &self
-                        .node_delays
-                        .get(&right.tag)
-                        .copied()
-                        .unwrap_or(u64::MAX),
-                )
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-                .then_with(|| left.tag.cmp(&right.tag))
-        });
-        ordered.truncate(MAX_LIST_ROWS);
-        ordered.into_iter().map(|node| node.tag.clone()).collect()
-    }
-
-    fn start_recovery(&mut self, trigger: String) {
-        if self.recovery_in_flight
-            || self.recovery_refresh_pending
-            || self
-                .health_pause_until
-                .is_some_and(|at| at > Instant::now())
-        {
-            return;
-        }
-        let Some(proxy) = self.proxy.as_ref() else {
-            return;
-        };
-        self.last_recovery = Some(Instant::now());
-        self.logger.app(
-            LogLevel::Warn,
-            format!("health failover: {trigger} failed {HEALTH_FAILURE_THRESHOLD} probes"),
-        );
-        let candidates = self.recovery_candidates(&trigger);
-        if candidates.is_empty() {
-            self.on_no_healthy_nodes();
-            return;
-        }
-        let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
-        let test_url = self.config.test_url.clone();
-        let tx = self.events_tx.clone();
-        let generation = self.health_generation;
-        self.recovery_in_flight = true;
-        self.notify(self.text().msg_health_recovering);
-        tokio::spawn(async move {
-            let mut healthy = Vec::new();
-            for chunk in candidates.chunks(DELAY_TEST_CONCURRENCY) {
-                let mut tasks = JoinSet::new();
-                for tag in chunk.iter().cloned() {
-                    let client = client.clone();
-                    let test_url = test_url.clone();
-                    tasks.spawn(async move {
-                        let delay = client
-                            .delay(&tag, &test_url)
-                            .await
-                            .ok()
-                            .filter(|delay| *delay > 0);
-                        (tag, delay)
-                    });
-                }
-                while let Some(result) = tasks.join_next().await {
-                    if let Ok((tag, delay)) = result {
-                        if let Some(delay) = delay {
-                            healthy.push((tag.clone(), delay));
-                        }
-                        let _ = tx.send(AppEvent::NodeDelay { tag, delay });
-                    }
-                }
-                if !healthy.is_empty() {
-                    break;
-                }
-            }
-            let _ = tx.send(AppEvent::RecoveryProbe {
-                generation,
-                trigger,
-                healthy,
-            });
-        });
-    }
-
-    fn on_no_healthy_nodes(&mut self) {
-        self.recovery_in_flight = false;
-        self.reset_health_failures();
-        self.schedule_no_node_pause();
-        let message = self.text().msg_health_no_nodes.to_string();
-        self.last_error = Some(message.clone());
-        self.logger
-            .app(LogLevel::Warn, "health failover: no healthy nodes");
-        if self.config.enabled_subscriptions().next().is_none() {
-            self.notify(self.text().msg_no_enabled_subscriptions);
-            return;
-        }
-        if self
-            .last_recovery_refresh
-            .is_some_and(|at| at.elapsed() < HEALTH_REFRESH_COOLDOWN)
-        {
-            self.notify(message);
-            return;
-        }
-        if self.refreshing_subscriptions {
-            self.recovery_refresh_pending = true;
-            return;
-        }
-        self.last_recovery_refresh = Some(Instant::now());
-        self.recovery_refresh_pending = true;
-        self.notify(self.text().msg_health_refreshing);
-        self.refresh_subscriptions();
-    }
-
-    fn finish_recovery_refresh(&mut self) {
-        self.reset_health_failures();
-        let auto_nodes = crate::selection::filter_nodes(
+    /// Tags of the nodes eligible for automatic selection under the current
+    /// keyword filters. Centralised so every caller uses the same predicate.
+    fn auto_candidate_tags(&self) -> Vec<String> {
+        crate::selection::filter_node_tags(
             &self.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
-        );
-        let has_new = auto_nodes
-            .iter()
-            .any(|node| !self.proxy_node_tags.contains(&node.tag));
-        if !has_new {
-            self.last_error = Some(self.text().msg_health_no_nodes.to_string());
-            self.logger.app(
-                LogLevel::Warn,
-                "health failover: subscription refresh added no auto candidates",
-            );
-            self.notify(self.text().msg_health_no_new_nodes);
-            return;
-        }
-        if self.proxy.is_some() && self.status == ProxyStatus::Running {
-            self.preferred_node = None;
-            self.pending_selection = None;
-            self.perform_restart();
-            self.notify(self.text().msg_health_restarting);
-        } else {
-            self.notify(self.text().msg_health_new_nodes);
-        }
+        )
     }
 
     fn auto_selection_target(&self) -> Option<String> {
-        let filtered = crate::selection::filter_node_tags(
-            &self.nodes,
-            &self.config.keywords_include,
-            &self.config.keywords_exclude,
-        );
+        let filtered = self.auto_candidate_tags();
         if filtered.len() >= 2 {
             Some("auto".to_string())
         } else {
@@ -4279,7 +3837,11 @@ impl App {
             && self.restart_at.is_some_and(|at| Instant::now() >= at)
         {
             self.restart_at = None;
-            let _ = self.start_proxy();
+            if self.start_proxy().is_err() {
+                // A synchronous failure (no matching nodes, missing binary, ...)
+                // must not silently end the scheduled retry loop.
+                self.schedule_restart();
+            }
             changed = true;
         }
         self.logger.flush();
@@ -4877,6 +4439,7 @@ mod tests {
             id: 1,
             viewer: true,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.page = Page::Connections;
@@ -4912,6 +4475,7 @@ mod tests {
             id: 1,
             viewer: true,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.overlay = Some(Overlay::Setup { selected: 0 });
@@ -5234,6 +4798,7 @@ mod tests {
             id: 1,
             viewer: true,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.page = Page::Settings;
@@ -5259,6 +4824,7 @@ mod tests {
             id: 1,
             viewer: true,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.page = Page::Settings;
@@ -5284,6 +4850,7 @@ mod tests {
             id: 1,
             viewer: true,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.page = Page::Settings;
@@ -5390,6 +4957,7 @@ mod tests {
             id: 7,
             viewer: true,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.handle_key(key(KeyCode::Char('q'))).await;
@@ -5402,6 +4970,7 @@ mod tests {
             id: 8,
             viewer: true,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
@@ -5436,6 +5005,7 @@ mod tests {
             id: 9,
             viewer: false,
             tx,
+            accept: tokio::sync::oneshot::channel().0,
         })
         .await;
         app.handle_event(AppEvent::StatusRequest { client_id: 9 })

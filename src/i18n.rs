@@ -43,13 +43,6 @@ pub struct FooterHint {
 
 pub struct Text {
     pub app_title: &'static str,
-    pub nav_dashboard: &'static str,
-    pub nav_nodes: &'static str,
-    pub nav_subscriptions: &'static str,
-    pub nav_connections: &'static str,
-    pub nav_logs: &'static str,
-    pub nav_settings: &'static str,
-    pub nav_help: &'static str,
 
     pub status_running: &'static str,
     pub status_stopped: &'static str,
@@ -99,7 +92,7 @@ pub struct Text {
     pub subscription_form_name: &'static str,
     pub subscription_form_url: &'static str,
     pub subscription_form_enabled: &'static str,
-    pub subscription_form_hint: &'static str,
+    pub edit_form_hint: &'static str,
     pub subscription_form_invalid_url: &'static str,
     pub subscription_http_warning: &'static str,
 
@@ -125,7 +118,6 @@ pub struct Text {
     pub settings_allow_lan: &'static str,
     pub settings_lan_auth: &'static str,
     pub settings_lan_auth_title: &'static str,
-    pub settings_lan_auth_hint: &'static str,
     pub settings_lan_username: &'static str,
     pub settings_lan_password: &'static str,
     pub settings_set: &'static str,
@@ -248,13 +240,6 @@ pub struct Text {
 
 static ZH: Text = Text {
     app_title: "DFRelay",
-    nav_dashboard: "总览",
-    nav_nodes: "节点",
-    nav_subscriptions: "订阅",
-    nav_connections: "连接",
-    nav_logs: "日志",
-    nav_settings: "设置",
-    nav_help: "帮助",
 
     status_running: "运行中",
     status_stopped: "已停止",
@@ -304,7 +289,7 @@ static ZH: Text = Text {
     subscription_form_name: "名称",
     subscription_form_url: "URL",
     subscription_form_enabled: "启用",
-    subscription_form_hint: "Tab/↑↓ 切字段   ←/→ 光标   Enter 保存   Esc 取消",
+    edit_form_hint: "Tab/↑↓ 切字段   ←/→ 光标   Enter 保存   Esc 取消",
     subscription_form_invalid_url: "URL 需以 http:// 或 https:// 开头",
     subscription_http_warning: "HTTP 订阅不加密，token 可能被窃听",
 
@@ -330,7 +315,6 @@ static ZH: Text = Text {
     settings_allow_lan: "局域网访问",
     settings_lan_auth: "局域网认证",
     settings_lan_auth_title: "局域网认证",
-    settings_lan_auth_hint: "Tab/↑↓ 切字段   ←/→ 光标   Enter 保存   Esc 取消",
     settings_lan_username: "用户名",
     settings_lan_password: "密码",
     settings_set: "已设置",
@@ -539,13 +523,6 @@ static ZH: Text = Text {
 
 static EN: Text = Text {
     app_title: "DFRelay",
-    nav_dashboard: "Dashboard",
-    nav_nodes: "Nodes",
-    nav_subscriptions: "Subscriptions",
-    nav_connections: "Connections",
-    nav_logs: "Logs",
-    nav_settings: "Settings",
-    nav_help: "Help",
 
     status_running: "Running",
     status_stopped: "Stopped",
@@ -595,7 +572,7 @@ static EN: Text = Text {
     subscription_form_name: "Name",
     subscription_form_url: "URL",
     subscription_form_enabled: "Enabled",
-    subscription_form_hint: "Tab/↑↓ field   ←/→ cursor   Enter save   Esc cancel",
+    edit_form_hint: "Tab/↑↓ field   ←/→ cursor   Enter save   Esc cancel",
     subscription_form_invalid_url: "URL must start with http:// or https://",
     subscription_http_warning: "HTTP subscription is not encrypted; token may be intercepted",
 
@@ -621,7 +598,6 @@ static EN: Text = Text {
     settings_allow_lan: "LAN access",
     settings_lan_auth: "LAN auth",
     settings_lan_auth_title: "LAN authentication",
-    settings_lan_auth_hint: "Tab/↑↓ field   ←/→ cursor   Enter save   Esc cancel",
     settings_lan_username: "Username",
     settings_lan_password: "Password",
     settings_set: "set",
@@ -836,7 +812,7 @@ mod tests {
     #[test]
     fn default_is_chinese() {
         assert_eq!(Lang::default(), Lang::Zh);
-        assert_eq!(Lang::default().text().nav_dashboard, "总览");
+        assert_eq!(Lang::default().text().dashboard_title, "总览");
     }
 
     #[test]
@@ -897,9 +873,10 @@ mod tests {
     }
 
     #[test]
-    fn edit_form_hints_match_the_subscription_form() {
+    fn edit_form_hint_mentions_navigation_and_save() {
         for text in [&ZH, &EN] {
-            assert_eq!(text.settings_lan_auth_hint, text.subscription_form_hint);
+            assert!(text.edit_form_hint.contains("←/→"));
+            assert!(text.edit_form_hint.contains("Enter"));
             assert!(text.settings_keywords_hint.contains("←/→"));
             assert!(text.settings_keywords_hint.contains("Enter"));
         }
