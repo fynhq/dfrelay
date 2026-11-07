@@ -6,6 +6,53 @@ use super::model::Node;
 use super::parse_clash::parse_clash_document;
 use super::parse_uri::{decode_base64_text, parse_uri_list};
 
+/// Maximum number of YAML alias references (`*anchor`) tolerated in a
+/// subscription body before it is rejected.
+///
+/// `serde_yaml_ng` resolves an alias by jumping back to the anchor and
+/// re-deserializing the whole subtree, so nested aliasing expands the document
+/// multiplicatively (a "billion laughs" payload). A 10 MB body can encode an
+/// expansion large enough to exhaust memory and abort the daemon. Real Clash
+/// subscriptions are flat proxy lists and never use aliases, so a small budget
+/// is generous for legitimate input while capping worst-case expansion.
+const MAX_YAML_ALIASES: usize = 16;
+
+/// Count YAML alias indicators (`*`) outside quoted scalars.
+///
+/// Over-counting is safe (it only rejects sooner); under-counting is the risk,
+/// so the scan errs toward counting a `*` as an alias. Anchors (`&`) alone do
+/// not expand and are not counted.
+fn count_yaml_aliases(text: &str) -> usize {
+    let mut count = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_double => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '*' if !in_single && !in_double => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+fn ensure_alias_budget(text: &str) -> Result<(), String> {
+    let aliases = count_yaml_aliases(text);
+    if aliases > MAX_YAML_ALIASES {
+        return Err(format!(
+            "subscription uses excessive YAML aliasing ({aliases} aliases); rejected to prevent memory exhaustion"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnsupportedNode {
     pub name: String,
@@ -36,20 +83,27 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
         }
     }
 
-    if let Ok(document) = serde_yaml_ng::from_str::<YamlValue>(trimmed) {
-        let proxies_key = YamlValue::String("proxies".to_string());
-        let has_proxies = document
-            .as_mapping()
-            .is_some_and(|mapping| mapping.contains_key(&proxies_key));
-        if has_proxies {
-            let (nodes, unsupported) = parse_clash_document(&document, source)?;
-            return Ok(ParseOutcome {
-                nodes,
-                unsupported: unsupported
-                    .into_iter()
-                    .map(|(name, reason)| UnsupportedNode { name, reason })
-                    .collect(),
-            });
+    // Guard against alias-bomb payloads: if the body exceeds the alias budget,
+    // skip the YAML parser (which would materialize the expansion) and fall
+    // through to the base64/URI parsers. If nothing else matches, surface the
+    // aliasing rejection instead of a generic "unrecognized" error.
+    let alias_error = ensure_alias_budget(trimmed).err();
+    if alias_error.is_none() {
+        if let Ok(document) = serde_yaml_ng::from_str::<YamlValue>(trimmed) {
+            let proxies_key = YamlValue::String("proxies".to_string());
+            let has_proxies = document
+                .as_mapping()
+                .is_some_and(|mapping| mapping.contains_key(&proxies_key));
+            if has_proxies {
+                let (nodes, unsupported) = parse_clash_document(&document, source)?;
+                return Ok(ParseOutcome {
+                    nodes,
+                    unsupported: unsupported
+                        .into_iter()
+                        .map(|(name, reason)| UnsupportedNode { name, reason })
+                        .collect(),
+                });
+            }
         }
     }
 
@@ -81,6 +135,9 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
         }
     }
 
+    if let Some(message) = alias_error {
+        return Err(message);
+    }
     Err("unrecognized subscription format".to_string())
 }
 
@@ -157,6 +214,11 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Option<ParseOutcome> {
         let mut outbound = outbound.clone();
         if let Some(object) = outbound.as_object_mut() {
             object.remove("tag");
+            // `detour` references another outbound by its original tag. DFRelay
+            // regenerates node tags as stable hashes, so the reference would be
+            // dangling and fail the whole `sing-box check`. Drop it so a single
+            // chained node cannot block the entire generated configuration.
+            object.remove("detour");
         }
         nodes.push(Node::new(
             name,
@@ -252,5 +314,37 @@ mod tests {
             .unsupported
             .iter()
             .any(|item| item.reason.contains("missing method")));
+    }
+
+    #[test]
+    fn counts_aliases_outside_quotes() {
+        assert_eq!(count_yaml_aliases("a: *x\nb: *y"), 2);
+        assert_eq!(count_yaml_aliases("name: \"a*b*c\""), 0);
+        assert_eq!(count_yaml_aliases("name: 'a*b'"), 0);
+        assert_eq!(count_yaml_aliases(""), 0);
+    }
+
+    #[test]
+    fn rejects_yaml_alias_bomb() {
+        // A billion-laughs style payload: each level aliases the previous one.
+        let mut body = String::from("a: &a [x, x, x]\n");
+        let mut prev = 'a';
+        for level in 0..8 {
+            let name = (b'b' + level) as char;
+            body.push_str(&format!(
+                "{name}: &{name} [*{prev}, *{prev}, *{prev}, *{prev}]\n"
+            ));
+            prev = name;
+        }
+        let err = detect_and_parse(&body, "test").unwrap_err();
+        assert!(err.contains("aliasing"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn alias_budget_allows_few_and_rejects_many() {
+        assert!(ensure_alias_budget("a: *x\nb: *y").is_ok());
+        let many = "a: *x\n".repeat(MAX_YAML_ALIASES + 1);
+        let err = ensure_alias_budget(&many).unwrap_err();
+        assert!(err.contains("aliasing"));
     }
 }

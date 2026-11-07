@@ -2,6 +2,7 @@ pub mod cache;
 pub mod detect;
 pub mod fetch;
 pub mod model;
+pub mod outbound;
 pub mod parse_clash;
 pub mod parse_uri;
 
@@ -103,10 +104,50 @@ pub async fn refresh_all(
             let options = options.clone();
             let index = next;
             next += 1;
-            tasks.spawn(async move { (index, refresh_one(config, &options, old.as_ref()).await) });
+            tasks.spawn(async move {
+                // Keep the subscription index on a panic so its slot is filled
+                // with a visible failure instead of silently disappearing.
+                let outcome =
+                    crate::guard::CatchUnwind::new(refresh_one(config, &options, old.as_ref()))
+                        .await;
+                match outcome {
+                    Ok(runtime) => (index, Ok(runtime)),
+                    Err(payload) => (index, Err(crate::guard::panic_message(payload.as_ref()))),
+                }
+            });
         }
-        if let Some(Ok((index, runtime))) = tasks.join_next().await {
-            results[index] = Some(runtime);
+        if let Some(result) = tasks.join_next().await {
+            match result {
+                Ok((index, Ok(runtime))) => results[index] = Some(runtime),
+                Ok((index, Err(message))) => {
+                    let config = configs[index].clone();
+                    let old = previous
+                        .iter()
+                        .find(|runtime| runtime.config.id == config.id);
+                    results[index] = Some(failed_runtime(
+                        config,
+                        old,
+                        format!("refresh task failed: {message}"),
+                    ));
+                }
+                // Cancellation carries no index; the fill below covers it.
+                Err(_) => {}
+            }
+        }
+    }
+    // Any slot whose task never reported keeps the previous nodes and records
+    // an explicit error so the subscription does not vanish from the list.
+    for (index, slot) in results.iter_mut().enumerate() {
+        if slot.is_none() {
+            let config = configs[index].clone();
+            let old = previous
+                .iter()
+                .find(|runtime| runtime.config.id == config.id);
+            *slot = Some(failed_runtime(
+                config,
+                old,
+                "refresh task did not complete".to_string(),
+            ));
         }
     }
     results.into_iter().flatten().collect()

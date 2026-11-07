@@ -6,6 +6,7 @@ use serde_json::{json, Map, Value};
 use url::Url;
 
 use super::model::Node;
+use super::outbound::ensure_supported_network;
 
 pub fn parse_uri_list(text: &str, source: &str) -> (Vec<Node>, Vec<(String, String)>) {
     let mut nodes = Vec::new();
@@ -92,7 +93,14 @@ fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
     let decoded_userinfo = if userinfo.contains(':') {
         decode_percent(&userinfo)
     } else {
-        decode_base64_text(&userinfo).ok_or("invalid ss userinfo")?
+        // SIP002 percent-encodes the separator (`method%3Apassword`); try the
+        // decoded form before falling back to the legacy base64 form.
+        let percent = decode_percent(&userinfo);
+        if percent.contains(':') {
+            percent
+        } else {
+            decode_base64_text(&userinfo).ok_or("invalid ss userinfo")?
+        }
     };
     let (method, password) = decoded_userinfo
         .split_once(':')
@@ -599,22 +607,14 @@ fn tls_string_enabled(value: Option<&str>) -> bool {
     )
 }
 
-fn ensure_supported_network(network: &str) -> Result<(), String> {
-    match network.to_ascii_lowercase().as_str() {
-        "tcp" | "ws" | "grpc" | "h2" | "http" => Ok(()),
-        other => Err(format!("unsupported transport: {other}")),
-    }
-}
-
 fn query_map(url: &Url) -> HashMap<String, String> {
     url.query_pairs().into_owned().collect()
 }
 
 fn bool_query(query: &HashMap<String, String>, key: &str) -> bool {
-    matches!(
-        query.get(key).map(String::as_str),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes")
-    )
+    query.get(key).is_some_and(|value| {
+        matches!(value.as_str(), "1" | "yes") || value.eq_ignore_ascii_case("true")
+    })
 }
 
 fn split_alpn(value: Option<&String>) -> Vec<String> {
@@ -675,32 +675,14 @@ fn tls_value(
     fingerprint: Option<&str>,
     reality: Option<(&str, &str)>,
 ) -> Value {
-    let mut tls = Map::new();
-    tls.insert("enabled".into(), json!(enabled));
-    if let Some(server_name) = server_name {
-        tls.insert("server_name".into(), json!(server_name));
-    }
-    tls.insert("insecure".into(), json!(insecure));
-    if !alpn.is_empty() {
-        tls.insert("alpn".into(), json!(alpn));
-    }
-    if let Some(fingerprint) = fingerprint {
-        tls.insert(
-            "utls".into(),
-            json!({ "enabled": true, "fingerprint": fingerprint }),
-        );
-    }
-    if let Some((public_key, short_id)) = reality {
-        tls.insert(
-            "reality".into(),
-            json!({
-                "enabled": true,
-                "public_key": public_key,
-                "short_id": short_id
-            }),
-        );
-    }
-    Value::Object(tls)
+    super::outbound::tls_value(
+        enabled,
+        server_name,
+        Some(insecure),
+        alpn,
+        fingerprint,
+        reality,
+    )
 }
 
 fn string_field<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {

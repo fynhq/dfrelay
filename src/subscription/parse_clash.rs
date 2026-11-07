@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 use serde_yaml_ng::{Mapping, Value as YamlValue};
 
 use super::model::Node;
+use super::outbound::ensure_supported_network;
 
 pub type ClashParseOutput = (Vec<Node>, Vec<(String, String)>);
 
@@ -326,72 +327,40 @@ fn tls_enabled(proxy: &Mapping) -> bool {
     }
 }
 
-fn ensure_supported_network(network: &str) -> Result<(), String> {
-    match network.to_ascii_lowercase().as_str() {
-        "tcp" | "ws" | "grpc" | "h2" | "http" => Ok(()),
-        other => Err(format!("unsupported transport: {other}")),
-    }
-}
-
 fn tls_value(proxy: &Mapping, enabled: bool) -> Value {
-    let mut tls = Map::new();
-    tls.insert("enabled".into(), json!(enabled));
-    if let Some(server_name) = yaml_str(proxy, "servername")
+    let server_name = yaml_str(proxy, "servername")
         .or_else(|| yaml_str(proxy, "sni"))
-        .or_else(|| yaml_str(proxy, "host"))
-    {
-        tls.insert("server_name".into(), json!(server_name));
-    }
-    if yaml_bool(proxy, "skip-cert-verify").unwrap_or(false) {
-        tls.insert("insecure".into(), json!(true));
-    }
-    if let Some(alpn) = yaml_get(proxy, "alpn") {
-        let values = match alpn {
-            YamlValue::String(value) => value
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-            YamlValue::Sequence(values) => values
-                .iter()
-                .filter_map(YamlValue::as_str)
-                .map(str::to_string)
-                .collect(),
-            _ => Vec::new(),
-        };
-        if !values.is_empty() {
-            tls.insert("alpn".into(), json!(values));
-        }
-    }
-    if let Some(fingerprint) = yaml_str(proxy, "client-fingerprint") {
-        tls.insert(
-            "utls".into(),
-            json!({ "enabled": true, "fingerprint": fingerprint }),
-        );
-    }
-    if let Some(reality) = yaml_get(proxy, "reality-opts") {
-        if let Some(public_key) = reality
-            .as_mapping()
-            .and_then(|mapping| yaml_get(mapping, "public-key"))
+        .or_else(|| yaml_str(proxy, "host"));
+    let insecure = yaml_bool(proxy, "skip-cert-verify")
+        .unwrap_or(false)
+        .then_some(true);
+    let alpn = match yaml_get(proxy, "alpn") {
+        Some(YamlValue::String(value)) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        Some(YamlValue::Sequence(values)) => values
+            .iter()
+            .filter_map(YamlValue::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let fingerprint = yaml_str(proxy, "client-fingerprint");
+    let reality = yaml_get(proxy, "reality-opts").and_then(|reality| {
+        let mapping = reality.as_mapping()?;
+        let public_key = mapping
+            .get(YamlValue::String("public-key".into()))
+            .and_then(YamlValue::as_str)?;
+        let short_id = mapping
+            .get(YamlValue::String("short-id".into()))
             .and_then(YamlValue::as_str)
-        {
-            let short_id = reality
-                .as_mapping()
-                .and_then(|mapping| yaml_get(mapping, "short-id"))
-                .and_then(YamlValue::as_str)
-                .unwrap_or("");
-            tls.insert(
-                "reality".into(),
-                json!({
-                    "enabled": true,
-                    "public_key": public_key,
-                    "short_id": short_id
-                }),
-            );
-        }
-    }
-    Value::Object(tls)
+            .unwrap_or("");
+        Some((public_key, short_id))
+    });
+    super::outbound::tls_value(enabled, server_name, insecure, &alpn, fingerprint, reality)
 }
 
 fn add_auth(proxy: &Mapping, outbound: &mut Map<String, Value>) {
