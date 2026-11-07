@@ -1,0 +1,69 @@
+name: Android NDK setup
+description: >-
+  Locate the runner NDK and export the Android clang/linker variables. When a
+  binary input is given, verify that it is an AArch64 Android ELF.
+
+inputs:
+  binary:
+    description: ELF binary to verify; leave empty to only configure the NDK.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Android NDK
+      if: inputs.binary == ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
+        if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+          echo "::error::Android NDK not found on this runner"
+          exit 1
+        fi
+        toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
+        cc="$toolchain/bin/aarch64-linux-android24-clang"
+        if [ ! -x "$cc" ]; then
+          echo "::error::missing NDK clang at $cc"
+          exit 1
+        fi
+        echo "Using NDK $ndk"
+        {
+          echo "ANDROID_NDK=$ndk"
+          echo "CC_aarch64_linux_android=$cc"
+          echo "AR_aarch64_linux_android=$toolchain/bin/llvm-ar"
+          echo "RANLIB_aarch64_linux_android=$toolchain/bin/llvm-ranlib"
+          echo "TARGET_CC=$cc"
+          echo "TARGET_AR=$toolchain/bin/llvm-ar"
+          echo "TARGET_RANLIB=$toolchain/bin/llvm-ranlib"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$cc"
+          echo "RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384"
+        } >> "$GITHUB_ENV"
+
+    - name: Verify ELF target
+      if: inputs.binary != ''
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ANDROID_NDK:-}" ]; then
+          echo "::error::Android NDK is unavailable for ELF verification"
+          exit 1
+        fi
+        readelf="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+        if [ ! -x "$readelf" ]; then
+          echo "::error::llvm-readelf not found at $readelf"
+          exit 1
+        fi
+        # Do not use grep -q here: it closes the pipe early, llvm-readelf
+        # treats the resulting EPIPE as EX_IOERR (74), and pipefail fails.
+        if ! "$readelf" -h "$BINARY" | grep 'AArch64' >/dev/null; then
+          echo "::error::built dfr is not an AArch64 ELF binary"
+          exit 1
+        fi
+        if ! "$readelf" -l "$BINARY" | grep '/system/bin/linker64' >/dev/null; then
+          echo "::error::built dfr does not use the Android 64-bit dynamic linker"
+          exit 1
+        fi

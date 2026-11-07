@@ -112,52 +112,12 @@ jobs:
           key: android-arm64
 
       - name: Configure Android NDK
-        shell: bash
-        run: |
-          set -euo pipefail
-          ndk="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME:-}}"
-          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
-            echo "::error::Android NDK not found on this runner"
-            exit 1
-          fi
-          toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
-          cc="$toolchain/bin/aarch64-linux-android24-clang"
-          if [ ! -x "$cc" ]; then
-            echo "::error::missing NDK clang at $cc"
-            exit 1
-          fi
-          echo "Using NDK $ndk"
-          {
-            echo "ANDROID_NDK=$ndk"
-            echo "CC_aarch64_linux_android=$cc"
-            echo "AR_aarch64_linux_android=$toolchain/bin/llvm-ar"
-            echo "RANLIB_aarch64_linux_android=$toolchain/bin/llvm-ranlib"
-            echo "TARGET_CC=$cc"
-            echo "TARGET_AR=$toolchain/bin/llvm-ar"
-            echo "TARGET_RANLIB=$toolchain/bin/llvm-ranlib"
-            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$cc"
-            echo "RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384"
-          } >> "$GITHUB_ENV"
+        uses: ./.github/actions/android-ndk-setup
 
       - name: Build Android release binary
         run: cargo build --locked --release --target aarch64-linux-android
 
       - name: Verify ELF target
-        shell: bash
-        run: |
-          set -euo pipefail
-          readelf="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          if [ ! -x "$readelf" ]; then
-            echo "::error::llvm-readelf not found at $readelf"
-            exit 1
-          fi
-          # Do not use grep -q here: it closes the pipe early, llvm-readelf
-          # treats the resulting EPIPE as EX_IOERR (74), and pipefail fails.
-          if ! "$readelf" -h target/aarch64-linux-android/release/dfr | grep 'AArch64' >/dev/null; then
-            echo "::error::built dfr is not an AArch64 ELF binary"
-            exit 1
-          fi
-          if ! "$readelf" -l target/aarch64-linux-android/release/dfr | grep '/system/bin/linker64' >/dev/null; then
-            echo "::error::built dfr does not use the Android 64-bit dynamic linker"
-            exit 1
-          fi
+        uses: ./.github/actions/android-ndk-setup
+        with:
+          binary: target/aarch64-linux-android/release/dfr
