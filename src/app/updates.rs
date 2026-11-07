@@ -79,6 +79,12 @@ impl App {
         if self.config.app_update != UpdatePolicy::Auto || !update::is_release_build() {
             return;
         }
+        if self
+            .app_update_retry_at
+            .is_some_and(|at| at > Instant::now())
+        {
+            return;
+        }
         if self.app_update_in_flight {
             if self
                 .app_update_apply_started
@@ -94,13 +100,33 @@ impl App {
                 return;
             }
         }
-        let Some(pending) = self.pending_app_update.as_ref() else {
+        let Some((pending_version, pending_since, staged)) =
+            self.pending_app_update.as_ref().map(|pending| {
+                (
+                    pending.version.clone(),
+                    pending.since,
+                    pending.staged.clone(),
+                )
+            })
+        else {
             return;
         };
+        if update::load_state(&self.paths).failed_recently(&pending_version) {
+            self.pending_app_update = None;
+            self.app_update_in_flight = false;
+            self.app_update_deferred_logged = false;
+            self.logger.app(
+                LogLevel::Info,
+                format!(
+                    "app update: v{pending_version} failed recently; ignoring the staged update"
+                ),
+            );
+            return;
+        }
         if !update::auto_apply_allowed(
             self.has_viewer(),
             !self.metrics.connections.is_empty(),
-            pending.since.elapsed(),
+            pending_since.elapsed(),
         ) {
             if !self.app_update_deferred_logged {
                 self.logger.app(
@@ -132,8 +158,7 @@ impl App {
                 return;
             }
         };
-        let staged = pending.staged.clone();
-        let version = pending.version.clone();
+        let version = pending_version;
         match update::spawn_apply_helper(
             &self.paths,
             &staged,
@@ -151,9 +176,10 @@ impl App {
                 self.notify(self.text().msg_app_update_applying);
             }
             Err(err) => {
+                self.app_update_retry_at = Some(Instant::now() + Duration::from_secs(3600));
                 self.logger.app(
                     LogLevel::Warn,
-                    format!("app update: cannot start the applier: {err}"),
+                    format!("app update: cannot start the applier: {err}; retrying in 1h"),
                 );
                 self.app_update_deferred_logged = true;
             }

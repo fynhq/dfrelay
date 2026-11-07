@@ -23,7 +23,6 @@ pub const FAILED_COOLDOWN: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const MAX_DEFER: Duration = Duration::from_secs(12 * 60 * 60);
 
 const MAX_SUMS_BYTES: usize = 1024 * 1024;
-const MAX_RELEASE_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const START_TIMEOUT: Duration = Duration::from_secs(25);
@@ -176,7 +175,7 @@ async fn fetch_latest(config: &Config) -> Result<ReleaseInfo, UpdateError> {
 }
 
 async fn fetch_latest_with(client: &reqwest::Client) -> Result<ReleaseInfo, UpdateError> {
-    let mut response = client
+    let response = client
         .get(GITHUB_API_LATEST)
         .send()
         .await
@@ -192,17 +191,9 @@ async fn fetch_latest_with(client: &reqwest::Client) -> Result<ReleaseInfo, Upda
     }
     // Read with a streaming cap: a chunked response has no Content-Length and
     // must not be buffered without bound.
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
+    let bytes = crate::http_body::read_limited(response, crate::http_body::JSON_BODY_LIMIT)
         .await
-        .map_err(|err| UpdateError::Api(err.to_string()))?
-    {
-        if bytes.len().saturating_add(chunk.len()) > MAX_RELEASE_JSON_BYTES {
-            return Err(UpdateError::Api("release response is too large".into()));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+        .map_err(UpdateError::Api)?;
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|err| UpdateError::Api(err.to_string()))?;
     let tag = value
@@ -349,8 +340,12 @@ async fn fetch_sums_digest(
 pub fn parse_sha256sums(text: &str, asset: &str) -> Option<String> {
     for line in text.lines() {
         let mut parts = line.split_whitespace();
-        let digest = parts.next()?;
-        let name = parts.next()?.trim_start_matches('*');
+        let Some(digest) = parts.next() else {
+            continue;
+        };
+        let Some(name) = parts.next().map(|name| name.trim_start_matches('*')) else {
+            continue;
+        };
         if name == asset
             && digest.len() == 64
             && digest.chars().all(|item| item.is_ascii_hexdigit())
@@ -464,17 +459,24 @@ pub async fn version_of_binary(path: &Path) -> Result<String, UpdateError> {
         )));
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let value = text
-        .split_whitespace()
-        .last()
-        .unwrap_or_default()
-        .trim_start_matches('v');
-    if value.is_empty() {
-        return Err(UpdateError::Binary(
-            "binary did not report a version".into(),
-        ));
+    parse_dfr_version(&text)
+        .ok_or_else(|| UpdateError::Binary("binary did not report a recognizable version".into()))
+}
+
+/// Parse the clap-style `dfr <version>` line strictly. Taking the last
+/// whitespace token would accept diagnostic text appended by a wrapper or a
+/// corrupted binary and compare it as a version.
+fn parse_dfr_version(output: &str) -> Option<String> {
+    let line = output.lines().next()?.trim();
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "dfr" {
+        return None;
     }
-    Ok(value.to_string())
+    let value = parts.next()?.trim_start_matches('v');
+    if parts.next().is_some() || value.is_empty() {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 pub async fn verify_binary_version(path: &Path, expected: &str) -> Result<(), UpdateError> {
@@ -816,35 +818,72 @@ async fn rollback(
         LogLevel::Warn,
         format!("app update: rolling back {failed_version}: {cause}"),
     );
-    // The new daemon was already started before verification failed. Stop it
-    // before restoring the previous binary; otherwise it keeps running the bad
-    // version and the restart below fails with an in-use control socket.
+    let failure = cause.to_string();
     let socket = paths.control_socket();
-    let _ = stop_daemon(paths, &socket).await;
-    let _ = wait_socket_gone(&socket, SERVICE_STOP_TIMEOUT).await;
-    restore_previous(target, previous)?;
-    start_daemon(identity, target, paths).await?;
+    // Stop the instance that was started for verification before touching the
+    // binary. If the stop fails, leave both the disk state and the running
+    // process alone, record the failure, and let the user decide.
+    if let Err(err) = stop_daemon(paths, &socket).await {
+        record_update_failure(
+            paths,
+            failed_version,
+            &format!("cannot stop the new daemon: {err}; original failure: {failure}"),
+        );
+        return Err(err);
+    }
+    if let Err(err) = wait_socket_gone(&socket, SERVICE_STOP_TIMEOUT).await {
+        record_update_failure(
+            paths,
+            failed_version,
+            &format!("control socket did not close: {err}; original failure: {failure}"),
+        );
+        return Err(err);
+    }
+    if let Err(err) = restore_previous(target, previous) {
+        record_update_failure(
+            paths,
+            failed_version,
+            &format!("cannot restore the previous binary: {err}; original failure: {failure}"),
+        );
+        return Err(err);
+    }
+    // Persist the failure before starting the restored daemon. The new process
+    // reads `state.json` during App::new; writing afterwards lets it load the
+    // same staged update again and retry a version that just failed.
+    record_update_failure(paths, failed_version, &failure);
+    if let Err(err) = start_daemon(identity, target, paths).await {
+        record_update_failure(
+            paths,
+            failed_version,
+            &format!(
+                "restored binary but cannot start the daemon: {err}; original failure: {failure}"
+            ),
+        );
+        return Err(err);
+    }
     let restored = wait_for_stable_daemon(&socket, START_TIMEOUT)
         .await
         .is_some();
-    let mut state = load_state(paths);
-    state.failed_version = Some(failed_version.to_string());
-    state.failed_at_unix = Some(Local::now().timestamp());
-    state.last_error = Some(cause.to_string());
-    let _ = save_state(paths, &state);
     if restored {
         logger.app(
             LogLevel::Warn,
             format!("app update: restored the previous binary after {failed_version} failed"),
         );
-        Err(UpdateError::Restart)
     } else {
         logger.app(
             LogLevel::Error,
             "app update: rollback completed but the daemon did not start",
         );
-        Err(UpdateError::Restart)
     }
+    Err(UpdateError::Restart)
+}
+
+fn record_update_failure(paths: &Paths, failed_version: &str, message: &str) {
+    let mut state = load_state(paths);
+    state.failed_version = Some(failed_version.to_string());
+    state.failed_at_unix = Some(Local::now().timestamp());
+    state.last_error = Some(message.to_string());
+    let _ = save_state(paths, &state);
 }
 
 async fn stop_daemon(paths: &Paths, socket: &Path) -> Result<Option<ServiceIdentity>, UpdateError> {
@@ -1068,6 +1107,34 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn failure_state_records_version_and_message() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        record_update_failure(&paths, "9.9.9", "boom");
+        let state = load_state(&paths);
+        assert_eq!(state.failed_version.as_deref(), Some("9.9.9"));
+        assert_eq!(state.last_error.as_deref(), Some("boom"));
+        assert!(state.failed_recently("9.9.9"));
+    }
+
+    #[test]
+    fn parses_only_the_exact_version_line() {
+        assert_eq!(parse_dfr_version("dfr 1.2.3\n"), Some("1.2.3".into()));
+        assert_eq!(parse_dfr_version("dfr v1.2.3\n"), Some("1.2.3".into()));
+        assert_eq!(
+            parse_dfr_version("dfr 1.2.3+abc\n"),
+            Some("1.2.3+abc".into())
+        );
+        assert_eq!(parse_dfr_version("dfr 1.2.3 extra\n"), None);
+        assert_eq!(parse_dfr_version("garbage 1.2.3\n"), None);
+        assert_eq!(parse_dfr_version(""), None);
+    }
+
+    #[test]
     fn asset_names_match_release_artifacts() {
         assert_eq!(
             asset_name("1.2.3", "linux", "x86_64").as_deref(),
@@ -1096,7 +1163,7 @@ mod tests {
     fn sha256sums_parser_finds_the_matching_asset() {
         let digest = "a".repeat(64);
         let text = format!(
-            "{}  other.tar.gz\n{} *dfrelay_linux_x64_v1.2.3_musl.tar.gz\n",
+            "\n# comment\nmalformed\n{}  other.tar.gz\n{} *dfrelay_linux_x64_v1.2.3_musl.tar.gz\n",
             "b".repeat(64),
             digest
         );

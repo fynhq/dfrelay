@@ -641,10 +641,12 @@ async fn fetch_latest_release(client: &Client, api: &str) -> Result<ReleaseAsset
     if !status.is_success() {
         return Err(BinaryError::Http(status.as_u16()));
     }
-    let value: serde_json::Value = response
-        .json()
+    crate::http_body::ensure_https(&response).map_err(BinaryError::Network)?;
+    let bytes = crate::http_body::read_limited(response, crate::http_body::JSON_BODY_LIMIT)
         .await
-        .map_err(|err| BinaryError::Network(err.to_string()))?;
+        .map_err(BinaryError::Network)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|err| BinaryError::Network(err.to_string()))?;
     let version = value
         .get("tag_name")
         .and_then(|v| v.as_str())
