@@ -52,6 +52,7 @@ const PROXIES_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub const MAX_LIST_ROWS: usize = 200;
 pub const TOAST_TTL: Duration = Duration::from_secs(3);
 pub const VIEW_QUEUE_LIMIT: usize = 8;
+pub const MAX_CLIENTS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(usize)]
@@ -542,6 +543,9 @@ pub enum BackgroundTask {
     AppUpdateCheck,
     AppUpdateDownload,
     Preflight,
+    Metrics,
+    DelayTest,
+    Ipc,
     Other,
 }
 
@@ -1824,7 +1828,9 @@ impl App {
                 tx,
                 accept,
             } => {
-                if viewer && self.clients.values().any(|client| client.viewer) {
+                if self.clients.len() >= MAX_CLIENTS
+                    || (viewer && self.clients.values().any(|client| client.viewer))
+                {
                     let _ = tx.try_send(ServerMsg::Busy);
                     let _ = accept.send(false);
                 } else {
@@ -1855,8 +1861,10 @@ impl App {
                 self.respond_status(client_id);
             }
             AppEvent::ShutdownRequest { client_id } => {
-                self.ack(client_id, true, "stopping");
-                self.should_quit = true;
+                if self.clients.contains_key(&client_id) {
+                    self.ack(client_id, true, "stopping");
+                    self.should_quit = true;
+                }
             }
             AppEvent::DaemonSignal => {
                 self.should_quit = true;
@@ -1900,6 +1908,9 @@ impl App {
     }
 
     fn handle_start_request(&mut self, client_id: u64) {
+        if !self.clients.contains_key(&client_id) {
+            return;
+        }
         if self.status == ProxyStatus::Running {
             self.ack(client_id, true, "proxy is already running");
             return;
@@ -1978,6 +1989,13 @@ impl App {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        drop(self.spawn_guarded_handle(task, fut));
+    }
+
+    fn spawn_guarded_handle<F>(&self, task: BackgroundTask, fut: F) -> JoinHandle<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
         tokio::spawn(async move {
@@ -1989,19 +2007,24 @@ impl App {
                 );
                 let _ = tx.send(AppEvent::BackgroundPanic { task, message });
             }
-        });
+        })
     }
 
     fn on_background_panic(&mut self, task: BackgroundTask, message: String) {
         match task {
-            BackgroundTask::SubscriptionRefresh => self.refreshing_subscriptions = false,
+            BackgroundTask::SubscriptionRefresh => {
+                self.refreshing_subscriptions = false;
+                self.recovery_refresh_pending = false;
+            }
             BackgroundTask::ProxyStart => {
                 self.restart_in_progress = false;
                 self.status = ProxyStatus::Failed;
+                self.ack_pending_start(false, "proxy start task failed");
             }
             BackgroundTask::ProxyStop => {
                 self.restart_in_progress = false;
                 self.status = ProxyStatus::Stopped;
+                self.restart_after_stop = false;
             }
             BackgroundTask::ProxyIps => self.proxy_ips_in_flight = false,
             BackgroundTask::DelaySweep => self.delay_sweep_running = false,
@@ -2020,7 +2043,16 @@ impl App {
                 self.preflight_in_flight = false;
                 self.restart_in_progress = false;
             }
-            BackgroundTask::Other => {}
+            BackgroundTask::Metrics => {
+                self.metrics_task = None;
+            }
+            BackgroundTask::DelayTest => {
+                self.delay_testing.clear();
+            }
+            BackgroundTask::Ipc => {}
+            BackgroundTask::Other => {
+                self.pending_restart_subscription = None;
+            }
         }
         let text = format!("background task failed: {message}");
         self.last_error = Some(text.clone());
@@ -2296,60 +2328,73 @@ impl App {
         let viewer_active = self.viewer_active.clone();
         let metrics_wake = self.metrics_wake.clone();
         let proxies_refresh = self.proxies_refresh.clone();
-        self.metrics_task = Some(tokio::spawn(async move {
-            let mut selection = ProxySelection::default();
-            let mut node_delays = HashMap::new();
-            let mut next_proxies = Instant::now();
-            let mut last_connection_error: Option<String> = None;
-            let mut last_proxy_error: Option<String> = None;
-            loop {
-                let connections = match client.connections().await {
-                    Ok(snapshot) => {
-                        last_connection_error = None;
-                        Some(snapshot)
-                    }
-                    Err(err) => {
-                        report_clash_error(&tx, clash_api_label, &mut last_connection_error, err);
-                        None
-                    }
-                };
-                if Instant::now() >= next_proxies || proxies_refresh.swap(false, Ordering::Relaxed)
-                {
-                    match client.proxies().await {
+        self.metrics_task = Some(
+            self.spawn_guarded_handle(BackgroundTask::Metrics, async move {
+                let mut selection = ProxySelection::default();
+                let mut node_delays = HashMap::new();
+                let mut next_proxies = Instant::now();
+                let mut last_connection_error: Option<String> = None;
+                let mut last_proxy_error: Option<String> = None;
+                loop {
+                    let connections = match client.connections().await {
                         Ok(snapshot) => {
-                            selection = snapshot.selection;
-                            node_delays = snapshot.node_delays;
-                            last_proxy_error = None;
+                            last_connection_error = None;
+                            Some(snapshot)
                         }
                         Err(err) => {
-                            report_clash_error(&tx, clash_api_label, &mut last_proxy_error, err);
+                            report_clash_error(
+                                &tx,
+                                clash_api_label,
+                                &mut last_connection_error,
+                                err,
+                            );
+                            None
+                        }
+                    };
+                    if Instant::now() >= next_proxies
+                        || proxies_refresh.swap(false, Ordering::Relaxed)
+                    {
+                        match client.proxies().await {
+                            Ok(snapshot) => {
+                                selection = snapshot.selection;
+                                node_delays = snapshot.node_delays;
+                                last_proxy_error = None;
+                            }
+                            Err(err) => {
+                                report_clash_error(
+                                    &tx,
+                                    clash_api_label,
+                                    &mut last_proxy_error,
+                                    err,
+                                );
+                            }
+                        }
+                        next_proxies = Instant::now() + PROXIES_REFRESH_INTERVAL;
+                    }
+                    let mut interval = Duration::from_secs(1);
+                    if let Some(connections) = connections {
+                        let idle = connections.connections.is_empty();
+                        let metrics = MetricsSnapshot {
+                            upload_total: connections.upload_total,
+                            download_total: connections.download_total,
+                            connections: connections.connections,
+                            selection: selection.clone(),
+                            node_delays: node_delays.clone(),
+                        };
+                        if tx.send(AppEvent::Metrics(metrics)).is_err() {
+                            break;
+                        }
+                        if idle && !viewer_active.load(Ordering::Relaxed) {
+                            interval = IDLE_METRICS_INTERVAL;
                         }
                     }
-                    next_proxies = Instant::now() + PROXIES_REFRESH_INTERVAL;
-                }
-                let mut interval = Duration::from_secs(1);
-                if let Some(connections) = connections {
-                    let idle = connections.connections.is_empty();
-                    let metrics = MetricsSnapshot {
-                        upload_total: connections.upload_total,
-                        download_total: connections.download_total,
-                        connections: connections.connections,
-                        selection: selection.clone(),
-                        node_delays: node_delays.clone(),
-                    };
-                    if tx.send(AppEvent::Metrics(metrics)).is_err() {
-                        break;
-                    }
-                    if idle && !viewer_active.load(Ordering::Relaxed) {
-                        interval = IDLE_METRICS_INTERVAL;
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = metrics_wake.notified() => {}
                     }
                 }
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = metrics_wake.notified() => {}
-                }
-            }
-        }));
+            }),
+        );
     }
 
     fn refresh_proxy_ips(&mut self) {
@@ -2528,7 +2573,7 @@ impl App {
         let test_url = self.config.test_url.clone();
         let label = self.text().msg_node_delay;
         let tx = self.events_tx.clone();
-        tokio::spawn(async move {
+        self.spawn_guarded(BackgroundTask::DelayTest, async move {
             match client.delay(&tag, &test_url).await {
                 Ok(delay) => {
                     let _ = tx.send(AppEvent::NodeDelay {
@@ -2812,6 +2857,8 @@ impl App {
         }
         if self.status == ProxyStatus::Failed
             && self.proxy.is_none()
+            && !self.restart_in_progress
+            && !self.preflight_in_flight
             && self.restart_at.is_some_and(|at| Instant::now() >= at)
         {
             self.restart_at = None;
@@ -3392,12 +3439,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_in_progress_blocks_keys() {
+    async fn unregistered_control_requests_are_ignored() {
+        let (mut app, _dir) = test_app().await;
+        app.handle_event(AppEvent::ShutdownRequest { client_id: 99 })
+            .await;
+        assert!(!app.should_quit);
+        app.handle_event(AppEvent::StartProxyRequest { client_id: 99 })
+            .await;
+        assert_eq!(app.status, ProxyStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn background_panic_clears_related_in_flight_state() {
+        let (mut app, _dir) = test_app().await;
+        app.refreshing_subscriptions = true;
+        app.recovery_refresh_pending = true;
+        app.handle_event(AppEvent::BackgroundPanic {
+            task: BackgroundTask::SubscriptionRefresh,
+            message: "boom".into(),
+        })
+        .await;
+        assert!(!app.refreshing_subscriptions);
+        assert!(!app.recovery_refresh_pending);
+
+        app.pending_restart_subscription = Some("sub".into());
+        app.handle_event(AppEvent::BackgroundPanic {
+            task: BackgroundTask::Other,
+            message: "boom".into(),
+        })
+        .await;
+        assert!(app.pending_restart_subscription.is_none());
+    }
+
+    #[tokio::test]
+    async fn restart_in_progress_blocks_keys_except_detach() {
         let (mut app, _dir) = test_app().await;
         app.nodes = vec![node("one"), node("two")];
         app.page = Page::Nodes;
         app.selected = 0;
         app.restart_in_progress = true;
+        let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
+        app.handle_event(AppEvent::ClientAttached {
+            id: 11,
+            viewer: true,
+            tx,
+            accept: tokio::sync::oneshot::channel().0,
+        })
+        .await;
 
         app.handle_key(key(KeyCode::Char('j'))).await;
         assert_eq!(app.selected, 0);
@@ -3405,6 +3493,8 @@ mod tests {
         assert_eq!(app.page, Page::Nodes);
         app.handle_key(key(KeyCode::Char('q'))).await;
         assert!(!app.should_quit);
+        assert!(!app.has_viewer());
+        assert!(drain_until_detach(&mut rx));
         app.handle_key(key(KeyCode::Char('s'))).await;
         assert_eq!(app.status, ProxyStatus::Stopped);
     }
@@ -3942,6 +4032,7 @@ mod tests {
         assert!(drain_until_detach(&mut rx));
         assert!(!app.should_quit);
         assert!(app.clients.is_empty());
+        assert!(!app.has_viewer());
 
         let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
         app.handle_event(AppEvent::ClientAttached {
@@ -3956,6 +4047,7 @@ mod tests {
         assert!(drain_until_detach(&mut rx));
         assert!(!app.should_quit);
         assert!(app.clients.is_empty());
+        assert!(!app.has_viewer());
     }
 
     fn drain_until_detach(rx: &mut mpsc::Receiver<ServerMsg>) -> bool {

@@ -11,7 +11,7 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
-use crate::app::AppEvent;
+use crate::app::{AppEvent, BackgroundTask};
 use crate::view::{DaemonStatus, View};
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -19,6 +19,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Hard cap for a single client message; keys/Hello are tiny, but
 /// `BufReader::lines` would otherwise grow without bound.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -132,14 +133,34 @@ pub struct Ack {
 pub fn spawn_listener(listener: UnixListener, events_tx: UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
+            match crate::guard::CatchUnwind::new(listener.accept()).await {
+                Ok(Ok((stream, _))) => {
                     let events_tx = events_tx.clone();
-                    tokio::spawn(handle_client(stream, events_tx));
+                    let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+                    tokio::spawn(async move {
+                        if crate::guard::CatchUnwind::new(handle_client(
+                            stream,
+                            events_tx.clone(),
+                            id,
+                        ))
+                        .await
+                        .is_err()
+                        {
+                            let _ = events_tx.send(AppEvent::ClientDetached(id));
+                        }
+                    });
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     // Back off so a persistent accept error (e.g. fd
                     // exhaustion) cannot spin this task at 100% CPU.
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                }
+                Err(payload) => {
+                    let message = crate::guard::panic_message(payload.as_ref());
+                    let _ = events_tx.send(AppEvent::BackgroundPanic {
+                        task: BackgroundTask::Ipc,
+                        message,
+                    });
                     tokio::time::sleep(ACCEPT_BACKOFF).await;
                 }
             }
@@ -182,7 +203,7 @@ async fn next_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
-async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>) {
+async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>, id: u64) {
     let (read_half, write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let viewer = match tokio::time::timeout(
@@ -197,9 +218,21 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>)
         },
         _ => return,
     };
-    let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
     let (out_tx, out_rx) = mpsc::channel(crate::app::VIEW_QUEUE_LIMIT);
-    tokio::spawn(write_client(write_half, out_rx, events_tx.clone(), id));
+    let write_events = events_tx.clone();
+    tokio::spawn(async move {
+        if crate::guard::CatchUnwind::new(write_client(
+            write_half,
+            out_rx,
+            write_events.clone(),
+            id,
+        ))
+        .await
+        .is_err()
+        {
+            let _ = write_events.send(AppEvent::ClientDetached(id));
+        }
+    });
     let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
     if events_tx
         .send(AppEvent::ClientAttached {
@@ -218,22 +251,40 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>)
         Ok(Ok(true)) => {}
         _ => return,
     }
-    while let Ok(Some(line)) = next_line_limited(&mut reader, MAX_LINE_BYTES).await {
+    loop {
+        let next = if viewer {
+            next_line_limited(&mut reader, MAX_LINE_BYTES).await
+        } else {
+            match tokio::time::timeout(
+                CONTROL_IDLE_TIMEOUT,
+                next_line_limited(&mut reader, MAX_LINE_BYTES),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => break,
+            }
+        };
+        let Ok(Some(line)) = next else {
+            break;
+        };
         let Ok(message) = serde_json::from_str::<ClientMsg>(&line) else {
             continue;
         };
         match message {
             ClientMsg::Hello { .. } => {}
-            ClientMsg::Key { code, ctrl, alt } => {
+            // Only a TUI viewer may drive the UI. A control-only client can
+            // start/stop/status, but must not inject keys or viewport sizes.
+            ClientMsg::Key { code, ctrl, alt } if viewer => {
                 let _ = events_tx.send(AppEvent::Key(code.to_key_event(ctrl, alt)));
             }
-            ClientMsg::HelpViewport { max_scroll } => {
+            ClientMsg::HelpViewport { max_scroll } if viewer => {
                 let _ = events_tx.send(AppEvent::HelpViewport(max_scroll as usize));
             }
-            ClientMsg::DashboardViewport { max_scroll } => {
+            ClientMsg::DashboardViewport { max_scroll } if viewer => {
                 let _ = events_tx.send(AppEvent::DashboardViewport(max_scroll as usize));
             }
-            ClientMsg::LogDetailViewport { max_scroll } => {
+            ClientMsg::LogDetailViewport { max_scroll } if viewer => {
                 let _ = events_tx.send(AppEvent::LogDetailViewport(max_scroll as usize));
             }
             ClientMsg::StartProxy => {
@@ -245,6 +296,7 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>)
             ClientMsg::Shutdown => {
                 let _ = events_tx.send(AppEvent::ShutdownRequest { client_id: id });
             }
+            _ => {}
         }
     }
     let _ = events_tx.send(AppEvent::ClientDetached(id));

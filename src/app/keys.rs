@@ -4,9 +4,6 @@ use super::*;
 
 impl App {
     pub(super) async fn handle_key(&mut self, key: KeyEvent) {
-        if self.restart_in_progress {
-            return;
-        }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.overlay.is_some() {
                 self.close_overlay();
@@ -18,6 +15,12 @@ impl App {
             self.setup.pending_install = None;
             self.setup.message = None;
             self.detach_clients();
+            return;
+        }
+        if self.restart_in_progress {
+            if key.code == KeyCode::Char('q') {
+                self.detach_clients();
+            }
             return;
         }
         if key
@@ -268,6 +271,9 @@ impl App {
     pub(super) fn detach_clients(&mut self) {
         self.broadcast(ServerMsg::Detach);
         self.clients.retain(|_, client| !client.viewer);
+        // `ClientDetached` for those ids arrives after the map entries are
+        // gone, so it cannot clear the flag; do it here.
+        self.viewer_active.store(false, Ordering::Relaxed);
     }
 
     pub(super) fn switch_page(&mut self, page: Page) {
