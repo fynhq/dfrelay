@@ -5,6 +5,10 @@ use std::time::Duration;
 
 use reqwest::Proxy;
 
+/// IP echo endpoints return a short string; cap the body so a malicious proxy
+/// cannot stream an unbounded response into memory.
+const MAX_IP_RESPONSE_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum NetInfoError {
     #[error("request failed: {0}")]
@@ -192,14 +196,21 @@ pub async fn fetch_proxy_ip(url: &str, proxy_url: &str) -> Result<String, NetInf
         .proxy(proxy)
         .timeout(Duration::from_secs(8))
         .build()?;
-    let response = client.get(url).send().await?;
+    let mut response = client.get(url).send().await?;
     if !response.status().is_success() {
         return Err(NetInfoError::InvalidProxy(format!(
             "HTTP {}",
             response.status()
         )));
     }
-    let text = response.text().await?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_IP_RESPONSE_BYTES {
+            return Err(NetInfoError::InvalidIp);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let text = String::from_utf8_lossy(&bytes);
     let text = text.trim();
     IpAddr::from_str(text)
         .map(|ip| ip.to_string())

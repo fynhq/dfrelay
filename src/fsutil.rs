@@ -88,7 +88,16 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temp = parent.join(format!(".{name}.{}.{counter}.tmp", std::process::id()));
     let result = (|| {
         write_private_file(&temp, bytes)?;
-        fs::rename(&temp, path)
+        fs::rename(&temp, path)?;
+        // Persist the rename itself; otherwise a power loss can leave the
+        // directory entry pointing at neither the old nor the new file.
+        #[cfg(unix)]
+        {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
