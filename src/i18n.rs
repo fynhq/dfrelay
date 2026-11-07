@@ -518,7 +518,7 @@ static ZH: Text = Text {
     common_off: "关",
     common_auto: "自动",
     common_none: "无",
-    terminal_too_small: "终端太小，至少 80×24",
+    terminal_too_small: "终端太小，至少 60×16（建议 80×24）",
 };
 
 static EN: Text = Text {
@@ -802,7 +802,7 @@ static EN: Text = Text {
     common_off: "off",
     common_auto: "auto",
     common_none: "none",
-    terminal_too_small: "terminal too small; min 80x24",
+    terminal_too_small: "terminal too small; min 60x16 (80x24 recommended)",
 };
 
 #[cfg(test)]

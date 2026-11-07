@@ -25,12 +25,28 @@ pub fn sanitize_display(input: &str) -> String {
 fn is_unsafe_format_char(ch: char) -> bool {
     matches!(
         ch,
-        '\u{061C}'              // Arabic letter mark
+        '\u{00AD}'              // soft hyphen
+            | '\u{0600}'..='\u{0605}' // Arabic number signs
+            | '\u{061C}'         // Arabic letter mark
+            | '\u{06DD}'         // Arabic end of ayah
+            | '\u{070F}'         // Syriac abbreviation mark
+            | '\u{0890}'..='\u{0891}' // Arabic pound/piastre marks
+            | '\u{08E2}'         // Arabic disputed end of ayah
+            | '\u{17B4}'..='\u{17B5}' // Khmer inherent vowels
+            | '\u{180E}'         // Mongolian vowel separator
             | '\u{200B}'..='\u{200F}' // zero-width space/joiners, LRM/RLM
             | '\u{202A}'..='\u{202E}' // bidi embedding/override
+            | '\u{2028}' | '\u{2029}' // line/paragraph separators
             | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
             | '\u{2066}'..='\u{206F}' // bidi isolates and deprecated format chars
-            | '\u{FEFF}'             // zero-width no-break space (BOM)
+            | '\u{110BD}' | '\u{110CD}' // Kaithi number signs
+            | '\u{13430}'..='\u{1343F}' // Egyptian hieroglyph format controls
+            | '\u{1BCA0}'..='\u{1BCA3}' // shorthand format controls
+            | '\u{1D173}'..='\u{1D17A}' // musical symbol format controls
+            | '\u{E0001}'         // language tag
+            | '\u{E0020}'..='\u{E007F}' // tag characters
+            | '\u{FEFF}'          // zero-width no-break space (BOM)
+            | '\u{FFF9}'..='\u{FFFB}' // interlinear annotation controls
     )
 }
 
@@ -57,7 +73,7 @@ mod tests {
 
     #[test]
     fn removes_bidi_and_zero_width_format_characters() {
-        let input = "ab\u{202E}cd\u{200B}ef\u{2066}gh\u{FEFF}";
+        let input = "ab\u{202E}cd\u{200B}ef\u{2066}gh\u{FEFF}\u{00AD}\u{E0001}\u{E0041}\u{FFF9}";
         assert_eq!(sanitize_display(input), "abcdefgh");
     }
 }

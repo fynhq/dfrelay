@@ -3884,6 +3884,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_too_small_uses_the_rendered_minimum() {
+        let (mut app, _dir) = test_app(Lang::Zh).await;
+        app.page = Page::Dashboard;
+        let too_small = rendered_with_width(&app, 59, 15);
+        assert!(too_small.contains("60"), "{too_small}");
+        let minimum = rendered_with_width(&app, 60, 16);
+        assert!(!minimum.contains("终端太小"), "{minimum}");
+    }
+
+    #[tokio::test]
     async fn small_terminal_renders_main_pages_without_panicking() {
         let (mut app, _dir) = test_app(Lang::Zh).await;
         app.nodes = vec![node("n1", "香港 01")];
