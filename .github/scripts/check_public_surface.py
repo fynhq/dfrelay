@@ -63,6 +63,7 @@ TREE_ALLOW = {
     "THIRD_PARTY_NOTICES.md": {"email", "private-doc"},
     "Cargo.lock": {"env-narration"},
     "src/": {"cjk", "secret"},
+    "locales/": {"cjk", "secret"},
     ".github/scripts/check_public_surface.py": {"all"},
 }
 BINARY_PATTERNS = [
