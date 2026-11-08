@@ -83,7 +83,7 @@ enum Command {
 
 #[derive(Debug, Subcommand, Clone)]
 enum UpdateCommand {
-    /// Check the latest release without changing anything.
+    /// Check the latest release without downloading or installing it.
     Check,
     /// Download, verify, install the latest release, and restart the daemon.
     Apply,
@@ -413,10 +413,14 @@ async fn update_command(
             }
             match update::check_for_update(config).await {
                 Ok(Some(release)) => {
+                    record_check(paths, logger, Some(&release.version));
                     println!("Latest:  v{}", release.version);
                     println!("Update available.");
                 }
-                Ok(None) => println!("Latest:  no newer release"),
+                Ok(None) => {
+                    record_check(paths, logger, None);
+                    println!("Latest:  no newer release");
+                }
                 Err(err) => bail!("update check failed: {err}"),
             }
         }
@@ -446,6 +450,16 @@ async fn update_command(
             let state = update::load_state(paths);
             println!("Current:      {}", version::DISPLAY);
             println!("Policy:       {}", config.app_update.as_str());
+            match state.available_update() {
+                Some(version) => println!("Latest:       v{version} (update available)"),
+                None if state.last_check_unix.is_some() => {
+                    println!("Latest:       no newer release");
+                }
+                None => {}
+            }
+            if let Some((staged, _)) = update::discover_staged(paths) {
+                println!("Staged:       v{staged}");
+            }
             println!("Last check:   {}", format_unix(state.last_check_unix));
             println!("Last success: {}", format_unix(state.last_success_unix));
             if let Some(version) = state.failed_version.as_deref() {
@@ -480,6 +494,15 @@ fn format_unix(timestamp: Option<i64>) -> String {
         .and_then(|value| chrono::Local.timestamp_opt(value, 0).single())
         .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| "—".to_string())
+}
+
+fn record_check(paths: &Paths, logger: &Logger, available: Option<&str>) {
+    if let Err(err) = update::record_check_result(paths, available) {
+        logger.app(
+            LogLevel::Warn,
+            format!("cannot record the update check: {err}"),
+        );
+    }
 }
 
 async fn print_status(paths: &Paths) -> anyhow::Result<()> {

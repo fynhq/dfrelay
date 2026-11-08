@@ -74,6 +74,10 @@ pub struct UpdateState {
     pub last_check_unix: Option<i64>,
     #[serde(default)]
     pub last_success_unix: Option<i64>,
+    /// Newer release reported by the last successful check. The daemon also
+    /// stages this version, but `dfr update check` only records it.
+    #[serde(default)]
+    pub available_version: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -88,6 +92,13 @@ impl UpdateState {
             && self.failed_at_unix.is_some_and(|at| {
                 Local::now().timestamp().saturating_sub(at) < FAILED_COOLDOWN.as_secs() as i64
             })
+    }
+
+    /// A recorded release that is still newer than the running binary.
+    pub fn available_update(&self) -> Option<&str> {
+        self.available_version
+            .as_deref()
+            .filter(|version| binary::is_newer_version(version, version::BASE))
     }
 }
 
@@ -151,6 +162,15 @@ pub fn save_state(paths: &Paths, state: &UpdateState) -> std::io::Result<()> {
     fsutil::ensure_private_dir(&paths.updates_dir)?;
     let bytes = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
     fsutil::write_private_atomic(&state_path(paths), &bytes)
+}
+
+/// Record a successful check. `available` is the newer release, if any; a
+/// check that found nothing clears a previously recorded version.
+pub fn record_check_result(paths: &Paths, available: Option<&str>) -> std::io::Result<()> {
+    let mut state = load_state(paths);
+    state.last_check_unix = Some(Local::now().timestamp());
+    state.available_version = available.map(str::to_string);
+    save_state(paths, &state)
 }
 
 pub async fn check_for_update(config: &Config) -> Result<Option<ReleaseInfo>, UpdateError> {
@@ -1225,13 +1245,33 @@ mod tests {
         .unwrap();
         let state = UpdateState {
             last_check_unix: Some(123),
+            available_version: Some("9.9.9".into()),
             failed_version: Some("1.2.3".into()),
             ..Default::default()
         };
         save_state(&paths, &state).unwrap();
         let loaded = load_state(&paths);
         assert_eq!(loaded.last_check_unix, Some(123));
+        assert_eq!(loaded.available_version.as_deref(), Some("9.9.9"));
         assert_eq!(loaded.failed_version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn check_result_records_and_clears_the_available_version() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        record_check_result(&paths, Some("9.9.9")).unwrap();
+        let state = load_state(&paths);
+        assert!(state.last_check_unix.is_some());
+        assert_eq!(state.available_update(), Some("9.9.9"));
+        record_check_result(&paths, None).unwrap();
+        let state = load_state(&paths);
+        assert!(state.available_version.is_none());
+        assert!(state.available_update().is_none());
     }
 
     #[test]

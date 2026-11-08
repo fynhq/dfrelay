@@ -873,10 +873,18 @@ impl App {
         let update_state = update::load_state(&paths);
         let staged_update = update::discover_staged(&paths)
             .filter(|(version, _)| !update_state.failed_recently(version));
-        let last_app_update_check = update_state.last_check_unix.and_then(|at| {
-            let age = chrono::Local::now().timestamp().saturating_sub(at);
-            (age >= 0 && (age as u64) < update::CHECK_INTERVAL.as_secs()).then(Instant::now)
-        });
+        // A recorded but unstaged update means the last check only reported it
+        // (for example `dfr update check`). Check once so notify/auto can
+        // stage it instead of waiting for the daily interval.
+        let unstaged_available =
+            update_state.available_update().is_some() && staged_update.is_none();
+        let last_app_update_check = update_state
+            .last_check_unix
+            .and_then(|at| {
+                let age = chrono::Local::now().timestamp().saturating_sub(at);
+                (age >= 0 && (age as u64) < update::CHECK_INTERVAL.as_secs()).then(Instant::now)
+            })
+            .filter(|_| !unstaged_available);
         let has_enabled = config.enabled_subscriptions().next().is_some();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut app = Self {
@@ -1708,9 +1716,7 @@ impl App {
                 self.app_update_retry_at = None;
                 match result {
                     Ok(Some(release)) => {
-                        let mut state = update::load_state(&self.paths);
-                        state.last_check_unix = Some(chrono::Local::now().timestamp());
-                        let _ = update::save_state(&self.paths, &state);
+                        let _ = update::record_check_result(&self.paths, Some(&release.version));
                         if update::load_state(&self.paths).failed_recently(&release.version) {
                             self.logger.app(
                                 LogLevel::Info,
@@ -1745,9 +1751,7 @@ impl App {
                         });
                     }
                     Ok(None) => {
-                        let mut state = update::load_state(&self.paths);
-                        state.last_check_unix = Some(chrono::Local::now().timestamp());
-                        let _ = update::save_state(&self.paths, &state);
+                        let _ = update::record_check_result(&self.paths, None);
                         self.logger
                             .app(LogLevel::Debug, "app update: already up to date");
                     }
@@ -3294,6 +3298,33 @@ mod tests {
         let app = App::new(Config::default(), paths, logger).await;
         assert_eq!(app.page, Page::Dashboard);
         assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
+    }
+
+    #[tokio::test]
+    async fn startup_rechecks_a_recorded_unstaged_update() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        paths.ensure().unwrap();
+        update::record_check_result(&paths, Some("999.0.0")).unwrap();
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+        let app = App::new(Config::default(), paths, logger).await;
+        assert!(app.last_app_update_check.is_none());
+
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        paths.ensure().unwrap();
+        update::record_check_result(&paths, None).unwrap();
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+        let app = App::new(Config::default(), paths, logger).await;
+        assert!(app.last_app_update_check.is_some());
     }
 
     #[tokio::test]
