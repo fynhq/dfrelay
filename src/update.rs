@@ -1,12 +1,10 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use chrono::Local;
-use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, Paths};
@@ -204,11 +202,7 @@ async fn fetch_latest_with(client: &reqwest::Client) -> Result<ReleaseInfo, Upda
     if !status.is_success() {
         return Err(UpdateError::Api(format!("HTTP {}", status.as_u16())));
     }
-    if response.url().scheme() != "https" {
-        return Err(UpdateError::Api(
-            "release API redirected to a non-HTTPS URL".into(),
-        ));
-    }
+    crate::http_body::ensure_https(&response).map_err(UpdateError::Api)?;
     // Read with a streaming cap: a chunked response has no Content-Length and
     // must not be buffered without bound.
     let bytes = crate::http_body::read_limited(response, crate::http_body::JSON_BODY_LIMIT)
@@ -289,6 +283,7 @@ pub async fn download_and_stage(
                 let staged = stage_binary(paths, &release.version, &binary_bytes)?;
                 if let Err(err) = verify_binary_version(&staged, &release.version).await {
                     let _ = fs::remove_file(&staged);
+                    let _ = fs::remove_file(staged_sidecar(&paths.updates_dir, &release.version));
                     return Err(err);
                 }
                 logger.app(
@@ -319,7 +314,7 @@ async fn fetch_sums_digest(
             Ok(response) if response.status().is_success() => response,
             _ => continue,
         };
-        if response.url().scheme() != "https" {
+        if crate::http_body::ensure_https(&response).is_err() {
             continue;
         }
         if response
@@ -377,52 +372,13 @@ pub fn parse_sha256sums(text: &str, asset: &str) -> Option<String> {
 }
 
 fn extract_dfrt(bytes: &[u8]) -> Result<Vec<u8>, UpdateError> {
-    let decoder = GzDecoder::new(Cursor::new(bytes));
-    let mut archive = tar::Archive::new(decoder);
-    let mut found: Option<Vec<u8>> = None;
-    for entry in archive
-        .entries()
-        .map_err(|err| UpdateError::Archive(err.to_string()))?
-    {
-        let entry = entry.map_err(|err| UpdateError::Archive(err.to_string()))?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let path = entry
-            .path()
-            .map_err(|err| UpdateError::Archive(err.to_string()))?;
-        if path.file_name().and_then(|name| name.to_str()) != Some("dfr") {
-            continue;
-        }
-        if path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        }) {
-            return Err(UpdateError::Archive("unsafe archive path".into()));
-        }
-        let size = entry.size();
-        if size > MAX_BINARY_BYTES {
-            return Err(UpdateError::Archive("archive entry is too large".into()));
-        }
-        if found.is_some() {
-            return Err(UpdateError::Archive(
-                "archive contains multiple dfr files".into(),
-            ));
-        }
-        let binary = crate::archive::read_limited(
-            entry,
-            size,
-            MAX_BINARY_BYTES,
-            "archive entry is too large",
-        )
-        .map_err(UpdateError::Archive)?;
-        found = Some(binary);
-    }
-    found.ok_or_else(|| UpdateError::Archive("dfr not found in archive".into()))
+    crate::archive::extract_tar_gz_entry(
+        bytes,
+        "dfr",
+        MAX_BINARY_BYTES,
+        "archive entry is too large",
+    )
+    .map_err(UpdateError::Archive)
 }
 
 fn staged_sidecar(dir: &Path, version: &str) -> PathBuf {
@@ -433,15 +389,61 @@ fn stage_binary(paths: &Paths, version: &str, bytes: &[u8]) -> Result<PathBuf, U
     fsutil::ensure_private_dir(&paths.updates_dir)?;
     let staged = paths.updates_dir.join(format!("dfr-{version}"));
     let temp = paths.updates_dir.join(format!(".dfr-{version}.tmp"));
-    fs::write(&temp, bytes)?;
-    set_executable(&temp)?;
-    fs::File::open(&temp)?.sync_all()?;
-    fs::rename(&temp, &staged)?;
-    // Record the digest of the exact staged bytes so a later `apply_staged`
-    // (possibly after a daemon restart) can detect replacement or corruption.
     let sidecar = staged_sidecar(&paths.updates_dir, version);
-    fsutil::write_private_file(&sidecar, binary::sha256_hex(bytes).as_bytes())?;
+    let mut renamed = false;
+    let result = (|| -> Result<(), UpdateError> {
+        fs::write(&temp, bytes)?;
+        fsutil::set_executable(&temp)?;
+        fs::File::open(&temp)?.sync_all()?;
+        fs::rename(&temp, &staged)?;
+        renamed = true;
+        // Record the digest of the exact staged bytes so a later `apply_staged`
+        // (possibly after a daemon restart) can detect replacement or corruption.
+        fsutil::write_private_file(&sidecar, binary::sha256_hex(bytes).as_bytes())?;
+        Ok(())
+    })();
+    if let Err(err) = result {
+        let _ = fs::remove_file(&temp);
+        if renamed {
+            let _ = fs::remove_file(&staged);
+            let _ = fs::remove_file(&sidecar);
+        }
+        return Err(err);
+    }
+    // A newer staged version supersedes older downloads and their sidecars;
+    // interrupted `.tmp` files are also useless once this stage succeeded.
+    cleanup_stale_staged(paths, Some(version));
     Ok(staged)
+}
+
+/// Remove staged binaries, sidecars and interrupted temp files that are not the
+/// current candidate. `state.json` and `apply.lock` are control files and are
+/// always preserved.
+pub(crate) fn cleanup_stale_staged(paths: &Paths, keep_version: Option<&str>) {
+    let Ok(entries) = fs::read_dir(&paths.updates_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == "state.json" || name == "apply.lock" {
+            continue;
+        }
+        if name.starts_with(".dfr-") && name.ends_with(".tmp") {
+            let _ = fs::remove_file(entry.path());
+            continue;
+        }
+        let Some(rest) = name.strip_prefix("dfr-") else {
+            continue;
+        };
+        let version = rest.strip_suffix(".sha256").unwrap_or(rest);
+        if keep_version == Some(version) {
+            continue;
+        }
+        let _ = fs::remove_file(entry.path());
+    }
 }
 
 fn verify_staged_integrity(paths: &Paths, staged: &Path, version: &str) -> Result<(), UpdateError> {
@@ -546,7 +548,7 @@ pub fn install_staged(staged: &Path, target: &Path) -> Result<PathBuf, UpdateErr
     let temp = parent.join(format!(".{name}.update.tmp"));
     let result = (|| -> Result<(), UpdateError> {
         fs::copy(staged, &temp).map_err(|err| UpdateError::Target(err.to_string()))?;
-        set_executable(&temp)?;
+        fsutil::set_executable(&temp)?;
         fs::File::open(&temp)?.sync_all()?;
         fs::rename(&temp, target).map_err(|err| UpdateError::Target(err.to_string()))?;
         Ok(())
@@ -574,7 +576,7 @@ pub fn restore_previous(target: &Path, previous: &Path) -> Result<(), UpdateErro
     let temp = parent.join(format!(".{name}.rollback.tmp"));
     let result = (|| -> Result<(), UpdateError> {
         fs::copy(previous, &temp).map_err(|err| UpdateError::Target(err.to_string()))?;
-        set_executable(&temp)?;
+        fsutil::set_executable(&temp)?;
         fs::File::open(&temp)?.sync_all()?;
         fs::rename(&temp, target).map_err(|err| UpdateError::Target(err.to_string()))?;
         Ok(())
@@ -601,15 +603,6 @@ fn check_target_writable(target: &Path) -> Result<(), UpdateError> {
         }
         Err(err) => Err(UpdateError::Target(err.to_string())),
     }
-}
-
-fn set_executable(path: &Path) -> Result<(), UpdateError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(())
 }
 
 pub fn auto_apply_allowed(
@@ -718,7 +711,7 @@ pub async fn apply_staged(
     };
     let started = start_daemon(identity.as_ref(), target, paths).await;
     let status = match started {
-        Ok(()) => wait_for_stable_daemon(&socket, START_TIMEOUT).await,
+        Ok(()) => wait_for_stable_daemon(&socket, START_TIMEOUT, Some(expected_version)).await,
         Err(err) => {
             logger.app(
                 LogLevel::Warn,
@@ -783,6 +776,7 @@ pub async fn apply_staged(
     let _ = save_state(paths, &state);
     let _ = fs::remove_file(staged);
     let _ = fs::remove_file(staged_sidecar(&paths.updates_dir, expected_version));
+    cleanup_stale_staged(paths, None);
     logger.app(
         LogLevel::Info,
         format!("app update: {expected_version} installed and running"),
@@ -803,6 +797,7 @@ pub async fn rollback_to_previous(
         ));
     }
     check_target_writable(target)?;
+    let previous_version = version_of_binary(&previous).await.ok();
     let socket = paths.control_socket();
     let identity = stop_daemon(paths, &socket).await?;
     wait_socket_gone(&socket, SERVICE_STOP_TIMEOUT).await?;
@@ -811,7 +806,7 @@ pub async fn rollback_to_previous(
         return Err(err);
     }
     start_daemon(identity.as_ref(), target, paths).await?;
-    if wait_for_stable_daemon(&socket, START_TIMEOUT)
+    if wait_for_stable_daemon(&socket, START_TIMEOUT, previous_version.as_deref())
         .await
         .is_some()
     {
@@ -839,6 +834,7 @@ async fn rollback(
         format!("app update: rolling back {failed_version}: {cause}"),
     );
     let failure = cause.to_string();
+    let previous_version = version_of_binary(previous).await.ok();
     let socket = paths.control_socket();
     // Stop the instance that was started for verification before touching the
     // binary. If the stop fails, leave both the disk state and the running
@@ -881,7 +877,7 @@ async fn rollback(
         );
         return Err(err);
     }
-    let restored = wait_for_stable_daemon(&socket, START_TIMEOUT)
+    let restored = wait_for_stable_daemon(&socket, START_TIMEOUT, previous_version.as_deref())
         .await
         .is_some();
     if restored {
@@ -898,12 +894,21 @@ async fn rollback(
     Err(UpdateError::Restart)
 }
 
-fn record_update_failure(paths: &Paths, failed_version: &str, message: &str) {
+pub(crate) fn record_update_failure(paths: &Paths, failed_version: &str, message: &str) {
     let mut state = load_state(paths);
     state.failed_version = Some(failed_version.to_string());
     state.failed_at_unix = Some(Local::now().timestamp());
     state.last_error = Some(message.to_string());
     let _ = save_state(paths, &state);
+}
+
+/// Record a helper-side apply failure for the daemon's cooldown check. `Busy`
+/// means another updater holds the lock; it is transient and must not suppress
+/// the version for the full cooldown.
+pub(crate) fn record_helper_failure(paths: &Paths, version: &str, err: &UpdateError) {
+    if !matches!(err, UpdateError::Busy) {
+        record_update_failure(paths, version, &err.to_string());
+    }
 }
 
 async fn stop_daemon(paths: &Paths, socket: &Path) -> Result<Option<ServiceIdentity>, UpdateError> {
@@ -981,17 +986,35 @@ async fn wait_socket_gone(socket: &Path, timeout: Duration) -> Result<(), Update
     Err(UpdateError::Restart)
 }
 
+fn stable_window_ok(first: &crate::view::DaemonStatus, second: &crate::view::DaemonStatus) -> bool {
+    // Uptime is reported in whole seconds; allow one second of rounding.
+    let required_uptime = first
+        .uptime_secs
+        .saturating_add(STABLE_WINDOW.as_secs().saturating_sub(1));
+    second.pid == first.pid
+        && second.version == first.version
+        && second.uptime_secs >= required_uptime
+}
+
 async fn wait_for_stable_daemon(
     socket: &Path,
     timeout: Duration,
+    expected_version: Option<&str>,
 ) -> Option<crate::view::DaemonStatus> {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
-        if ipc::control_status(socket).await.is_ok() {
-            tokio::time::sleep(STABLE_WINDOW).await;
-            return ipc::control_status(socket).await.ok();
+        let Ok(first) = ipc::control_status(socket).await else {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            continue;
+        };
+        if expected_version.is_some_and(|expected| first.version != expected) {
+            return None;
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(STABLE_WINDOW).await;
+        let Ok(second) = ipc::control_status(socket).await else {
+            return None;
+        };
+        return stable_window_ok(&first, &second).then_some(second);
     }
     None
 }
@@ -1048,11 +1071,22 @@ fn helper_launch_plan(
             })
         }
         ServiceManager::LaunchdGui => {
+            let label = format!("com.dfrelay.update.{suffix}");
+            // `launchctl submit` keeps a failed job alive, which would turn a
+            // broken staged update into a restart loop and leave the job label
+            // behind. Run the helper through a shell that always removes the
+            // job and exits successfully, so launchd never relaunches it.
             let mut command_args: Vec<OsString> = vec![
                 OsString::from("submit"),
                 OsString::from("-l"),
-                OsString::from(format!("com.dfrelay.update.{suffix}")),
+                OsString::from(label.clone()),
                 OsString::from("--"),
+                OsString::from("/bin/sh"),
+                OsString::from("-c"),
+                OsString::from(
+                    "\"$@\" || true; /bin/launchctl remove \"$0\" >/dev/null 2>&1 || true; exit 0",
+                ),
+                OsString::from(label),
                 executable.as_os_str().to_os_string(),
             ];
             command_args.extend(args.iter().cloned());
@@ -1125,6 +1159,45 @@ fn binary_error(err: BinaryError) -> UpdateError {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn daemon_status(pid: u32, version: &str, uptime_secs: u64) -> crate::view::DaemonStatus {
+        crate::view::DaemonStatus {
+            pid,
+            managed: false,
+            service: None,
+            proxy: crate::app::ProxyStatus::Stopped,
+            uptime_secs,
+            listen: "127.0.0.1:12000".into(),
+            current_node: None,
+            version: version.into(),
+        }
+    }
+
+    #[test]
+    fn stable_window_requires_the_same_process_and_version() {
+        let first = daemon_status(7, "1.2.3", 0);
+        assert!(stable_window_ok(
+            &first,
+            &daemon_status(7, "1.2.3", STABLE_WINDOW.as_secs())
+        ));
+        assert!(!stable_window_ok(&first, &daemon_status(8, "1.2.3", 3)));
+        assert!(!stable_window_ok(&first, &daemon_status(7, "1.2.4", 3)));
+        assert!(!stable_window_ok(&first, &daemon_status(7, "1.2.3", 1)));
+    }
+
+    #[test]
+    fn helper_failure_records_deterministic_errors_but_not_busy() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        record_helper_failure(&paths, "9.9.9", &UpdateError::Busy);
+        assert!(!load_state(&paths).failed_recently("9.9.9"));
+        record_helper_failure(&paths, "9.9.9", &UpdateError::StagedIntegrity);
+        assert!(load_state(&paths).failed_recently("9.9.9"));
+    }
 
     #[test]
     fn failure_state_records_version_and_message() {
@@ -1368,7 +1441,11 @@ mod tests {
         assert_eq!(args[1], OsString::from("-l"));
         assert_eq!(args[2], OsString::from("com.dfrelay.update.1-2"));
         assert_eq!(args[3], OsString::from("--"));
-        assert_eq!(args[4], OsString::from("/usr/local/bin/dfr"));
+        assert_eq!(args[4], OsString::from("/bin/sh"));
+        assert_eq!(args[5], OsString::from("-c"));
+        assert!(args[6].to_string_lossy().contains("launchctl remove"));
+        assert_eq!(args[7], OsString::from("com.dfrelay.update.1-2"));
+        assert_eq!(args[8], OsString::from("/usr/local/bin/dfr"));
 
         assert!(matches!(
             helper_launch_plan(
@@ -1379,6 +1456,36 @@ mod tests {
             ),
             Err(UpdateError::Unsupported(ServiceManager::SystemdSystem))
         ));
+    }
+
+    #[test]
+    fn cleanup_removes_old_staged_files_and_preserves_control_files() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::discover(
+            Some(dir.path().join("config.toml")),
+            Some(dir.path().join("data")),
+        )
+        .unwrap();
+        paths.ensure().unwrap();
+        for name in [
+            "dfr-0.1.0",
+            "dfr-0.1.0.sha256",
+            "dfr-9.9.9",
+            "dfr-9.9.9.sha256",
+            ".dfr-9.9.9.tmp",
+            "state.json",
+            "apply.lock",
+        ] {
+            fs::write(paths.updates_dir.join(name), b"x").unwrap();
+        }
+        cleanup_stale_staged(&paths, Some("9.9.9"));
+        assert!(!paths.updates_dir.join("dfr-0.1.0").exists());
+        assert!(!paths.updates_dir.join("dfr-0.1.0.sha256").exists());
+        assert!(paths.updates_dir.join("dfr-9.9.9").exists());
+        assert!(paths.updates_dir.join("dfr-9.9.9.sha256").exists());
+        assert!(!paths.updates_dir.join(".dfr-9.9.9.tmp").exists());
+        assert!(paths.updates_dir.join("state.json").exists());
+        assert!(paths.updates_dir.join("apply.lock").exists());
     }
 
     #[test]

@@ -83,17 +83,21 @@ pub enum ClashError {
 pub struct ClashClient {
     base: String,
     secret: String,
-    client: Client,
-    delay_client: Client,
+    client: Option<Client>,
+    delay_client: Option<Client>,
 }
 
 impl ClashClient {
     pub fn new(port: u16, secret: impl Into<String>) -> Self {
+        // Fail closed: the Clash API is loopback-only and carries a bearer
+        // secret, so never fall back to a default client that may honor an
+        // environment proxy. A client-build failure leaves requests disabled
+        // and is reported through ClashError.
         let client = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .ok();
         // sing-box's delay endpoint uses a 5s timeout; allow enough extra time
         // for the 503/5xx response to arrive instead of treating every failed
         // probe as an unreachable Clash API.
@@ -101,13 +105,25 @@ impl ClashClient {
             .no_proxy()
             .timeout(Duration::from_secs(8))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .ok();
         Self {
             base: format!("http://127.0.0.1:{port}"),
             secret: secret.into(),
             client,
             delay_client,
         }
+    }
+
+    fn http(&self) -> Result<&Client, ClashError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| ClashError::Invalid("HTTP client unavailable".to_string()))
+    }
+
+    fn delay_http(&self) -> Result<&Client, ClashError> {
+        self.delay_client
+            .as_ref()
+            .ok_or_else(|| ClashError::Invalid("HTTP client unavailable".to_string()))
     }
 
     pub fn base_url(&self) -> &str {
@@ -126,7 +142,7 @@ impl ClashClient {
 
     pub async fn select(&self, name: &str) -> Result<(), ClashError> {
         let response = self
-            .client
+            .http()?
             .put(format!("{}/proxies/proxy", self.base))
             .bearer_auth(&self.secret)
             .json(&serde_json::json!({ "name": name }))
@@ -139,7 +155,7 @@ impl ClashClient {
     pub async fn delay(&self, name: &str, test_url: &str) -> Result<u64, ClashError> {
         let url = delay_url(&self.base, name, test_url)?;
         let response = self
-            .delay_client
+            .delay_http()?
             .get(url)
             .bearer_auth(&self.secret)
             .send()
@@ -153,7 +169,7 @@ impl ClashClient {
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClashError> {
         let response = self
-            .client
+            .http()?
             .get(format!("{}{path}", self.base))
             .bearer_auth(&self.secret)
             .send()

@@ -547,6 +547,7 @@ pub enum BackgroundTask {
     Preflight,
     Metrics,
     DelayTest,
+    Selection,
     Ipc,
     Other,
 }
@@ -877,6 +878,10 @@ impl App {
         let update_state = update::load_state(&paths);
         let staged_update = update::discover_staged(&paths)
             .filter(|(version, _)| !update_state.failed_recently(version));
+        update::cleanup_stale_staged(
+            &paths,
+            staged_update.as_ref().map(|(version, _)| version.as_str()),
+        );
         // A recorded but unstaged update means the last check only reported it
         // (for example `dfr update check`). Check once so notify/auto can
         // stage it instead of waiting for the daily interval.
@@ -1648,10 +1653,17 @@ impl App {
                     }
                 };
                 let tx = self.events_tx.clone();
-                tokio::spawn(async move {
+                let generation = self.selection_generation.load(Ordering::Relaxed);
+                let token = self.selection_generation.clone();
+                self.spawn_guarded(BackgroundTask::Selection, async move {
+                    if token.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
                     match client.select(&tag).await {
                         Ok(()) => {
-                            let _ = tx.send(AppEvent::Info(label));
+                            if token.load(Ordering::Relaxed) == generation {
+                                let _ = tx.send(AppEvent::Info(label));
+                            }
                         }
                         Err(err) => {
                             let _ = tx.send(AppEvent::Error(err.to_string()));
@@ -2079,7 +2091,7 @@ impl App {
             BackgroundTask::DelayTest => {
                 self.delay_testing.clear();
             }
-            BackgroundTask::Ipc => {}
+            BackgroundTask::Selection | BackgroundTask::Ipc => {}
             BackgroundTask::Other => {
                 self.pending_restart_subscription = None;
             }
@@ -2518,12 +2530,19 @@ impl App {
         self.notify(format!("{}: {name}", self.text().msg_node_selected));
         let tx = self.events_tx.clone();
         let selected_label = self.text().msg_node_selected;
-        tokio::spawn(async move {
+        let generation = self.selection_generation.load(Ordering::Relaxed);
+        let token = self.selection_generation.clone();
+        self.spawn_guarded(BackgroundTask::Selection, async move {
+            if token.load(Ordering::Relaxed) != generation {
+                return;
+            }
             match client.select(&tag).await {
                 Ok(()) => {
-                    let _ = tx.send(AppEvent::NodeSelected(tag));
-                    let _ = tx.send(AppEvent::Info(format!("{selected_label}: {name}")));
-                    let _ = tx.send(AppEvent::SelectionApplied);
+                    if token.load(Ordering::Relaxed) == generation {
+                        let _ = tx.send(AppEvent::NodeSelected(tag));
+                        let _ = tx.send(AppEvent::Info(format!("{selected_label}: {name}")));
+                        let _ = tx.send(AppEvent::SelectionApplied);
+                    }
                 }
                 Err(err) => {
                     let _ = tx.send(AppEvent::Error(err.to_string()));
@@ -2566,7 +2585,7 @@ impl App {
         let tx = self.events_tx.clone();
         let generation = self.selection_generation.load(Ordering::Relaxed);
         let token = self.selection_generation.clone();
-        tokio::spawn(async move {
+        self.spawn_guarded(BackgroundTask::Selection, async move {
             let client = ClashClient::new(port, secret);
             for attempt in 0..20 {
                 if token.load(Ordering::Relaxed) != generation {
@@ -2574,8 +2593,10 @@ impl App {
                 }
                 match client.select(&target).await {
                     Ok(()) => {
-                        let _ = tx.send(AppEvent::Info(label));
-                        let _ = tx.send(AppEvent::SelectionApplied);
+                        if token.load(Ordering::Relaxed) == generation {
+                            let _ = tx.send(AppEvent::Info(label));
+                            let _ = tx.send(AppEvent::SelectionApplied);
+                        }
                         return;
                     }
                     Err(_) if attempt < 19 => {
@@ -2733,11 +2754,18 @@ impl App {
         self.request_metrics_refresh();
         let tx = self.events_tx.clone();
         let auto_label = self.text().msg_auto_enabled;
-        tokio::spawn(async move {
+        let generation = self.selection_generation.load(Ordering::Relaxed);
+        let token = self.selection_generation.clone();
+        self.spawn_guarded(BackgroundTask::Selection, async move {
+            if token.load(Ordering::Relaxed) != generation {
+                return;
+            }
             match client.select(&target).await {
                 Ok(()) => {
-                    let _ = tx.send(AppEvent::Info(auto_label.to_string()));
-                    let _ = tx.send(AppEvent::SelectionApplied);
+                    if token.load(Ordering::Relaxed) == generation {
+                        let _ = tx.send(AppEvent::Info(auto_label.to_string()));
+                        let _ = tx.send(AppEvent::SelectionApplied);
+                    }
                 }
                 Err(err) => {
                     let _ = tx.send(AppEvent::Error(err.to_string()));

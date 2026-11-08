@@ -4,6 +4,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -334,6 +337,32 @@ fn bind_private(socket: &Path) -> io::Result<UnixListener> {
     result
 }
 
+/// Hold an exclusive lock for the lifetime of the daemon. The socket bind
+/// already rejects a live peer, but a bind/connect race or a transient socket
+/// error must not allow two daemons to replace each other's socket.
+pub fn acquire_daemon_lock(data_dir: &Path) -> io::Result<std::fs::File> {
+    crate::fsutil::ensure_private_dir(data_dir)?;
+    let path = data_dir.join("daemon.lock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let file = crate::fsutil::open_private_file(&path, false)?;
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        if locked {
+            Ok(file)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "another DFRelay daemon is running",
+            ))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        crate::fsutil::open_private_file(&path, false)
+    }
+}
+
 pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
     #[cfg(unix)]
     {
@@ -358,16 +387,39 @@ pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
             Ok(listener)
         }
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
-            if UnixStream::connect(socket).await.is_ok() {
-                return Err(io::Error::new(
+            match UnixStream::connect(socket).await {
+                Ok(_) => Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "daemon already running",
-                ));
+                )),
+                Err(connect_err)
+                    if matches!(
+                        connect_err.kind(),
+                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                    ) =>
+                {
+                    // Only a socket file may be removed. A regular file,
+                    // symlink or directory at the control path is not ours;
+                    // deleting it could destroy user data.
+                    match std::fs::symlink_metadata(socket) {
+                        Ok(metadata) if metadata.file_type().is_socket() => {
+                            std::fs::remove_file(socket)?;
+                        }
+                        Ok(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::AddrInUse,
+                                "control socket path exists and is not a socket",
+                            ));
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                        Err(err) => return Err(err),
+                    }
+                    let listener = bind_private(socket)?;
+                    set_socket_permissions(socket)?;
+                    Ok(listener)
+                }
+                Err(connect_err) => Err(connect_err),
             }
-            let _ = std::fs::remove_file(socket);
-            let listener = bind_private(socket)?;
-            set_socket_permissions(socket)?;
-            Ok(listener)
         }
         Err(err) => Err(err),
     }
@@ -598,6 +650,37 @@ mod tests {
         let socket = dir.path().join("x".repeat(120));
         let err = bind_listener(&socket).await.unwrap_err();
         assert!(err.to_string().contains("too long"), "{err}");
+    }
+
+    #[test]
+    fn daemon_lock_rejects_a_second_owner() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first = acquire_daemon_lock(dir.path()).unwrap();
+        let err = acquire_daemon_lock(dir.path()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        drop(first);
+        assert!(acquire_daemon_lock(dir.path()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_listener_does_not_delete_a_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("dfr.sock");
+        std::fs::write(&socket, b"user data").unwrap();
+        let err = bind_listener(&socket).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(std::fs::read(&socket).unwrap(), b"user data");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_listener_replaces_a_dead_socket() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("dfr.sock");
+        let stale = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        drop(stale);
+        assert!(bind_listener(&socket).await.is_ok());
     }
 
     #[test]

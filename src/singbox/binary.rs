@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Local;
-use flate2::read::GzDecoder;
 use reqwest::{Client, Proxy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -416,7 +415,7 @@ impl BinaryManager {
         file.write_all(bytes)?;
         file.flush()?;
         file.sync_all()?;
-        set_executable(&temp)?;
+        fsutil::set_executable(&temp)?;
         Ok(temp)
     }
 
@@ -764,54 +763,13 @@ fn extract_binary_bytes(path: &Path, bytes: &[u8]) -> Result<Vec<u8>, BinaryErro
 }
 
 fn extract_tar_gz(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
-    let decoder = GzDecoder::new(Cursor::new(bytes));
-    let mut archive = tar::Archive::new(decoder);
-    let mut found: Option<Vec<u8>> = None;
-    for entry in archive
-        .entries()
-        .map_err(|err| BinaryError::Archive(err.to_string()))?
-    {
-        let entry = entry.map_err(|err| BinaryError::Archive(err.to_string()))?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let path = entry
-            .path()
-            .map_err(|err| BinaryError::Archive(err.to_string()))?;
-        if path.file_name().and_then(|name| name.to_str()) != Some("sing-box") {
-            continue;
-        }
-        if path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        }) {
-            return Err(BinaryError::Archive("unsafe archive path".to_string()));
-        }
-        let size = entry.size();
-        if size > MAX_MANUAL_BYTES {
-            return Err(BinaryError::Archive(
-                "archive entry is too large".to_string(),
-            ));
-        }
-        if found.is_some() {
-            return Err(BinaryError::Archive(
-                "archive contains multiple sing-box files".to_string(),
-            ));
-        }
-        let binary = crate::archive::read_limited(
-            entry,
-            size,
-            MAX_MANUAL_BYTES,
-            "archive entry is too large",
-        )
-        .map_err(BinaryError::Archive)?;
-        found = Some(binary);
-    }
-    found.ok_or_else(|| BinaryError::Archive("sing-box not found in archive".to_string()))
+    crate::archive::extract_tar_gz_entry(
+        bytes,
+        "sing-box",
+        MAX_MANUAL_BYTES,
+        "archive entry is too large",
+    )
+    .map_err(BinaryError::Archive)
 }
 
 fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
@@ -922,15 +880,6 @@ fn read_sidecar_checksum(path: &Path) -> Result<Option<String>, BinaryError> {
         return Err(BinaryError::Archive("invalid sha256 file".to_string()));
     }
     Ok(Some(token.to_string()))
-}
-
-fn set_executable(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1166,7 +1115,7 @@ mod tests {
 
     fn write_fake_binary(path: &Path, version: &str) {
         fs::write(path, fake_binary_script(version)).unwrap();
-        set_executable(path).unwrap();
+        fsutil::set_executable(path).unwrap();
     }
 
     fn test_metadata(version: &str) -> BinaryMetadata {
@@ -1241,7 +1190,7 @@ mod tests {
         let binary = paths.bin_dir.join("fake-sing-box");
         let script = "#!/bin/sh\nif [ \"$1\" = check ]; then\n  case \"$3\" in *runtime/config.json*) exit 1;; esac\nfi\nexit 0\n";
         fs::write(&binary, script).unwrap();
-        set_executable(&binary).unwrap();
+        fsutil::set_executable(&binary).unwrap();
         fs::write(paths.runtime_config(), "{}").unwrap();
 
         let manager = BinaryManager::new(paths);

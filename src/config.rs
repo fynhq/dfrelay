@@ -12,7 +12,43 @@ use crate::logging::LogLevel;
 
 pub const DEFAULT_PORT: u16 = 12000;
 pub const DEFAULT_TEST_URL: &str = "https://www.gstatic.com/generate_204";
+pub const DEFAULT_TEST_INTERVAL: &str = "3m";
+pub const DEFAULT_IDLE_TIMEOUT: &str = "30m";
 pub const DEFAULT_DNS_SERVERS: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
+
+/// Accept the Go `time.ParseDuration` subset used by sing-box: a sequence of
+/// decimal numbers with ns/us/µs/μs/ms/s/m/h units. Negative values are not
+/// meaningful for these settings.
+fn is_go_duration(value: &str) -> bool {
+    let mut rest = value.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    let mut found = false;
+    while !rest.is_empty() {
+        let number_len = rest
+            .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+            .unwrap_or(rest.len());
+        if number_len == 0 {
+            return false;
+        }
+        let number = &rest[..number_len];
+        if number.matches('.').count() > 1 || !number.chars().any(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        rest = &rest[number_len..];
+        let unit_len = rest
+            .find(|ch: char| ch.is_ascii_digit() || ch == '.')
+            .unwrap_or(rest.len());
+        let unit = &rest[..unit_len];
+        if !matches!(unit, "ns" | "us" | "µs" | "μs" | "ms" | "s" | "m" | "h") {
+            return false;
+        }
+        rest = &rest[unit_len..];
+        found = true;
+    }
+    found
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -155,6 +191,14 @@ impl Config {
             self.test_url = DEFAULT_TEST_URL.to_string();
             warnings.push("test URL must be https; reset to default".to_string());
         }
+        if !is_go_duration(&self.test_interval) {
+            self.test_interval = DEFAULT_TEST_INTERVAL.to_string();
+            warnings.push("test interval is not a valid duration; reset to default".to_string());
+        }
+        if !is_go_duration(&self.idle_timeout) {
+            self.idle_timeout = DEFAULT_IDLE_TIMEOUT.to_string();
+            warnings.push("idle timeout is not a valid duration; reset to default".to_string());
+        }
         let dns_servers = clean_dns_servers(&self.dns_servers);
         if !self.dns_servers.is_empty() && dns_servers != self.dns_servers {
             warnings.push("DNS servers must be IP literals; invalid entries removed".to_string());
@@ -215,9 +259,9 @@ impl Default for Config {
                 .map(|server| server.to_string())
                 .collect(),
             test_url: DEFAULT_TEST_URL.to_string(),
-            test_interval: "3m".to_string(),
+            test_interval: DEFAULT_TEST_INTERVAL.to_string(),
             tolerance_ms: 50,
-            idle_timeout: "30m".to_string(),
+            idle_timeout: DEFAULT_IDLE_TIMEOUT.to_string(),
             keywords_include: Vec::new(),
             keywords_exclude: Vec::new(),
             subscription_refresh_hours: 24,
@@ -475,10 +519,22 @@ mod tests {
     }
 
     #[test]
+    fn go_duration_validation_accepts_sing_box_values() {
+        for value in ["0s", "300ms", "3m", "1h30m", "1.5h", ".5s", "20µs"] {
+            assert!(is_go_duration(value), "{value}");
+        }
+        for value in ["", "3", "3x", "-3s", "1.2.3s", "3m 1s", "h"] {
+            assert!(!is_go_duration(value), "{value}");
+        }
+    }
+
+    #[test]
     fn validation_cleans_invalid_values() {
         let mut config = Config::default();
         config.port = 0;
         config.test_url = "http://example.com".into();
+        config.test_interval = "3x".into();
+        config.idle_timeout = "".into();
         config.keywords_include = vec![" 香港 ".into(), "".into(), "香港".into()];
         config.github_mirrors = vec!["http://bad".into(), "https://ok/".into()];
         config.dns_servers = vec![
@@ -491,6 +547,8 @@ mod tests {
         assert!(!warnings.is_empty());
         assert_eq!(config.port, 12000);
         assert_eq!(config.test_url, DEFAULT_TEST_URL);
+        assert_eq!(config.test_interval, DEFAULT_TEST_INTERVAL);
+        assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
         assert_eq!(config.keywords_include, vec!["香港"]);
         assert_eq!(config.github_mirrors, vec!["https://ok/"]);
         assert_eq!(config.dns_servers, vec!["1.1.1.1", "8.8.8.8"]);

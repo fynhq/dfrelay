@@ -109,6 +109,32 @@ enum ServiceCommand {
     Forget,
 }
 
+/// Commands that run after configuration loading. `Service` must be handled
+/// before `Config`/`Logger` are created, so it has no variant here.
+#[derive(Debug, Clone)]
+enum RuntimeCommand {
+    Start,
+    Stop,
+    Restart,
+    Status,
+    Serve,
+    Update(UpdateCommand),
+}
+
+impl Command {
+    fn into_runtime(self) -> Option<RuntimeCommand> {
+        match self {
+            Command::Start => Some(RuntimeCommand::Start),
+            Command::Stop => Some(RuntimeCommand::Stop),
+            Command::Restart => Some(RuntimeCommand::Restart),
+            Command::Status => Some(RuntimeCommand::Status),
+            Command::Serve => Some(RuntimeCommand::Serve),
+            Command::Update { action } => Some(RuntimeCommand::Update(action)),
+            Command::Service { .. } => None,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -127,14 +153,14 @@ async fn main() -> anyhow::Result<()> {
         logger.app(LogLevel::Warn, warning);
     }
 
-    match cli.command {
-        Some(Command::Start) => return start_daemon(&cli, &paths).await,
-        Some(Command::Stop) => return stop_daemon(&paths).await,
-        Some(Command::Restart) => return restart_daemon(&cli, &paths).await,
-        Some(Command::Status) => return print_status(&paths).await,
-        Some(Command::Serve) => return serve(config, paths, logger).await,
-        Some(Command::Service { action }) => return service_command(&paths, action).await,
-        Some(Command::Update { action }) => {
+    let command = cli.command.clone().and_then(Command::into_runtime);
+    match command {
+        Some(RuntimeCommand::Start) => return start_daemon(&cli, &paths).await,
+        Some(RuntimeCommand::Stop) => return stop_daemon(&paths).await,
+        Some(RuntimeCommand::Restart) => return restart_daemon(&cli, &paths).await,
+        Some(RuntimeCommand::Status) => return print_status(&paths).await,
+        Some(RuntimeCommand::Serve) => return serve(config, paths, logger).await,
+        Some(RuntimeCommand::Update(action)) => {
             return update_command(&paths, &config, &logger, action).await;
         }
         None => {}
@@ -175,6 +201,14 @@ async fn serve(config: Config, paths: Paths, logger: Logger) -> anyhow::Result<(
             if managed { " (service-managed)" } else { "" }
         ),
     );
+    let _daemon_lock = match ipc::acquire_daemon_lock(&paths.data_dir) {
+        Ok(lock) => lock,
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            logger.app(LogLevel::Warn, "daemon already running");
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
     let socket = paths.control_socket();
     let listener = match ipc::bind_listener(&socket).await {
         Ok(listener) => listener,
@@ -481,9 +515,15 @@ async fn update_command(
             target,
             version,
         } => {
-            update::apply_staged(paths, &staged, &target, &version, logger)
-                .await
-                .context("apply the staged DFRelay update")?;
+            let result = update::apply_staged(paths, &staged, &target, &version, logger).await;
+            if let Err(err) = &result {
+                // Early failures (lock contention, staged integrity, target
+                // permissions, stop/install errors) never reach the rollback
+                // path, so the daemon would otherwise retry the same staged
+                // update forever.
+                update::record_helper_failure(paths, &version, err);
+            }
+            result.context("apply the staged DFRelay update")?;
         }
     }
     Ok(())

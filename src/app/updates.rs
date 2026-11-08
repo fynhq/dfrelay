@@ -114,6 +114,7 @@ impl App {
         if update::load_state(&self.paths).failed_recently(&pending_version) {
             self.pending_app_update = None;
             self.app_update_in_flight = false;
+            self.app_update_apply_started = None;
             self.app_update_deferred_logged = false;
             self.logger.app(
                 LogLevel::Info,

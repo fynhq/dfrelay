@@ -71,6 +71,17 @@ pub fn enforce_private_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub fn set_executable(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = open_private_file(path, false)?;
     file.write_all(bytes)?;
