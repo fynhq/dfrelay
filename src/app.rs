@@ -45,6 +45,8 @@ const HEALTH_NO_NODE_BACKOFF_SECS: [u64; 3] = [60, 120, 300];
 const HEALTH_REFRESH_COOLDOWN: Duration = Duration::from_secs(600);
 const PROXY_IP_STARTUP_GRACE: Duration = Duration::from_secs(30);
 const SUBSCRIPTION_STARTUP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+const SUBSCRIPTION_REFRESH_MIN_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const SUBSCRIPTION_REFRESH_MAX_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_METRICS_INTERVAL: Duration = Duration::from_secs(3);
@@ -711,6 +713,8 @@ pub struct App {
     subscription_seq: u64,
     subscription_refresh_seq: HashMap<String, u64>,
     pub last_subscription_refresh: Option<Instant>,
+    subscription_refresh_retry_at: Option<Instant>,
+    subscription_refresh_backoff: Duration,
     app_update_in_flight: bool,
     app_update_downloading: bool,
     pending_app_update: Option<PendingAppUpdate>,
@@ -969,6 +973,8 @@ impl App {
             subscription_seq: 0,
             subscription_refresh_seq: HashMap::new(),
             last_subscription_refresh: startup_cache_fresh.then(Instant::now),
+            subscription_refresh_retry_at: None,
+            subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
             app_update_in_flight: false,
             app_update_downloading: false,
             pending_app_update: staged_update.map(|(version, staged)| PendingAppUpdate {
@@ -1226,7 +1232,6 @@ impl App {
                 self.refreshing_subscriptions = false;
                 let recovery_refresh = self.recovery_refresh_pending;
                 self.recovery_refresh_pending = false;
-                self.last_subscription_refresh = Some(Instant::now());
                 let mut accepted: HashMap<String, SubscriptionRuntime> = runtimes
                     .into_iter()
                     .filter(|runtime| {
@@ -1261,9 +1266,29 @@ impl App {
                     None
                 };
                 let node_count: usize = ordered.iter().map(|item| item.nodes.len()).sum();
+                let capped = node_count > subscription::MAX_TOTAL_NODES;
                 self.nodes = merge_nodes(&ordered);
+                if capped {
+                    self.logger.app(
+                        LogLevel::Warn,
+                        format!(
+                            "node cap reached: {node_count} parsed, {} merged (limit {})",
+                            self.nodes.len(),
+                            subscription::MAX_TOTAL_NODES
+                        ),
+                    );
+                }
                 self.prune_node_state();
                 self.subscriptions = ordered;
+                if self
+                    .subscriptions
+                    .iter()
+                    .any(|runtime| runtime.config.enabled && runtime.error.is_some())
+                {
+                    self.schedule_subscription_retry();
+                } else {
+                    self.subscription_refresh_succeeded();
+                }
                 self.sync_preferred_node();
                 self.selected = selected_tag
                     .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
@@ -2019,6 +2044,7 @@ impl App {
             BackgroundTask::SubscriptionRefresh => {
                 self.refreshing_subscriptions = false;
                 self.recovery_refresh_pending = false;
+                self.schedule_subscription_retry();
             }
             BackgroundTask::ProxyStart => {
                 self.restart_in_progress = false;
@@ -2847,15 +2873,7 @@ impl App {
         self.maybe_probe_health();
         self.maybe_check_app_update();
         self.maybe_apply_app_update();
-        if self.config.subscription_refresh_hours > 0
-            && self.config.enabled_subscriptions().next().is_some()
-            && self.last_subscription_refresh.is_none_or(|last| {
-                last.elapsed()
-                    >= Duration::from_secs(
-                        self.config.subscription_refresh_hours.saturating_mul(3600),
-                    )
-            })
-        {
+        if self.subscription_refresh_due() {
             self.refresh_subscriptions();
             changed = true;
         }
@@ -4850,5 +4868,47 @@ mod tests {
             .to_string();
         let (app, _dir) = app_with_cached_subscription(Some(old)).await;
         assert!(app.refreshing_subscriptions);
+    }
+
+    #[tokio::test]
+    async fn failed_subscription_refresh_schedules_retry() {
+        let (mut app, _dir) = test_app().await;
+        let config = SubscriptionConfig {
+            id: "s-1".to_string(),
+            name: "test".to_string(),
+            url: "https://example.com/sub".to_string(),
+            enabled: true,
+        };
+        app.config.subscriptions.push(config.clone());
+        let previous = Instant::now() - Duration::from_secs(25 * 3600);
+        app.last_subscription_refresh = Some(previous);
+        let seq = app.next_subscription_seq();
+        app.subscription_refresh_seq.insert(config.id.clone(), seq);
+        let mut runtime = empty_runtime(config);
+        runtime.error = Some("timeout".to_string());
+
+        app.handle_event(AppEvent::Subscriptions {
+            seq,
+            runtimes: vec![runtime],
+        })
+        .await;
+
+        assert_eq!(app.last_subscription_refresh, Some(previous));
+        assert!(app.subscription_refresh_retry_at.is_some());
+        assert!(!app.subscription_refresh_due());
+
+        let seq = app.next_subscription_seq();
+        app.subscription_refresh_seq.insert("s-1".to_string(), seq);
+        let mut runtime = empty_runtime(app.config.subscriptions[0].clone());
+        runtime.nodes = vec![node("fresh")];
+        app.handle_event(AppEvent::Subscriptions {
+            seq,
+            runtimes: vec![runtime],
+        })
+        .await;
+        assert!(app.subscription_refresh_retry_at.is_none());
+        assert!(app
+            .last_subscription_refresh
+            .is_some_and(|last| last > previous));
     }
 }

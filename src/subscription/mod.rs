@@ -17,6 +17,20 @@ use fetch::fetch_subscription;
 pub use fetch::FetchOptions;
 use model::Node;
 
+/// Per-source node cap. A subscription body is limited to 10 MiB, but a short
+/// URI line can still expand into hundreds of thousands of nodes; bound the
+/// parsed result before it reaches config generation.
+pub const MAX_NODES_PER_SOURCE: usize = 2000;
+/// Per-source unsupported-entry cap: malformed lines allocate names/reasons too.
+pub const MAX_UNSUPPORTED_PER_SOURCE: usize = 500;
+/// Cap across all enabled subscriptions. Users control the number of sources,
+/// so this is a process-memory guard rather than a remote input bound.
+pub const MAX_TOTAL_NODES: usize = 5000;
+
+pub(crate) fn node_limit_error(kind: &str, limit: usize) -> String {
+    format!("subscription contains more than {limit} {kind}; rejected to bound memory use")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionRuntime {
     pub config: SubscriptionConfig,
@@ -156,8 +170,11 @@ pub async fn refresh_all(
 pub fn merge_nodes(runtimes: &[SubscriptionRuntime]) -> Vec<Node> {
     let mut seen = HashSet::new();
     let mut nodes = Vec::new();
-    for runtime in runtimes {
+    'runtimes: for runtime in runtimes {
         for node in &runtime.nodes {
+            if nodes.len() >= MAX_TOTAL_NODES {
+                break 'runtimes;
+            }
             if seen.insert(node.tag.clone()) {
                 nodes.push(node.clone());
             }
@@ -218,6 +235,15 @@ mod tests {
         let c = node("C", "other");
         let merged = merge_nodes(&[runtime(vec![a, c]), runtime(vec![b])]);
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn merge_caps_total_nodes() {
+        let nodes: Vec<Node> = (0..MAX_TOTAL_NODES + 10)
+            .map(|index| node(&format!("n{index}"), &format!("p{index}")))
+            .collect();
+        let merged = merge_nodes(&[runtime(nodes)]);
+        assert_eq!(merged.len(), MAX_TOTAL_NODES);
     }
 
     #[test]

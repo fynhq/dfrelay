@@ -34,8 +34,24 @@ pub fn parse_clash_document(
         };
         let name = yaml_str(map, "name").unwrap_or("unnamed").to_string();
         match parse_proxy(map, source) {
-            Ok(node) => nodes.push(node),
-            Err(reason) => unsupported.push((name, reason)),
+            Ok(node) => {
+                if nodes.len() >= super::MAX_NODES_PER_SOURCE {
+                    return Err(super::node_limit_error(
+                        "nodes",
+                        super::MAX_NODES_PER_SOURCE,
+                    ));
+                }
+                nodes.push(node);
+            }
+            Err(reason) => {
+                if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
+                    return Err(super::node_limit_error(
+                        "unsupported entries",
+                        super::MAX_UNSUPPORTED_PER_SOURCE,
+                    ));
+                }
+                unsupported.push((name, reason));
+            }
         }
     }
     Ok((nodes, unsupported))
@@ -729,5 +745,17 @@ proxies:
         assert_eq!(nodes[0].outbound["tls"]["server_name"], "proxy.example.com");
         assert_eq!(unsupported.len(), 1);
         assert!(unsupported[0].1.contains("unsupported transport"));
+    }
+
+    #[test]
+    fn clash_rejects_too_many_nodes() {
+        let mut yaml = String::from("proxies:\n");
+        for index in 1..=super::super::MAX_NODES_PER_SOURCE + 1 {
+            yaml.push_str(&format!(
+                "  - name: n{index}\n    type: ss\n    server: example.com\n    port: {index}\n    cipher: aes-128-gcm\n    password: p\n"
+            ));
+        }
+        let err = parse_clash(&yaml, "test").unwrap_err();
+        assert!(err.contains("more than"), "{err}");
     }
 }

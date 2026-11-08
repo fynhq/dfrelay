@@ -140,7 +140,7 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
 
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            if let Some(outcome) = parse_sing_box_json(&value, source) {
+            if let Some(outcome) = parse_sing_box_json(&value, source)? {
                 return Ok(outcome);
             }
         }
@@ -172,7 +172,7 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
 
     if let Some(decoded) = decode_base64_text(trimmed) {
         if decoded.contains("://") {
-            let (nodes, unsupported) = parse_uri_list(&decoded, source);
+            let (nodes, unsupported) = parse_uri_list(&decoded, source)?;
             if !nodes.is_empty() || !unsupported.is_empty() {
                 return Ok(ParseOutcome {
                     nodes,
@@ -186,7 +186,7 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
     }
 
     if trimmed.contains("://") {
-        let (nodes, unsupported) = parse_uri_list(trimmed, source);
+        let (nodes, unsupported) = parse_uri_list(trimmed, source)?;
         if !nodes.is_empty() || !unsupported.is_empty() {
             return Ok(ParseOutcome {
                 nodes,
@@ -285,11 +285,14 @@ fn validate_sing_box_node(
     Ok(())
 }
 
-fn parse_sing_box_json(value: &Value, source: &str) -> Option<ParseOutcome> {
-    let outbounds = value
+fn parse_sing_box_json(value: &Value, source: &str) -> Result<Option<ParseOutcome>, String> {
+    let Some(outbounds) = value
         .get("outbounds")
         .and_then(Value::as_array)
-        .or_else(|| value.as_array())?;
+        .or_else(|| value.as_array())
+    else {
+        return Ok(None);
+    };
     let mut nodes = Vec::new();
     let mut unsupported = Vec::new();
     for outbound in outbounds {
@@ -313,6 +316,12 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Option<ParseOutcome> {
         let port = match u16::try_from(port) {
             Ok(port) if port > 0 => port,
             _ => {
+                if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
+                    return Err(super::node_limit_error(
+                        "unsupported entries",
+                        super::MAX_UNSUPPORTED_PER_SOURCE,
+                    ));
+                }
                 unsupported.push(UnsupportedNode {
                     name,
                     reason: "invalid server_port".to_string(),
@@ -321,8 +330,20 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Option<ParseOutcome> {
             }
         };
         if let Err(reason) = validate_sing_box_node(object, kind) {
+            if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
+                return Err(super::node_limit_error(
+                    "unsupported entries",
+                    super::MAX_UNSUPPORTED_PER_SOURCE,
+                ));
+            }
             unsupported.push(UnsupportedNode { name, reason });
             continue;
+        }
+        if nodes.len() >= super::MAX_NODES_PER_SOURCE {
+            return Err(super::node_limit_error(
+                "nodes",
+                super::MAX_NODES_PER_SOURCE,
+            ));
         }
         let mut outbound = outbound.clone();
         if let Some(object) = outbound.as_object_mut() {
@@ -339,9 +360,9 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Option<ParseOutcome> {
         ));
     }
     if nodes.is_empty() && unsupported.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(ParseOutcome { nodes, unsupported })
+    Ok(Some(ParseOutcome { nodes, unsupported }))
 }
 
 /// Remove every `detour` reference from a single outbound.
@@ -520,5 +541,24 @@ mod tests {
         assert!(ensure_alias_budget("a: x").is_ok());
         assert!(ensure_alias_budget("a: *x").is_err());
         assert!(ensure_alias_budget("name: \"a*b\"").is_ok());
+    }
+
+    #[test]
+    fn sing_box_json_rejects_too_many_nodes() {
+        let outbounds: Vec<Value> = (1..=super::super::MAX_NODES_PER_SOURCE + 1)
+            .map(|port| {
+                serde_json::json!({
+                    "type": "shadowsocks",
+                    "tag": format!("n{port}"),
+                    "server": "example.com",
+                    "server_port": port,
+                    "method": "aes-128-gcm",
+                    "password": "p"
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "outbounds": outbounds }).to_string();
+        let err = detect_and_parse(&body, "test").unwrap_err();
+        assert!(err.contains("more than"), "{err}");
     }
 }

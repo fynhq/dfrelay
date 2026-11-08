@@ -17,7 +17,6 @@ impl App {
             return;
         }
         self.refreshing_subscriptions = true;
-        self.last_subscription_refresh = Some(Instant::now());
         let seq = self.next_subscription_seq();
         for config in &configs {
             self.subscription_refresh_seq.insert(config.id.clone(), seq);
@@ -34,6 +33,39 @@ impl App {
                 subscription::refresh_all(&configs, &FetchOptions::default(), &previous).await;
             let _ = tx.send(AppEvent::Subscriptions { seq, runtimes });
         });
+    }
+
+    pub(super) fn subscription_refresh_due(&self) -> bool {
+        if self.refreshing_subscriptions
+            || self.config.subscription_refresh_hours == 0
+            || self.config.enabled_subscriptions().next().is_none()
+        {
+            return false;
+        }
+        let now = Instant::now();
+        if self
+            .subscription_refresh_retry_at
+            .is_some_and(|at| at > now)
+        {
+            return false;
+        }
+        let interval =
+            Duration::from_secs(self.config.subscription_refresh_hours.saturating_mul(3600));
+        self.last_subscription_refresh
+            .is_none_or(|last| last.elapsed() >= interval)
+    }
+
+    pub(super) fn subscription_refresh_succeeded(&mut self) {
+        self.last_subscription_refresh = Some(Instant::now());
+        self.subscription_refresh_retry_at = None;
+        self.subscription_refresh_backoff = SUBSCRIPTION_REFRESH_MIN_BACKOFF;
+    }
+
+    pub(super) fn schedule_subscription_retry(&mut self) {
+        self.subscription_refresh_retry_at =
+            Some(Instant::now() + self.subscription_refresh_backoff);
+        self.subscription_refresh_backoff =
+            (self.subscription_refresh_backoff * 2).min(SUBSCRIPTION_REFRESH_MAX_BACKOFF);
     }
 
     pub(super) fn save_subscription_cache(&self) {

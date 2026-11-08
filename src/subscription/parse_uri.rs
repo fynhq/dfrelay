@@ -11,7 +11,9 @@ use super::outbound::{
     ensure_tuic_congestion, ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
 };
 
-pub fn parse_uri_list(text: &str, source: &str) -> (Vec<Node>, Vec<(String, String)>) {
+pub type UriParseOutput = (Vec<Node>, Vec<(String, String)>);
+
+pub fn parse_uri_list(text: &str, source: &str) -> Result<UriParseOutput, String> {
     let mut nodes = Vec::new();
     let mut unsupported = Vec::new();
     for line in text.lines() {
@@ -23,11 +25,27 @@ pub fn parse_uri_list(text: &str, source: &str) -> (Vec<Node>, Vec<(String, Stri
             continue;
         }
         match parse_uri(line, source) {
-            Ok(node) => nodes.push(node),
-            Err(reason) => unsupported.push((short_name(line), reason)),
+            Ok(node) => {
+                if nodes.len() >= super::MAX_NODES_PER_SOURCE {
+                    return Err(super::node_limit_error(
+                        "nodes",
+                        super::MAX_NODES_PER_SOURCE,
+                    ));
+                }
+                nodes.push(node);
+            }
+            Err(reason) => {
+                if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
+                    return Err(super::node_limit_error(
+                        "unsupported entries",
+                        super::MAX_UNSUPPORTED_PER_SOURCE,
+                    ));
+                }
+                unsupported.push((short_name(line), reason));
+            }
         }
     }
-    (nodes, unsupported)
+    Ok((nodes, unsupported))
 }
 
 pub fn parse_uri(uri: &str, source: &str) -> Result<Node, String> {
@@ -879,7 +897,7 @@ mod tests {
     #[test]
     fn unsupported_names_do_not_expose_userinfo() {
         let (_, unsupported) =
-            parse_uri_list("trojan://user:secret@example.com:443?type=quic#bad", "test");
+            parse_uri_list("trojan://user:secret@example.com:443?type=quic#bad", "test").unwrap();
         assert_eq!(unsupported.len(), 1);
         assert_eq!(unsupported[0].0, "trojan://example.com");
         assert!(!unsupported[0].0.contains("secret"));
@@ -890,7 +908,8 @@ mod tests {
         let (_, unsupported) = parse_uri_list(
             "vmess://eyJpZCI6InNlY3JldC11dWlkIn0=\nss://YWVzLTEyOC1nY206c2VjcmV0@example.com:0#bad",
             "test",
-        );
+        )
+        .unwrap();
         assert_eq!(unsupported.len(), 2);
         assert_eq!(unsupported[0].0, "vmess://…");
         assert!(!unsupported[0].0.contains("secret"));
@@ -918,8 +937,24 @@ mod tests {
     #[test]
     fn uri_list_skips_comments_and_reports_bad_lines() {
         let text = "# comment\nss://YWVzLTEyOC1nY206c2VjcmV0@example.com:443#a\nwireguard://x\n";
-        let (nodes, unsupported) = parse_uri_list(text, "test");
+        let (nodes, unsupported) = parse_uri_list(text, "test").unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(unsupported.len(), 1);
+    }
+
+    #[test]
+    fn uri_list_rejects_too_many_nodes() {
+        let text: String = (1..=super::super::MAX_NODES_PER_SOURCE + 1)
+            .map(|port| format!("ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:{port}#n{port}\n"))
+            .collect();
+        let err = parse_uri_list(&text, "test").unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+    }
+
+    #[test]
+    fn uri_list_rejects_too_many_unsupported_entries() {
+        let text = "wireguard://x\n".repeat(super::super::MAX_UNSUPPORTED_PER_SOURCE + 1);
+        let err = parse_uri_list(&text, "test").unwrap_err();
+        assert!(err.contains("unsupported entries"), "{err}");
     }
 }

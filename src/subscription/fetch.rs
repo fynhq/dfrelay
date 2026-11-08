@@ -41,8 +41,14 @@ pub enum FetchError {
     Resolve(String),
     #[error("redirect to a non-public address is not allowed")]
     BlockedRedirect,
+    #[error("redirect to a non-HTTPS URL is not allowed")]
+    InsecureRedirect,
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
+}
+
+fn redirect_scheme_allowed(initial_https: bool, scheme: &str) -> bool {
+    scheme == "https" || (scheme == "http" && !initial_https)
 }
 
 pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<String, FetchError> {
@@ -50,14 +56,19 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
         return Err(FetchError::InvalidUrl);
     }
     let mut current = url::Url::parse(url).map_err(|_| FetchError::InvalidUrl)?;
+    let initial_https = current.scheme() == "https";
 
     // Redirects are followed manually so every hop can be checked against the
     // private/loopback/link-local ranges. The initial URL is user-provided and
     // may legitimately point at a LAN address; only provider-controlled
     // redirect targets are restricted.
     for hop in 0..=MAX_REDIRECTS {
-        if current.scheme() != "http" && current.scheme() != "https" {
-            return Err(FetchError::InvalidUrl);
+        if !redirect_scheme_allowed(initial_https, current.scheme()) {
+            return if initial_https && current.scheme() == "http" {
+                Err(FetchError::InsecureRedirect)
+            } else {
+                Err(FetchError::InvalidUrl)
+            };
         }
         // Resolve once and pin the same addresses for validation and for the
         // actual connection. Resolving again in `fetch_hop` would leave a
@@ -214,6 +225,14 @@ mod tests {
         let text = err.to_string();
         assert!(!text.contains("secret"), "{text}");
         assert!(!text.contains("/sub"), "{text}");
+    }
+
+    #[test]
+    fn rejects_https_to_http_downgrade() {
+        assert!(redirect_scheme_allowed(true, "https"));
+        assert!(!redirect_scheme_allowed(true, "http"));
+        assert!(redirect_scheme_allowed(false, "http"));
+        assert!(redirect_scheme_allowed(false, "https"));
     }
 
     #[test]
