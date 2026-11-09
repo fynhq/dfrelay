@@ -368,6 +368,9 @@ async fn restart_daemon(cli: &Cli, paths: &Paths) -> anyhow::Result<()> {
             return Ok(());
         }
         ipc::control_shutdown(&socket).await?;
+        wait_for_daemon_lock(&paths.data_dir, Duration::from_secs(5))
+            .await
+            .context("wait for the previous DFRelay daemon to exit")?;
         ipc::spawn_daemon(cli.config.clone(), cli.data_dir.clone())
             .context("spawn DFRelay daemon")?;
         wait_for_socket(&socket, Duration::from_secs(8)).await?;
@@ -617,6 +620,27 @@ async fn wait_for_socket_gone(socket: &Path, timeout: Duration) -> anyhow::Resul
     bail!("DFRelay daemon is still running after the service stop request")
 }
 
+// The daemon removes its control socket before exiting, so control_shutdown
+// returning does not mean the old process has released the flock.
+async fn wait_for_daemon_lock(data_dir: &Path, timeout: Duration) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match ipc::acquire_daemon_lock(data_dir) {
+            Ok(lock) => {
+                drop(lock);
+                return Ok(());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    bail!("DFRelay daemon did not release its startup lock");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
 async fn wait_for_new_daemon(
     socket: &Path,
     old_pid: u32,
@@ -824,5 +848,30 @@ mod tests {
         assert_eq!(format_uptime(9), "00:09");
         assert_eq!(format_uptime(61), "01:01");
         assert_eq!(format_uptime(3601), "01:00:01");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_lock_wait_returns_after_release() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let lock = ipc::acquire_daemon_lock(dir.path()).unwrap();
+        let waiter = tokio::spawn({
+            let dir = dir.path().to_path_buf();
+            async move { wait_for_daemon_lock(&dir, Duration::from_secs(2)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(lock);
+        waiter.await.unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_lock_wait_times_out_when_held() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let _lock = ipc::acquire_daemon_lock(dir.path()).unwrap();
+        let err = wait_for_daemon_lock(dir.path(), Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("did not release"), "{err}");
     }
 }
