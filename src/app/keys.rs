@@ -790,7 +790,6 @@ impl App {
             SettingsItem::KeywordsInclude => self.open_keyword_form(KeywordField::Include),
             SettingsItem::KeywordsExclude => self.open_keyword_form(KeywordField::Exclude),
             SettingsItem::AppLogLevel => self.cycle_app_log_level(),
-            SettingsItem::AppUpdate => self.cycle_app_update_policy(),
             SettingsItem::BinaryInfo => self.open_setup_overlay(),
             SettingsItem::Port
             | SettingsItem::DnsServers
@@ -807,7 +806,6 @@ impl App {
             SettingsItem::TestUrl => self.config.test_url.clone(),
             SettingsItem::ConfigPath => self.paths.config_file.display().to_string(),
             SettingsItem::LogFile => self.logger.current_file().display().to_string(),
-            SettingsItem::AppUpdate => self.config.app_update.as_str().to_string(),
             _ => String::new(),
         }
     }

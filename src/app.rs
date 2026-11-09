@@ -27,7 +27,6 @@ use crate::state::{
 use crate::subscription::model::Node;
 use crate::subscription::{self, merge_nodes, FetchOptions, SubscriptionRuntime};
 use crate::text::sanitize_display;
-use crate::update;
 use crate::view::{BinaryStatus, DaemonStatus, View};
 
 mod health;
@@ -144,8 +143,6 @@ pub enum BackgroundTask {
     BinaryInstall,
     BinaryRollback,
     BinaryUpdateCheck,
-    AppUpdateCheck,
-    AppUpdateDownload,
     Preflight,
     Metrics,
     DelayTest,
@@ -199,8 +196,6 @@ pub enum AppEvent {
     HelpViewport(usize),
     LogDetailViewport(usize),
     UpdateCheckDone(Result<String, String>),
-    AppUpdateChecked(Result<Option<update::ReleaseInfo>, String>),
-    AppUpdateStaged(Result<(update::ReleaseInfo, PathBuf), String>),
     RollbackDone(Result<BinaryMetadata, String>),
     Info(String),
     Error(String),
@@ -226,12 +221,6 @@ pub enum AppEvent {
 struct ClientHandle {
     viewer: bool,
     tx: mpsc::Sender<ServerMsg>,
-}
-
-struct PendingAppUpdate {
-    version: String,
-    staged: PathBuf,
-    since: Instant,
 }
 
 pub struct App {
@@ -320,13 +309,6 @@ pub struct App {
     pub last_subscription_refresh: Option<Instant>,
     subscription_refresh_retry_at: Option<Instant>,
     subscription_refresh_backoff: Duration,
-    app_update_in_flight: bool,
-    app_update_downloading: bool,
-    pending_app_update: Option<PendingAppUpdate>,
-    app_update_deferred_logged: bool,
-    last_app_update_check: Option<Instant>,
-    app_update_retry_at: Option<Instant>,
-    app_update_apply_started: Option<Instant>,
     pub preferred_node: Option<String>,
     runtime_has_auto: bool,
     selection_generation: Arc<AtomicU64>,
@@ -479,25 +461,6 @@ impl App {
         let cached_nodes = merge_nodes(&cached_subscriptions);
         let startup_cache_fresh = cached_subscription_age(&cached_subscriptions)
             .is_some_and(|age| age < SUBSCRIPTION_STARTUP_MAX_AGE);
-        let update_state = update::load_state(&paths);
-        let staged_update = update::discover_staged(&paths)
-            .filter(|(version, _)| !update_state.failed_recently(version));
-        update::cleanup_stale_staged(
-            &paths,
-            staged_update.as_ref().map(|(version, _)| version.as_str()),
-        );
-        // A recorded but unstaged update means the last check only reported it
-        // (for example `dfr update check`). Check once so notify/auto can
-        // stage it instead of waiting for the daily interval.
-        let unstaged_available =
-            update_state.available_update().is_some() && staged_update.is_none();
-        let last_app_update_check = update_state
-            .last_check_unix
-            .and_then(|at| {
-                let age = chrono::Local::now().timestamp().saturating_sub(at);
-                (age >= 0 && (age as u64) < update::CHECK_INTERVAL.as_secs()).then(Instant::now)
-            })
-            .filter(|_| !unstaged_available);
         let has_enabled = config.enabled_subscriptions().next().is_some();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let mut app = Self {
@@ -586,17 +549,6 @@ impl App {
             last_subscription_refresh: startup_cache_fresh.then(Instant::now),
             subscription_refresh_retry_at: None,
             subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
-            app_update_in_flight: false,
-            app_update_downloading: false,
-            pending_app_update: staged_update.map(|(version, staged)| PendingAppUpdate {
-                version,
-                staged,
-                since: Instant::now(),
-            }),
-            app_update_deferred_logged: false,
-            last_app_update_check,
-            app_update_retry_at: None,
-            app_update_apply_started: None,
             preferred_node: None,
             runtime_has_auto: false,
             selection_generation: Arc::new(AtomicU64::new(0)),
@@ -616,12 +568,6 @@ impl App {
         };
         if has_enabled && !startup_cache_fresh {
             app.refresh_subscriptions();
-        }
-        if let Some(pending) = &app.pending_app_update {
-            app.logger.app(
-                LogLevel::Info,
-                format!("app update: v{} is staged", pending.version),
-            );
         }
         app.refresh_previous_binary_state();
         app.maybe_check_binary_update();
@@ -773,10 +719,6 @@ impl App {
             },
             log_file: self.logger.current_file(),
             last_error: self.last_error.as_deref().map(sanitize_display),
-            pending_app_update: self
-                .pending_app_update
-                .as_ref()
-                .map(|pending| sanitize_display(&pending.version)),
             toast,
             restart_confirm: self.restart_confirm,
             rollback_confirm: self.rollback_confirm,
@@ -1375,85 +1317,6 @@ impl App {
                     }
                 }
             }
-            AppEvent::AppUpdateChecked(result) => {
-                self.app_update_in_flight = false;
-                self.app_update_retry_at = None;
-                match result {
-                    Ok(Some(release)) => {
-                        let _ = update::record_check_result(&self.paths, Some(&release.version));
-                        if update::load_state(&self.paths).failed_recently(&release.version) {
-                            self.logger.app(
-                                LogLevel::Info,
-                                format!(
-                                    "app update: v{} failed before; skipped until cooldown ends",
-                                    release.version
-                                ),
-                            );
-                            return;
-                        }
-                        if self.app_update_downloading {
-                            return;
-                        }
-                        self.app_update_downloading = true;
-                        self.logger.app(
-                            LogLevel::Info,
-                            format!("app update: v{} available", release.version),
-                        );
-                        let config = self.config.clone();
-                        let paths = self.paths.clone();
-                        let logger = self.logger.clone();
-                        let tx = self.events_tx.clone();
-                        self.spawn_guarded(BackgroundTask::AppUpdateDownload, async move {
-                            let result =
-                                update::download_and_stage(&config, &paths, &release, &logger)
-                                    .await;
-                            let event = match result {
-                                Ok(staged) => Ok((release, staged)),
-                                Err(err) => Err(err.to_string()),
-                            };
-                            let _ = tx.send(AppEvent::AppUpdateStaged(event));
-                        });
-                    }
-                    Ok(None) => {
-                        let _ = update::record_check_result(&self.paths, None);
-                        self.logger
-                            .app(LogLevel::Debug, "app update: already up to date");
-                    }
-                    Err(err) => {
-                        self.last_app_update_check = None;
-                        self.app_update_retry_at = Some(Instant::now() + Duration::from_secs(3600));
-                        self.logger.app(
-                            LogLevel::Debug,
-                            format!("app update check failed: {err}; retrying in 1h"),
-                        );
-                    }
-                }
-            }
-            AppEvent::AppUpdateStaged(result) => {
-                self.app_update_downloading = false;
-                match result {
-                    Ok((release, staged)) => {
-                        self.pending_app_update = Some(PendingAppUpdate {
-                            version: release.version.clone(),
-                            staged,
-                            since: Instant::now(),
-                        });
-                        self.app_update_deferred_logged = false;
-                        self.notify(format!(
-                            "{}: v{}",
-                            self.text().msg_app_update_ready,
-                            release.version
-                        ));
-                        self.logger.app(
-                            LogLevel::Info,
-                            format!("app update: v{} downloaded and verified", release.version),
-                        );
-                    }
-                    Err(err) => self
-                        .logger
-                        .app(LogLevel::Warn, format!("app update failed: {err}")),
-                }
-            }
             AppEvent::RollbackDone(result) => {
                 self.setup.rollback_in_flight = false;
                 self.rollback_confirm = false;
@@ -1706,8 +1569,6 @@ impl App {
             }
             BackgroundTask::BinaryRollback => self.setup.rollback_in_flight = false,
             BackgroundTask::BinaryUpdateCheck => self.update_check_in_flight = false,
-            BackgroundTask::AppUpdateCheck => self.app_update_in_flight = false,
-            BackgroundTask::AppUpdateDownload => self.app_update_downloading = false,
             BackgroundTask::Preflight => {
                 self.preflight_in_flight = false;
                 self.restart_in_progress = false;
@@ -2570,8 +2431,6 @@ impl App {
             }
         }
         self.maybe_probe_health();
-        self.maybe_check_app_update();
-        self.maybe_apply_app_update();
         if self.subscription_refresh_due() {
             self.refresh_subscriptions();
             changed = true;

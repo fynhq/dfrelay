@@ -8,7 +8,6 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::config::UpdatePolicy;
 use crate::i18n::Text;
 use crate::logging::{LogLevel, LogLine, LogSource};
 use crate::state::{
@@ -838,18 +837,6 @@ fn setting_content(view: &View, item: SettingsItem) -> (&'static str, String, bo
             text.settings_app_log_level,
             view.config.app_log_level.label().to_string(),
         ),
-        SettingsItem::AppUpdate => {
-            let policy = match view.config.app_update {
-                UpdatePolicy::Off => text.app_update_off,
-                UpdatePolicy::Notify => text.app_update_notify,
-                UpdatePolicy::Auto => text.app_update_auto,
-            };
-            let value = match &view.pending_app_update {
-                Some(version) => format!("{policy} · v{version}"),
-                None => policy.to_string(),
-            };
-            (text.settings_app_update, value)
-        }
         SettingsItem::BinaryInfo => (text.settings_binary_info, binary_status_text(view)),
         SettingsItem::ConfigPath => (text.settings_config_path, view.config_path.clone()),
         SettingsItem::LogFile => (text.settings_log_file, view.log_file.display().to_string()),

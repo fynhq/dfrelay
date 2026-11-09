@@ -250,13 +250,12 @@ pub enum SettingsItem {
     KeywordsInclude,
     KeywordsExclude,
     AppLogLevel,
-    AppUpdate,
     BinaryInfo,
     ConfigPath,
     LogFile,
 }
 
-pub const SETTINGS_ITEMS: [SettingsItem; 13] = [
+pub const SETTINGS_ITEMS: [SettingsItem; 12] = [
     SettingsItem::Language,
     SettingsItem::Port,
     SettingsItem::AllowLan,
@@ -266,7 +265,6 @@ pub const SETTINGS_ITEMS: [SettingsItem; 13] = [
     SettingsItem::KeywordsInclude,
     SettingsItem::KeywordsExclude,
     SettingsItem::AppLogLevel,
-    SettingsItem::AppUpdate,
     SettingsItem::BinaryInfo,
     SettingsItem::ConfigPath,
     SettingsItem::LogFile,

@@ -1060,7 +1060,6 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
-            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
@@ -1086,7 +1085,6 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
-            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
@@ -1139,7 +1137,6 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
-            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
@@ -1184,7 +1181,6 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
-            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         let binary = paths.bin_dir.join("fake-sing-box");
@@ -1209,7 +1205,6 @@ mod tests {
             runtime_dir: dir.path().join("runtime"),
             logs_dir: dir.path().join("logs"),
             inbox_dir: dir.path().join("inbox"),
-            updates_dir: dir.path().join("updates"),
         };
         paths.ensure().unwrap();
         fs::write(paths.inbox_dir.join("sing-box-1.14.4.tar.gz"), b"x").unwrap();

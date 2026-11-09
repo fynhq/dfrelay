@@ -1,6 +1,5 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::*;
-use crate::config::UpdatePolicy;
 use crate::singbox::binary::InboxCandidate;
 use crate::state::{KeywordField, SettingsField, SettingsItem};
 use tempfile::TempDir;
@@ -191,33 +190,6 @@ async fn missing_binary_opens_the_setup_popup_on_startup() {
     let app = App::new(Config::default(), paths, logger).await;
     assert_eq!(app.page, Page::Dashboard);
     assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
-}
-
-#[tokio::test]
-async fn startup_rechecks_a_recorded_unstaged_update() {
-    let dir = TempDir::new().unwrap();
-    let paths = Paths::discover(
-        Some(dir.path().join("config.toml")),
-        Some(dir.path().join("data")),
-    )
-    .unwrap();
-    paths.ensure().unwrap();
-    update::record_check_result(&paths, Some("999.0.0")).unwrap();
-    let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
-    let app = App::new(Config::default(), paths, logger).await;
-    assert!(app.last_app_update_check.is_none());
-
-    let dir = TempDir::new().unwrap();
-    let paths = Paths::discover(
-        Some(dir.path().join("config.toml")),
-        Some(dir.path().join("data")),
-    )
-    .unwrap();
-    paths.ensure().unwrap();
-    update::record_check_result(&paths, None).unwrap();
-    let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
-    let app = App::new(Config::default(), paths, logger).await;
-    assert!(app.last_app_update_check.is_some());
 }
 
 #[tokio::test]
@@ -1584,37 +1556,6 @@ async fn no_healthy_nodes_reports_the_failure_without_enabled_subscriptions() {
     assert!(app.health_pause_until.is_some_and(|at| at > Instant::now()));
     app.invalidate_health_tasks();
     assert!(app.health_pause_until.is_none());
-}
-
-#[tokio::test]
-async fn app_update_policy_cycles_and_persists() {
-    let (mut app, _dir) = test_app().await;
-    assert_eq!(app.config.app_update, UpdatePolicy::Notify);
-    app.cycle_app_update_policy();
-    assert_eq!(app.config.app_update, UpdatePolicy::Auto);
-    app.cycle_app_update_policy();
-    assert_eq!(app.config.app_update, UpdatePolicy::Off);
-    app.cycle_app_update_policy();
-    assert_eq!(app.config.app_update, UpdatePolicy::Notify);
-    let (saved, _) = Config::load_or_default(&app.paths.config_file);
-    assert_eq!(saved.app_update, UpdatePolicy::Notify);
-}
-
-#[tokio::test]
-async fn staged_app_update_is_visible_in_the_settings_view() {
-    let (mut app, _dir) = test_app().await;
-    let release = update::ReleaseInfo {
-        version: "9.9.9".to_string(),
-        asset_name: "dfrelay_test.tar.gz".to_string(),
-        asset_url: "https://example.com/dfrelay_test.tar.gz".to_string(),
-        digest: None,
-        sums_url: None,
-    };
-    let staged = app.paths.updates_dir.join("dfr-9.9.9");
-    app.handle_event(AppEvent::AppUpdateStaged(Ok((release, staged))))
-        .await;
-    assert!(app.pending_app_update.is_some());
-    assert_eq!(app.view().pending_app_update.as_deref(), Some("9.9.9"));
 }
 
 #[tokio::test]

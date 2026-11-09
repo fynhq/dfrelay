@@ -25,9 +25,8 @@ English | [中文](#dfrelay-zh)
   client and never owns the daemon lifecycle.
 - Low memory footprint: about 32 MB resident excluding the TUI (`dfr` 5–6 MB,
   sing-box 26–28 MB).
-- Optional self-update with digest/SHA256SUMS verification, automatic rollback,
-  and an `off`/`notify`/`auto` policy (default `notify`; system-level services
-  apply manually); sing-box updates stay manual.
+- sing-box updates stay manual through its info popup; DFRelay itself has no
+  in-app update check. Re-run `install.sh` to upgrade `dfr`.
 
 ## Install
 
@@ -58,10 +57,6 @@ dfr restart         # restart an ad-hoc daemon, or the configured service
 dfr status          # show daemon mode, proxy state, node, and listen address
 dfr serve           # run the daemon in the foreground for systemd/launchd
 dfr service forget  # remove the service marker after removing the service
-dfr update check    # check the latest DFRelay release
-dfr update apply    # download, verify, install, and restart
-dfr update rollback # restore the previous binary
-dfr update status   # show the update policy and last result
 ```
 
 `dfr` is a pure client. If the daemon is not running, start it with `dfr start`
@@ -261,9 +256,8 @@ DFRelay 是一个面向 Linux、macOS 与 Android Termux（arm64）的终端 TUI
   来源过滤日志，并提供 sing-box 管理弹窗。
 - 无界面 daemon 可由 systemd/launchd 托管；TUI 只是客户端，不负责 daemon 生命周期。
 - 内存占用低：常驻约 32 MB（不含 TUI，`dfr` 5–6 MB、sing-box 26–28 MB）。
-- 可选应用自更新：校验 digest/SHA256SUMS、失败自动回滚；支持
-  `off`/`notify`/`auto`（默认 `notify`，系统级服务需手动应用）。sing-box 更新
-  仍为手动。
+- sing-box 更新仍由信息弹窗手动触发；DFRelay 自身不提供应用内更新检查，
+  升级时重新执行 `install.sh` 覆盖安装。
 
 ## 安装
 
@@ -292,10 +286,6 @@ dfr restart         # 重启 ad-hoc daemon，或重启已配置的系统服务
 dfr status          # 查看模式、代理状态、当前节点和监听地址
 dfr serve           # 前台运行 daemon，供 systemd/launchd 托管
 dfr service forget  # 移除服务后清理 service marker
-dfr update check    # 检查 DFRelay 最新版本
-dfr update apply    # 下载、校验、安装并重启
-dfr update rollback # 恢复上一版二进制
-dfr update status   # 查看更新策略与最近结果
 ```
 
 `dfr` 只是客户端。daemon 没运行时应执行 `dfr start` 或通过服务管理器启动。

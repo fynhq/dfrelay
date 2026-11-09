@@ -17,15 +17,12 @@ mod subscription;
 mod text;
 mod theme;
 mod ui;
-mod update;
 mod version;
 mod view;
 
 use std::io::{stdout, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-use chrono::TimeZone as _;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
@@ -76,33 +73,6 @@ enum Command {
         #[command(subcommand)]
         action: ServiceCommand,
     },
-    /// Check, apply, or roll back a DFRelay update.
-    Update {
-        #[command(subcommand)]
-        action: UpdateCommand,
-    },
-}
-
-#[derive(Debug, Subcommand, Clone)]
-enum UpdateCommand {
-    /// Check the latest release without downloading or installing it.
-    Check,
-    /// Download, verify, install the latest release, and restart the daemon.
-    Apply,
-    /// Restore the previous binary and restart the daemon.
-    Rollback,
-    /// Show the update policy and the last update result.
-    Status,
-    /// Internal helper used by the daemon; not for manual use.
-    #[command(hide = true)]
-    Helper {
-        #[arg(long)]
-        staged: PathBuf,
-        #[arg(long)]
-        target: PathBuf,
-        #[arg(long)]
-        version: String,
-    },
 }
 
 #[derive(Debug, Subcommand, Clone, Copy)]
@@ -120,7 +90,6 @@ enum RuntimeCommand {
     Restart,
     Status,
     Serve,
-    Update(UpdateCommand),
 }
 
 impl Command {
@@ -131,7 +100,6 @@ impl Command {
             Command::Restart => Some(RuntimeCommand::Restart),
             Command::Status => Some(RuntimeCommand::Status),
             Command::Serve => Some(RuntimeCommand::Serve),
-            Command::Update { action } => Some(RuntimeCommand::Update(action)),
             Command::Service { .. } => None,
         }
     }
@@ -162,9 +130,6 @@ async fn main() -> anyhow::Result<()> {
         Some(RuntimeCommand::Restart) => return restart_daemon(&cli, &paths).await,
         Some(RuntimeCommand::Status) => return print_status(&paths).await,
         Some(RuntimeCommand::Serve) => return serve(config, paths, logger).await,
-        Some(RuntimeCommand::Update(action)) => {
-            return update_command(&paths, &config, &logger, action).await;
-        }
         None => {}
     }
 
@@ -438,118 +403,6 @@ fn service_identity(marker: ServiceMarkerState) -> anyhow::Result<service::Servi
     }
 }
 
-async fn update_command(
-    paths: &Paths,
-    config: &Config,
-    logger: &Logger,
-    action: UpdateCommand,
-) -> anyhow::Result<()> {
-    match action {
-        UpdateCommand::Check => {
-            println!("Current: {}", version::DISPLAY);
-            if !update::is_release_build() {
-                println!("Note: local builds do not update automatically.");
-            }
-            match update::check_for_update(config).await {
-                Ok(Some(release)) => {
-                    record_check(paths, logger, Some(&release.version));
-                    println!("Latest:  v{}", release.version);
-                    println!("Update available.");
-                }
-                Ok(None) => {
-                    record_check(paths, logger, None);
-                    println!("Latest:  no newer release");
-                }
-                Err(err) => bail!("update check failed: {err}"),
-            }
-        }
-        UpdateCommand::Apply => {
-            let release = update::check_for_update(config)
-                .await
-                .context("check for a DFRelay update")?
-                .ok_or_else(|| anyhow::anyhow!("DFRelay is already up to date"))?;
-            let target = update::target_binary().context("resolve the installed dfr binary")?;
-            let staged = update::download_and_stage(config, paths, &release, logger)
-                .await
-                .context("download the DFRelay update")?;
-            println!("Downloaded v{}; applying...", release.version);
-            update::apply_staged(paths, &staged, &target, &release.version, logger)
-                .await
-                .context("apply the DFRelay update")?;
-            println!("DFRelay updated to v{}.", release.version);
-        }
-        UpdateCommand::Rollback => {
-            let target = update::target_binary().context("resolve the installed dfr binary")?;
-            update::rollback_to_previous(paths, &target, logger)
-                .await
-                .context("roll back the DFRelay binary")?;
-            println!("Restored the previous DFRelay binary.");
-        }
-        UpdateCommand::Status => {
-            let state = update::load_state(paths);
-            println!("Current:      {}", version::DISPLAY);
-            println!("Policy:       {}", config.app_update.as_str());
-            match state.available_update() {
-                Some(version) => println!("Latest:       v{version} (update available)"),
-                None if state.last_check_unix.is_some() => {
-                    println!("Latest:       no newer release");
-                }
-                None => {}
-            }
-            if let Some((staged, _)) = update::discover_staged(paths) {
-                println!("Staged:       v{staged}");
-            }
-            println!("Last check:   {}", format_unix(state.last_check_unix));
-            println!("Last success: {}", format_unix(state.last_success_unix));
-            if let Some(version) = state.failed_version.as_deref() {
-                println!(
-                    "Failed:       {} ({})",
-                    version,
-                    format_unix(state.failed_at_unix)
-                );
-            }
-            if let Some(error) = state.last_error.as_deref() {
-                println!("Last error:   {error}");
-            }
-            if !update::is_release_build() {
-                println!("Note: local builds do not update automatically.");
-            }
-        }
-        UpdateCommand::Helper {
-            staged,
-            target,
-            version,
-        } => {
-            let result = update::apply_staged(paths, &staged, &target, &version, logger).await;
-            if let Err(err) = &result {
-                // Early failures (lock contention, staged integrity, target
-                // permissions, stop/install errors) never reach the rollback
-                // path, so the daemon would otherwise retry the same staged
-                // update forever.
-                update::record_helper_failure(paths, &version, err);
-            }
-            result.context("apply the staged DFRelay update")?;
-        }
-    }
-    Ok(())
-}
-
-fn format_unix(timestamp: Option<i64>) -> String {
-    timestamp
-        .and_then(|value| chrono::Local.timestamp_opt(value, 0).single())
-        .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| "—".to_string())
-}
-
-fn record_check(paths: &Paths, logger: &Logger, available: Option<&str>) {
-    if let Err(err) = update::record_check_result(paths, available) {
-        logger.app(
-            LogLevel::Warn,
-            format!("cannot record the update check: {err}"),
-        );
-    }
-}
-
 async fn print_status(paths: &Paths) -> anyhow::Result<()> {
     let socket = paths.control_socket();
     if !ipc::daemon_is_running(&socket).await {
@@ -730,7 +583,6 @@ mod tests {
                 Command::Status => "status",
                 Command::Serve => "serve",
                 Command::Service { .. } => "service",
-                Command::Update { .. } => "update",
             };
             assert_eq!(actual, expected);
         }
@@ -748,64 +600,9 @@ mod tests {
     }
 
     #[test]
-    fn update_subcommands_parse() {
-        for (args, expected) in [
-            (vec!["dfr", "update", "check"], "check"),
-            (vec!["dfr", "update", "apply"], "apply"),
-            (vec!["dfr", "update", "rollback"], "rollback"),
-            (vec!["dfr", "update", "status"], "status"),
-        ] {
-            let cli = parse(&args).unwrap();
-            let actual = match cli.command.unwrap() {
-                Command::Update { action } => match action {
-                    UpdateCommand::Check => "check",
-                    UpdateCommand::Apply => "apply",
-                    UpdateCommand::Rollback => "rollback",
-                    UpdateCommand::Status => "status",
-                    UpdateCommand::Helper { .. } => "helper",
-                },
-                _ => "other",
-            };
-            assert_eq!(actual, expected);
-        }
-
-        let cli = parse(&[
-            "dfr",
-            "update",
-            "helper",
-            "--staged",
-            "/tmp/a",
-            "--target",
-            "/tmp/b",
-            "--version",
-            "1.2.3",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Update {
-                action: UpdateCommand::Helper { .. }
-            })
-        ));
-
-        let cli = parse(&[
-            "dfr",
-            "update",
-            "helper",
-            "--staged",
-            "/tmp/a",
-            "--target",
-            "/tmp/b",
-            "--version",
-            "1.2.3",
-            "--config",
-            "/tmp/config.toml",
-            "--data",
-            "/tmp/data",
-        ])
-        .unwrap();
-        assert_eq!(cli.config, Some(PathBuf::from("/tmp/config.toml")));
-        assert_eq!(cli.data_dir, Some(PathBuf::from("/tmp/data")));
+    fn update_subcommand_is_rejected() {
+        assert!(parse(&["dfr", "update"]).is_err());
+        assert!(parse(&["dfr", "update", "check"]).is_err());
     }
 
     #[test]

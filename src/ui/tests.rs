@@ -415,25 +415,6 @@ async fn settings_shows_singbox_info_status() {
 }
 
 #[tokio::test]
-async fn settings_shows_app_update_policy_and_pending_version() {
-    let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
-    app.selected = settings_items(app.config.allow_lan)
-        .iter()
-        .position(|item| *item == SettingsItem::AppUpdate)
-        .unwrap();
-    let content = rendered(&app, 30);
-    let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(compact.contains("应用更新"), "{compact}");
-    assert!(compact.contains("通知"), "{compact}");
-
-    app.config.app_update = UpdatePolicy::Auto;
-    let content = rendered(&app, 30);
-    let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(compact.contains("自动"), "{compact}");
-}
-
-#[tokio::test]
 async fn header_uses_fixed_title_and_status_value() {
     let (app, _dir) = test_app(Lang::Zh).await;
     let content = rendered(&app, 30);
