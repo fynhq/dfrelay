@@ -22,9 +22,9 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use crate::app::Page;
 use crate::i18n::Lang;
 use crate::ipc::{ClientMsg, InputCode, ServerMsg};
+use crate::state::Page;
 use crate::theme::Palette;
 use crate::view::View;
 

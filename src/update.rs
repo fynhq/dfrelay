@@ -1165,7 +1165,7 @@ mod tests {
             pid,
             managed: false,
             service: None,
-            proxy: crate::app::ProxyStatus::Stopped,
+            proxy: crate::state::ProxyStatus::Stopped,
             uptime_secs,
             listen: "127.0.0.1:12000".into(),
             current_node: None,

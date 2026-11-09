@@ -577,7 +577,7 @@ async fn send(write: &mut OwnedWriteHalf, message: &ClientMsg) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ProxyStatus;
+    use crate::state::ProxyStatus;
 
     #[test]
     fn status_protocol_roundtrip() {

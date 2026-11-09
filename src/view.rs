@@ -3,12 +3,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::{Overlay, Page, ProxyStatus, SetupState};
 use crate::config::Config;
 use crate::i18n::{Lang, Text};
 use crate::logging::{LogLevel, LogLine, LogSource, LogTimestamp};
 use crate::service::ServiceIdentity;
 use crate::singbox::clash::MetricsSnapshot;
+use crate::state::{Overlay, Page, ProxyStatus, SetupState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeView {
@@ -61,12 +61,16 @@ pub struct View {
     pub status: ProxyStatus,
     pub metrics_stale: bool,
     pub nodes: Vec<NodeView>,
+    #[serde(default)]
+    pub node_count: usize,
     pub auto_tags: HashSet<String>,
     pub auto_candidates: usize,
     pub subscriptions: Vec<SubscriptionView>,
     pub selected: usize,
     pub preferred_node: Option<String>,
     pub metrics: MetricsSnapshot,
+    #[serde(default)]
+    pub connection_count: usize,
     pub node_delays: HashMap<String, u64>,
     pub delay_testing: HashSet<String>,
     pub up_speed: f64,

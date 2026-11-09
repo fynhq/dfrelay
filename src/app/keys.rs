@@ -1,6 +1,9 @@
 //! Key handling and edit-form interactions for the TUI.
 
 use super::*;
+use crate::logging::LogLine;
+use crate::state::{KeywordField, OverlayKind, SettingsItem, MAIN_PAGES};
+use std::time::{Duration, Instant};
 
 impl App {
     pub(super) async fn handle_key(&mut self, key: KeyEvent) {
@@ -351,12 +354,20 @@ impl App {
     }
 
     pub(super) fn sort_nodes_if_visible(&mut self) {
-        if self.has_viewer() && self.page == Page::Nodes {
-            self.sort_nodes_preserving_selection();
+        if !(self.has_viewer() && self.page == Page::Nodes) {
+            return;
         }
+        if self
+            .last_node_sort
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
+            return;
+        }
+        self.sort_nodes_preserving_selection();
     }
 
     pub(super) fn sort_nodes_preserving_selection(&mut self) {
+        self.refresh_auto_tags_cache();
         let selected_tag = self.nodes.get(self.selected).map(|node| node.tag.clone());
         let auto_tags: HashSet<String> = self.auto_candidate_tags().into_iter().collect();
         sort_nodes(
@@ -368,6 +379,9 @@ impl App {
         self.selected = selected_tag
             .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
             .unwrap_or_else(|| self.selected.min(self.nodes.len().saturating_sub(1)));
+        // Sorting changes the node order, and the cache signature includes it.
+        self.refresh_auto_tags_cache();
+        self.last_node_sort = Some(Instant::now());
     }
 
     pub fn log_lines(&self) -> Vec<LogLine> {
@@ -482,6 +496,7 @@ impl App {
         }
         self.subscriptions.retain(|runtime| runtime.config.id != id);
         self.nodes = merge_nodes(&self.subscriptions);
+        self.last_node_sort = None;
         self.prune_node_state();
         self.sync_preferred_node();
         self.selected = self
@@ -726,6 +741,7 @@ impl App {
                 self.subscriptions.push(placeholder);
             }
             self.nodes = merge_nodes(&self.subscriptions);
+            self.last_node_sort = None;
             self.sync_preferred_node();
             self.save_subscription_cache();
             self.refresh_last_error_from_subscriptions();

@@ -12,6 +12,7 @@ mod netinfo;
 mod selection;
 mod service;
 mod singbox;
+mod state;
 mod subscription;
 mod text;
 mod theme;
@@ -32,11 +33,12 @@ use crossterm::cursor::Show;
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
 
-use app::{App, ProxyStatus};
+use app::App;
 use config::{Config, Paths};
 use i18n::Lang;
 use logging::{LogLevel, Logger};
 use service::{ServiceAction, ServiceError, ServiceIdentity, ServiceMarkerState, ServiceReport};
+use state::ProxyStatus;
 use view::DaemonStatus;
 
 #[derive(Debug, Parser)]

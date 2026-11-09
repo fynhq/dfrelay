@@ -4,6 +4,7 @@
 //! live here; the UI overlay and key handling stay in `app.rs`.
 
 use super::*;
+use crate::config::UpdatePolicy;
 
 impl App {
     pub(super) fn refresh_previous_binary_state(&mut self) {
