@@ -63,6 +63,7 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         let mut animation_start = Instant::now();
         let mut needs_draw = true;
         let mut animate = false;
+        let mut toast_deadline: Option<Instant> = None;
 
         loop {
             if needs_draw {
@@ -78,8 +79,13 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                     }
                 }
                 let tick = (animation_start.elapsed().as_millis() / 100) as u64;
+                let anim = crate::ui::Anim {
+                    tick,
+                    toast_remaining: toast_deadline
+                        .map(|deadline| deadline.saturating_duration_since(Instant::now())),
+                };
                 terminal.draw(|frame| match &view {
-                    Some(view) => crate::ui::render_at(frame, view, tick, palette),
+                    Some(view) => crate::ui::render_at(frame, view, anim, palette),
                     None => render_connecting(frame, lang),
                 })?;
                 if let Some(current) = &view {
@@ -127,7 +133,10 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                                 if frame.quitting {
                                     break;
                                 }
-                                animate = matches!(frame.page, Page::Nodes | Page::Subscriptions);
+                                animate = crate::ui::needs_animation(&frame);
+                                toast_deadline = frame.toast_remaining_ms.map(|remaining| {
+                                    Instant::now() + Duration::from_millis(remaining)
+                                });
                                 view = Some(*frame);
                                 needs_draw = true;
                             }

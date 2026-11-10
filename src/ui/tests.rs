@@ -387,6 +387,8 @@ async fn setup_download_status_is_not_duplicated() {
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert_eq!(compact.matches("正在下载sing-box").count(), 1, "{compact}");
+    assert!(compact.contains('█'), "{compact}");
+    assert!(compact.contains('░'), "{compact}");
 }
 
 #[tokio::test]
@@ -769,7 +771,7 @@ async fn subscriptions_scroll_long_name_url_and_status_text() {
         let mut terminal = Terminal::new(backend).unwrap();
         let view = view.clone();
         terminal
-            .draw(|frame| render_at(frame, &view, tick, Palette::Dark))
+            .draw(|frame| render_at(frame, &view, anim(tick), Palette::Dark))
             .unwrap();
         terminal
             .backend()
@@ -810,7 +812,7 @@ async fn nodes_scroll_long_source_names_inside_the_column() {
         let mut terminal = Terminal::new(backend).unwrap();
         let view = view.clone();
         terminal
-            .draw(|frame| render_at(frame, &view, tick, Palette::Dark))
+            .draw(|frame| render_at(frame, &view, anim(tick), Palette::Dark))
             .unwrap();
         terminal
             .backend()
@@ -937,7 +939,7 @@ async fn dark_palette_uses_dark_gray_for_muted_text() {
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
     terminal
-        .draw(|frame| render_at(frame, &view, 0, Palette::Dark))
+        .draw(|frame| render_at(frame, &view, Anim::default(), Palette::Dark))
         .unwrap();
     let cells = terminal.backend().buffer().content.clone();
     let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
@@ -956,7 +958,7 @@ async fn light_palette_uses_dark_gray_for_muted_text() {
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
     terminal
-        .draw(|frame| render_at(frame, &view, 0, Palette::Light))
+        .draw(|frame| render_at(frame, &view, Anim::default(), Palette::Light))
         .unwrap();
     let cells = terminal.backend().buffer().content.clone();
     let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
@@ -2309,6 +2311,120 @@ async fn help_max_scroll_follows_the_viewport() {
     assert_eq!(help_max_scroll(&view, 40, 10), 0);
 }
 
+#[test]
+fn spinner_cycles_ten_frames_per_second() {
+    assert_eq!(SPINNER_FRAMES.len(), 10);
+    assert_eq!(spinner_frame(0), "⠋");
+    assert_eq!(spinner_frame(9), "⠏");
+    assert_eq!(spinner_frame(10), spinner_frame(0));
+}
+
+#[test]
+fn download_bar_ping_pongs_across_the_track() {
+    let width = PROGRESS_BAR_WIDTH;
+    assert_eq!(progress_fill(0, width), (0, 4));
+    assert_eq!(progress_fill(4, width), (4, 4));
+    assert_eq!(progress_fill(8, width), (8, 4));
+    assert_eq!(progress_fill(12, width), (4, 4));
+    assert_eq!(progress_fill(16, width), (0, 4));
+    let (offset, fill) = progress_fill(93, width);
+    assert!(offset + fill <= width, "{offset}+{fill}");
+}
+
+#[test]
+fn toast_fades_toward_gray_in_the_last_moments() {
+    assert_eq!(toast_style(None).fg, Some(Color::Yellow));
+    assert_eq!(toast_style(Some(TOAST_FADE)).fg, Some(Color::Yellow));
+    assert_eq!(
+        toast_style(Some(Duration::ZERO)).fg,
+        Some(Color::Rgb(140, 140, 140))
+    );
+    match toast_style(Some(TOAST_FADE / 2)).fg {
+        Some(Color::Rgb(r, g, b)) => {
+            assert_eq!(r, g);
+            assert!(b > 0 && b < 255, "{b}");
+        }
+        other => panic!("unexpected toast color: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn animation_runs_only_while_motion_is_visible() {
+    let (mut app, _dir) = test_app(Lang::En).await;
+    app.page = Page::Dashboard;
+    assert!(!needs_animation(&app.view()));
+
+    app.page = Page::Nodes;
+    assert!(needs_animation(&app.view()));
+    app.page = Page::Dashboard;
+
+    app.restart_in_progress = true;
+    assert!(needs_animation(&app.view()));
+    app.restart_in_progress = false;
+
+    app.status = ProxyStatus::Starting;
+    assert!(needs_animation(&app.view()));
+    app.status = ProxyStatus::Running;
+    assert!(!needs_animation(&app.view()));
+
+    app.notify("saved");
+    assert!(needs_animation(&app.view()));
+    app.message = None;
+    app.message_at = None;
+    assert!(!needs_animation(&app.view()));
+
+    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.setup.downloading = true;
+    assert!(needs_animation(&app.view()));
+    app.overlay = None;
+    assert!(!needs_animation(&app.view()));
+}
+
+fn footer_text(view: &View, tick: u64) -> String {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render_at(frame, view, anim(tick), Palette::Dark))
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .skip(80 * 23)
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[tokio::test]
+async fn restart_footer_spinner_advances_with_the_tick() {
+    let (mut app, _dir) = test_app(Lang::En).await;
+    app.restart_in_progress = true;
+    let view = app.view();
+    let first = footer_text(&view, 0);
+    let second = footer_text(&view, 1);
+    assert!(first.contains(spinner_frame(0)), "{first}");
+    assert!(second.contains(spinner_frame(1)), "{second}");
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
+async fn starting_status_shows_a_spinner() {
+    let (mut app, _dir) = test_app(Lang::En).await;
+    app.status = ProxyStatus::Starting;
+    let content = rendered(&app, 30);
+    let header: String = content.chars().take(100 * 4).collect();
+    assert!(header.contains(spinner_frame(0)), "{header}");
+    assert!(header.contains("Starting"), "{header}");
+}
+
+fn anim(tick: u64) -> Anim {
+    Anim {
+        tick,
+        toast_remaining: None,
+    }
+}
+
 fn render(frame: &mut Frame, view: &View) {
-    render_at(frame, view, 0, Palette::Dark);
+    render_at(frame, view, Anim::default(), Palette::Dark);
 }

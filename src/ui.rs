@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -18,12 +20,76 @@ use crate::theme::Palette;
 use crate::view::{BinaryStatus, View};
 
 const HEADER_HEIGHT: u16 = 4;
+const TOAST_FADE: Duration = Duration::from_millis(600);
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const PROGRESS_BAR_WIDTH: usize = 12;
 
 mod format;
 use format::*;
 
-/// Renders the view; `tick` advances time-based marquee scrolling (100 ms units).
-pub fn render_at(frame: &mut Frame, view: &View, tick: u64, palette: Palette) {
+/// Client-side animation inputs. `tick` counts 100 ms units since the current
+/// page was entered; `toast_remaining` comes from the daemon snapshot and is
+/// counted down locally between snapshots.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Anim {
+    pub tick: u64,
+    pub toast_remaining: Option<Duration>,
+}
+
+/// Whether the current snapshot contains visible motion that needs periodic
+/// redraws. Idle pages stay static.
+pub fn needs_animation(view: &View) -> bool {
+    let setup_busy = matches!(view.overlay, Some(Overlay::Setup { .. }))
+        && (view.setup.downloading || view.setup.installing || view.setup.rollback_in_flight);
+    matches!(view.page, Page::Nodes | Page::Subscriptions)
+        || view.toast_remaining_ms.is_some()
+        || view.restart_in_progress
+        || matches!(view.status, ProxyStatus::Starting | ProxyStatus::Stopping)
+        || setup_busy
+}
+
+fn spinner_frame(tick: u64) -> &'static str {
+    SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as u64) as usize]
+}
+
+/// Position and length of the filled segment of the indeterminate download
+/// bar. The segment ping-pongs across the track.
+fn progress_fill(tick: u64, width: usize) -> (usize, usize) {
+    let width = width.max(4);
+    let fill = (width / 3).max(2).min(width);
+    let span = width - fill;
+    if span == 0 {
+        return (0, fill);
+    }
+    let cycle = tick as usize % (span * 2);
+    let offset = if cycle <= span {
+        cycle
+    } else {
+        span * 2 - cycle
+    };
+    (offset, fill)
+}
+
+fn toast_style(remaining: Option<Duration>) -> Style {
+    let yellow = Style::default().fg(Color::Yellow);
+    let Some(remaining) = remaining else {
+        return yellow;
+    };
+    let ratio = (remaining.as_secs_f32() / TOAST_FADE.as_secs_f32()).clamp(0.0, 1.0);
+    if ratio >= 1.0 {
+        return yellow;
+    }
+    let mix = |start: f32, end: f32| -> u8 { (end + (start - end) * ratio).round() as u8 };
+    Style::default().fg(Color::Rgb(
+        mix(255.0, 140.0),
+        mix(255.0, 140.0),
+        mix(0.0, 140.0),
+    ))
+}
+
+/// Renders the view; `anim` drives time-based effects (marquee, spinners,
+/// download bar and toast fade).
+pub fn render_at(frame: &mut Frame, view: &View, anim: Anim, palette: Palette) {
     let area = frame.area();
     frame.render_widget(Clear, area);
     if area.width < 60 || area.height < 16 {
@@ -42,13 +108,13 @@ pub fn render_at(frame: &mut Frame, view: &View, tick: u64, palette: Palette) {
     ])
     .split(area);
 
-    render_header(frame, view, chunks[0], palette);
+    render_header(frame, view, chunks[0], anim, palette);
     render_tabs(frame, view, chunks[1]);
     if view.overlay.is_none() {
-        render_page(frame, view, chunks[2], tick, palette);
+        render_page(frame, view, chunks[2], anim.tick, palette);
     }
-    render_footer(frame, view, chunks[3], palette);
-    render_overlay(frame, view, area, palette);
+    render_footer(frame, view, chunks[3], anim.tick, palette);
+    render_overlay(frame, view, area, anim.tick, palette);
 }
 
 fn titled_block(title: impl Into<String>) -> Block<'static> {
@@ -58,10 +124,17 @@ fn titled_block(title: impl Into<String>) -> Block<'static> {
         .title(format!(" {} ", title.into()))
 }
 
-fn render_header(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, palette: Palette) {
+fn render_header(
+    frame: &mut Frame,
+    view: &View,
+    area: ratatui::layout::Rect,
+    anim: Anim,
+    palette: Palette,
+) {
     let text = view.text();
-    let status_display = if view.status == ProxyStatus::Running && view.uptime() != text.common_none
-    {
+    let status_display = if matches!(view.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        format!("{} {}", spinner_frame(anim.tick), view.status.label(text))
+    } else if view.status == ProxyStatus::Running && view.uptime() != text.common_none {
         view.config
             .language
             .running_with_uptime(text.status_running, view.uptime())
@@ -100,7 +173,7 @@ fn render_header(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pa
         status_style.add_modifier(Modifier::BOLD),
     )];
     let (right_text, right_style) = if let Some(toast) = &view.toast {
-        (toast.as_str(), Style::default().fg(Color::Yellow))
+        (toast.as_str(), toast_style(anim.toast_remaining))
     } else {
         (text.slogan, Style::default().fg(palette.muted()))
     };
@@ -926,10 +999,42 @@ fn setup_lines(
         .collect()
 }
 
+/// Busy status inside the sing-box popup. Download adds an indeterminate bar
+/// because the binary download exposes no byte-level progress.
+fn animated_status_line(
+    label: &str,
+    tick: u64,
+    width: usize,
+    palette: Palette,
+    progress: bool,
+) -> Line<'static> {
+    let prefix = format!("{} {label}", spinner_frame(tick));
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    let mut spans = vec![Span::styled(prefix, Style::default().fg(Color::Yellow))];
+    if progress && prefix_width + 2 + PROGRESS_BAR_WIDTH + 2 <= width {
+        let muted = Style::default().fg(palette.muted());
+        let filled = Style::default().fg(Color::Yellow);
+        let (offset, fill) = progress_fill(tick, PROGRESS_BAR_WIDTH);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("[", muted));
+        if offset > 0 {
+            spans.push(Span::styled("░".repeat(offset), muted));
+        }
+        spans.push(Span::styled("█".repeat(fill), filled));
+        let tail = PROGRESS_BAR_WIDTH.saturating_sub(offset + fill);
+        if tail > 0 {
+            spans.push(Span::styled("░".repeat(tail), muted));
+        }
+        spans.push(Span::styled("]", muted));
+    }
+    Line::from(spans)
+}
+
 fn setup_content_lines(
     view: &View,
     inner_width: usize,
     selected: usize,
+    tick: u64,
     palette: Palette,
 ) -> (Vec<Line<'static>>, usize) {
     let text = view.text();
@@ -981,20 +1086,29 @@ fn setup_content_lines(
     lines.push(Line::from(Span::styled(text.setup_formats, muted)));
     lines.push(Line::from(Span::styled(text.setup_checksum, muted)));
     if view.setup.installing {
-        lines.push(Line::from(Span::styled(
+        lines.push(animated_status_line(
             text.setup_installing,
-            Style::default().fg(Color::Yellow),
-        )));
+            tick,
+            inner_width,
+            palette,
+            false,
+        ));
     } else if view.setup.rollback_in_flight {
-        lines.push(Line::from(Span::styled(
+        lines.push(animated_status_line(
             text.setup_switching,
-            Style::default().fg(Color::Yellow),
-        )));
+            tick,
+            inner_width,
+            palette,
+            false,
+        ));
     } else if view.setup.downloading {
-        lines.push(Line::from(Span::styled(
+        lines.push(animated_status_line(
             text.setup_downloading,
-            Style::default().fg(Color::Yellow),
-        )));
+            tick,
+            inner_width,
+            palette,
+            true,
+        ));
     } else {
         lines.push(Line::from(Span::styled(
             text.setup_install_hint,
@@ -1054,12 +1168,13 @@ fn render_setup_popup(
     view: &View,
     selected: usize,
     area: ratatui::layout::Rect,
+    tick: u64,
     palette: Palette,
 ) {
     let text = view.text();
     let width = popup_width(area, 12, 72, 100);
     let inner_width = width.saturating_sub(4) as usize;
-    let (lines, candidate_start) = setup_content_lines(view, inner_width, selected, palette);
+    let (lines, candidate_start) = setup_content_lines(view, inner_width, selected, tick, palette);
     let height = popup_height(area, &lines);
     let inner_height = height.saturating_sub(2) as usize;
     let selected_line = candidate_start.saturating_add(selected);
@@ -1332,13 +1447,15 @@ fn push_edit_feedback(
     }
 }
 
-fn render_overlay(frame: &mut Frame, view: &View, area: Rect, palette: Palette) {
+fn render_overlay(frame: &mut Frame, view: &View, area: Rect, tick: u64, palette: Palette) {
     let Some(overlay) = &view.overlay else {
         return;
     };
     match overlay {
         Overlay::Edit(form) => render_edit_form(frame, view.text(), form, area, palette),
-        Overlay::Setup { selected } => render_setup_popup(frame, view, *selected, area, palette),
+        Overlay::Setup { selected } => {
+            render_setup_popup(frame, view, *selected, area, tick, palette)
+        }
         Overlay::LogDetail { line, scroll } => {
             render_log_detail(frame, view.text(), line, *scroll, area, palette)
         }
@@ -1570,7 +1687,13 @@ fn render_log_detail(
     frame.render_widget(Paragraph::new(hint_lines), hint_area);
 }
 
-fn render_footer(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, palette: Palette) {
+fn render_footer(
+    frame: &mut Frame,
+    view: &View,
+    area: ratatui::layout::Rect,
+    tick: u64,
+    palette: Palette,
+) {
     let text = view.text();
     // Keep two blank cells free at both edges so hints never touch the border.
     let area = Rect {
@@ -1580,7 +1703,7 @@ fn render_footer(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, pa
     };
     let mut spans = if view.restart_in_progress {
         vec![Span::styled(
-            text.msg_restarting,
+            format!("{} {}", spinner_frame(tick), text.msg_restarting),
             Style::default().fg(Color::Yellow),
         )]
     } else if view.restart_confirm {

@@ -619,11 +619,23 @@ impl App {
     }
 
     pub fn view(&self) -> View {
-        let toast = self
-            .message
-            .clone()
-            .filter(|_| self.message_at.is_none_or(|at| at.elapsed() < TOAST_TTL))
-            .map(|message| crate::text::sanitize_display(&message));
+        let toast_active =
+            self.message.is_some() && self.message_at.is_none_or(|at| at.elapsed() < TOAST_TTL);
+        let toast_remaining_ms = if toast_active {
+            self.message_at.map(|at| {
+                let remaining = TOAST_TTL.saturating_sub(at.elapsed());
+                u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
+            })
+        } else {
+            None
+        };
+        let toast = if toast_active {
+            self.message
+                .as_ref()
+                .map(|message| crate::text::sanitize_display(message))
+        } else {
+            None
+        };
         let show_nodes = self.page == Page::Nodes;
         let filtered = if show_nodes {
             self.auto_candidate_tags()
@@ -760,6 +772,7 @@ impl App {
             log_file: self.logger.current_file(),
             last_error: self.last_error.as_deref().map(sanitize_display),
             toast,
+            toast_remaining_ms,
             restart_confirm: self.restart_confirm,
             rollback_confirm: self.rollback_confirm,
             restart_in_progress: self.restart_in_progress,
