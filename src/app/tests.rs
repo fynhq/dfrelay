@@ -1,4 +1,5 @@
 #![allow(clippy::field_reassign_with_default)]
+use super::health::probe_failure_outcome;
 use super::*;
 use crate::singbox::binary::InboxCandidate;
 use crate::state::{KeywordField, SettingsField, SettingsItem};
@@ -1196,6 +1197,8 @@ async fn keyword_form_saves_each_field_separately() {
 async fn missing_preferred_node_is_cleared() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![node("香港 01")];
+    app.proxy_node_names
+        .insert("n-missing".to_string(), "旧节点".to_string());
     app.preferred_node = Some("n-missing".to_string());
     app.pending_selection = Some(PendingSelection::Node("n-missing".to_string()));
     app.sync_preferred_node();
@@ -1205,6 +1208,90 @@ async fn missing_preferred_node_is_cleared() {
         app.message.as_deref(),
         Some(app.text().msg_preferred_missing)
     );
+    app.logger.flush();
+    let logs = std::fs::read_to_string(app.logger.current_file()).unwrap();
+    assert!(
+        logs.contains("manual node removed from subscription: n-missing"),
+        "{logs}"
+    );
+}
+
+#[tokio::test]
+async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
+    let (mut app, _dir) = test_app().await;
+    app.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
+    app.proxy_node_tags = vec!["n1".to_string()];
+    app.note_subscription_apply();
+    let pending = app.pending_refresh_apply.as_ref().expect("pending diff");
+    assert_eq!((pending.added, pending.removed), (1, 0));
+
+    app.nodes = vec![tagged_node("A", "n1")];
+    app.note_subscription_apply();
+    assert!(app.pending_refresh_apply.is_none());
+}
+
+#[tokio::test]
+async fn unchanged_subscription_refresh_skips_the_restart() {
+    let (mut app, _dir) = test_app().await;
+    app.nodes = vec![tagged_node("A", "n1")];
+    app.proxy_node_tags = vec!["n1".to_string()];
+    app.pending_restart_subscription = Some("s-1".to_string());
+    app.restart_after_pending_subscription();
+    assert!(app.pending_restart_subscription.is_none());
+    assert!(!app.restart_in_progress);
+}
+
+#[tokio::test]
+async fn reconcile_clears_the_pending_apply_after_a_matching_start() {
+    let (mut app, _dir) = test_app().await;
+    app.nodes = vec![tagged_node("A", "n1")];
+    app.proxy_node_tags = vec!["n1".to_string()];
+    app.pending_refresh_apply = Some(PendingRefreshApply {
+        added: 1,
+        removed: 0,
+        since: Instant::now(),
+        wait_logged: false,
+    });
+    app.reconcile_subscription_apply_after_start();
+    assert!(app.pending_refresh_apply.is_none());
+}
+
+#[tokio::test]
+async fn pending_apply_is_dropped_when_the_proxy_is_not_running() {
+    let (mut app, _dir) = test_app().await;
+    app.nodes = vec![tagged_node("A", "n1")];
+    app.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
+    app.note_subscription_apply();
+    assert!(app.pending_refresh_apply.is_some());
+    app.maybe_apply_subscription_changes();
+    assert!(app.pending_refresh_apply.is_none());
+}
+
+#[tokio::test]
+async fn probe_targets_keep_the_primary_and_dedup_the_fallback() {
+    let (mut app, _dir) = test_app().await;
+    app.config.test_url = FALLBACK_TEST_URL.to_string();
+    assert_eq!(app.probe_targets(), vec![FALLBACK_TEST_URL.to_string()]);
+
+    app.config.test_url = "https://example.com/generate_204".to_string();
+    assert_eq!(
+        app.probe_targets(),
+        vec![
+            "https://example.com/generate_204".to_string(),
+            FALLBACK_TEST_URL.to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn switch_budget_pauses_health_failover_and_resets_the_window() {
+    let (mut app, _dir) = test_app().await;
+    for _ in 0..AUTO_SWITCH_BUDGET {
+        app.record_auto_switch();
+    }
+    assert!(!app.switch_budget_available());
+    assert!(app.auto_switch_times.is_empty());
+    assert!(app.health_pause_until.is_some_and(|at| at > Instant::now()));
 }
 
 #[tokio::test]
@@ -1393,6 +1480,23 @@ fn health_outcome_for(status: u16) -> HealthOutcome {
 }
 
 #[test]
+fn multi_target_probe_only_fails_when_every_target_fails() {
+    assert_eq!(probe_failure_outcome(true, false), HealthOutcome::Failed);
+    assert_eq!(
+        probe_failure_outcome(true, true),
+        HealthOutcome::Unavailable
+    );
+    assert_eq!(
+        probe_failure_outcome(false, true),
+        HealthOutcome::Unavailable
+    );
+    assert_eq!(
+        probe_failure_outcome(false, false),
+        HealthOutcome::Unavailable
+    );
+}
+
+#[test]
 fn health_probe_outcomes_distinguish_node_and_api_errors() {
     assert_eq!(health_outcome(&Ok(120)), HealthOutcome::Healthy(120));
     assert_eq!(health_outcome(&Ok(0)), HealthOutcome::Failed);
@@ -1405,21 +1509,22 @@ fn health_probe_outcomes_distinguish_node_and_api_errors() {
 }
 
 #[test]
-fn failover_keeps_auto_mode_and_picks_fastest_manual_node() {
+fn failover_keeps_auto_mode_and_picks_the_best_quality_manual_node() {
     let healthy = vec![
         ("n-fast".to_string(), 40),
         ("n-slow".to_string(), 120),
         ("n-dead".to_string(), 300),
     ];
+    let quality = QualityBook::default();
     assert_eq!(
-        choose_recovery_target(Some("auto"), &healthy),
+        choose_recovery_target(Some("auto"), &healthy, &quality),
         Some(RecoveryTarget::Auto)
     );
     assert_eq!(
-        choose_recovery_target(Some("n-manual"), &healthy),
+        choose_recovery_target(Some("n-manual"), &healthy, &quality),
         Some(RecoveryTarget::Node("n-fast".to_string()))
     );
-    assert_eq!(choose_recovery_target(Some("auto"), &[]), None);
+    assert_eq!(choose_recovery_target(Some("auto"), &[], &quality), None);
 }
 
 #[tokio::test]

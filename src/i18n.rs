@@ -201,6 +201,8 @@ pub struct Text {
     pub(crate) msg_health_restarting: &'static str,
     pub(crate) msg_health_new_nodes: &'static str,
     pub(crate) msg_health_no_new_nodes: &'static str,
+    pub(crate) msg_health_budget_paused: &'static str,
+    pub(crate) msg_subscription_applied_idle: &'static str,
     pub(crate) msg_singbox_started: &'static str,
     pub(crate) msg_singbox_exited: &'static str,
     pub(crate) msg_ipv6_fallback: &'static str,

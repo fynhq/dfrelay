@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,8 +31,11 @@ use crate::view::{BinaryStatus, DaemonStatus, View};
 
 mod health;
 mod keys;
+mod quality;
 mod subscriptions;
 mod updates;
+
+use quality::QualityBook;
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const RESTART_DELAYS: [u64; MAX_RESTART_ATTEMPTS as usize] = [1, 2, 5, 10, 30];
@@ -40,11 +43,20 @@ const DELAY_TEST_CONCURRENCY: usize = 4;
 const DELAY_SWEEP_COOLDOWN: Duration = Duration::from_secs(300);
 const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 const HEALTH_ACTIVE_WINDOW: Duration = Duration::from_secs(120);
+const HEALTH_IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(120);
+const HEALTH_FAST_PROBE_GAP: Duration = Duration::from_secs(1);
 const HEALTH_PROBE_STALE: Duration = Duration::from_secs(5);
 const HEALTH_FAILURE_THRESHOLD: u32 = 3;
 const HEALTH_RECOVERY_COOLDOWN: Duration = Duration::from_secs(120);
 const HEALTH_NO_NODE_BACKOFF_SECS: [u64; 3] = [60, 120, 300];
 const HEALTH_REFRESH_COOLDOWN: Duration = Duration::from_secs(600);
+const FALLBACK_TEST_URL: &str = "https://cp.cloudflare.com/generate_204";
+const AUTO_SWITCH_BUDGET: usize = 6;
+const AUTO_SWITCH_WINDOW: Duration = Duration::from_secs(60 * 60);
+const AUTO_SWITCH_PAUSE: Duration = Duration::from_secs(10 * 60);
+const SWITCH_REASON_TTL: Duration = Duration::from_secs(15);
+const REFRESH_IDLE_GRACE: Duration = Duration::from_secs(10);
+const REFRESH_IDLE_WAIT_LOG: Duration = Duration::from_secs(5 * 60);
 const PROXY_IP_STARTUP_GRACE: Duration = Duration::from_secs(30);
 const SUBSCRIPTION_STARTUP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 const SUBSCRIPTION_REFRESH_MIN_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -103,6 +115,14 @@ enum RecoveryTarget {
     Node(String),
 }
 
+#[derive(Debug, Clone)]
+struct PendingRefreshApply {
+    added: usize,
+    removed: usize,
+    since: Instant,
+    wait_logged: bool,
+}
+
 fn health_outcome(result: &Result<u64, ClashError>) -> HealthOutcome {
     match result {
         Ok(delay) if *delay > 0 => HealthOutcome::Healthy(*delay),
@@ -117,6 +137,7 @@ fn health_outcome(result: &Result<u64, ClashError>) -> HealthOutcome {
 fn choose_recovery_target(
     selected: Option<&str>,
     healthy: &[(String, u64)],
+    quality: &QualityBook,
 ) -> Option<RecoveryTarget> {
     if healthy.is_empty() {
         return None;
@@ -126,7 +147,12 @@ fn choose_recovery_target(
     }
     healthy
         .iter()
-        .min_by_key(|(_, delay)| *delay)
+        .min_by(|(left, left_delay), (right, right_delay)| {
+            quality
+                .score(left, Some(*left_delay))
+                .total_cmp(&quality.score(right, Some(*right_delay)))
+                .then_with(|| left.cmp(right))
+        })
         .map(|(tag, _)| RecoveryTarget::Node(tag.clone()))
 }
 
@@ -287,6 +313,7 @@ pub struct App {
     health_failures: u32,
     health_failure_tag: Option<String>,
     health_probe_in_flight: bool,
+    health_fast_probe_pending: bool,
     health_generation: u64,
     last_health_probe: Option<Instant>,
     last_health_activity: Option<Instant>,
@@ -298,6 +325,12 @@ pub struct App {
     health_no_node_level: u8,
     recovery_refresh_pending: bool,
     last_recovery_refresh: Option<Instant>,
+    quality: QualityBook,
+    auto_switch_times: VecDeque<Instant>,
+    idle_since: Option<Instant>,
+    last_logged_selection: Option<(bool, Option<String>)>,
+    pending_switch_reason: Option<(&'static str, Instant)>,
+    pending_refresh_apply: Option<PendingRefreshApply>,
     pub started_at: Option<Instant>,
     pub metrics_task: Option<JoinHandle<()>>,
     viewer_active: Arc<AtomicBool>,
@@ -527,6 +560,7 @@ impl App {
             health_failures: 0,
             health_failure_tag: None,
             health_probe_in_flight: false,
+            health_fast_probe_pending: false,
             health_generation: 0,
             last_health_probe: None,
             last_health_activity: None,
@@ -538,6 +572,12 @@ impl App {
             health_no_node_level: 0,
             recovery_refresh_pending: false,
             last_recovery_refresh: None,
+            quality: QualityBook::default(),
+            auto_switch_times: VecDeque::new(),
+            idle_since: None,
+            last_logged_selection: None,
+            pending_switch_reason: None,
+            pending_refresh_apply: None,
             started_at: None,
             metrics_task: None,
             viewer_active: Arc::new(AtomicBool::new(false)),
@@ -886,8 +926,9 @@ impl App {
                 };
                 self.logger.app(LogLevel::Info, count_detail);
                 if self.pending_restart_subscription.is_some() {
-                    self.pending_restart_subscription = None;
-                    self.auto_restart_after_change();
+                    self.restart_after_pending_subscription();
+                } else {
+                    self.note_subscription_apply();
                 }
                 self.retry_pending_start();
                 if recovery_refresh {
@@ -942,8 +983,9 @@ impl App {
                     ),
                 );
                 if self.pending_restart_subscription.as_deref() == Some(id.as_str()) {
-                    self.pending_restart_subscription = None;
-                    self.auto_restart_after_change();
+                    self.restart_after_pending_subscription();
+                } else {
+                    self.note_subscription_apply();
                 }
                 self.retry_pending_start();
             }
@@ -1019,6 +1061,7 @@ impl App {
                     self.proxy_ip_failures = 0;
                     self.start_metrics(clash.port, clash.secret.clone());
                     self.apply_pending_selection(clash.port, clash.secret);
+                    self.reconcile_subscription_apply_after_start();
                     self.refresh_proxy_ips();
                     if self.page == Page::Nodes {
                         self.maybe_test_node_delays(false);
@@ -1096,11 +1139,18 @@ impl App {
                     .collect();
                 if new_connection && !self.proxy_ips_in_flight && !self.health_probe_in_flight {
                     self.last_health_activity = Some(now);
+                    self.health_fast_probe_pending = true;
                 }
                 for (tag, delay) in &metrics.node_delays {
                     self.node_delays.insert(tag.clone(), *delay);
                 }
                 self.metrics = metrics;
+                if self.metrics.connections.is_empty() {
+                    self.idle_since.get_or_insert(now);
+                } else {
+                    self.idle_since = None;
+                }
+                self.observe_selection_change(now);
                 self.sort_nodes_if_visible();
             }
             AppEvent::HealthProbe {
@@ -1120,6 +1170,7 @@ impl App {
                     HealthOutcome::Healthy(delay) => {
                         let recovered = self.health_pause_until.take().is_some()
                             || self.health_no_node_level > 0;
+                        let had_failures = self.health_failures > 0;
                         self.health_no_node_level = 0;
                         self.health_failures = 0;
                         self.health_failure_tag = None;
@@ -1131,7 +1182,13 @@ impl App {
                                 LogLevel::Info,
                                 format!("health restored: {tag} ({delay} ms)"),
                             );
+                        } else if had_failures {
+                            self.logger.app(
+                                LogLevel::Info,
+                                format!("health recovered: {tag} ({delay} ms)"),
+                            );
                         }
+                        self.quality.record_success(&tag, delay);
                         self.node_delays.insert(tag, delay);
                         self.sort_nodes_if_visible();
                     }
@@ -1145,6 +1202,13 @@ impl App {
                             self.health_failures = 0;
                         }
                         self.health_failures += 1;
+                        self.quality.record_failure(&tag);
+                        if self.health_failures == 1 {
+                            self.logger.app(
+                                LogLevel::Info,
+                                format!("health degraded: {tag} (1/{HEALTH_FAILURE_THRESHOLD})"),
+                            );
+                        }
                         if self.health_failures >= HEALTH_FAILURE_THRESHOLD
                             && !self.recovery_in_flight
                             && !self.recovery_refresh_pending
@@ -1178,9 +1242,11 @@ impl App {
                     );
                     return;
                 }
-                let Some(target) =
-                    choose_recovery_target(self.metrics.selection.selected.as_deref(), &healthy)
-                else {
+                let Some(target) = choose_recovery_target(
+                    self.metrics.selection.selected.as_deref(),
+                    &healthy,
+                    &self.quality,
+                ) else {
                     self.on_no_healthy_nodes();
                     return;
                 };
@@ -1205,6 +1271,8 @@ impl App {
                     }
                 };
                 self.pending_selection = None;
+                self.record_auto_switch();
+                self.set_switch_reason("recovery");
                 self.selection_generation.fetch_add(1, Ordering::Relaxed);
                 self.health_failures = 0;
                 self.health_failure_tag = None;
@@ -1270,12 +1338,18 @@ impl App {
                     return;
                 }
                 if let Some(delay) = delay.filter(|delay| *delay > 0) {
+                    self.quality.record_success(&tag, delay);
                     self.node_delays.insert(tag, delay);
                     self.sort_nodes_if_visible();
+                } else {
+                    self.quality.record_failure(&tag);
                 }
             }
             AppEvent::NodeSelected(tag) => {
                 if self.nodes.iter().any(|node| node.tag == tag) {
+                    if self.metrics.selection.selected.as_deref() != Some(tag.as_str()) {
+                        self.set_switch_reason("manual");
+                    }
                     self.preferred_node = Some(tag);
                 }
             }
@@ -1607,13 +1681,27 @@ impl App {
         let tags: HashSet<String> = self.nodes.iter().map(|node| node.tag.clone()).collect();
         self.node_delays.retain(|tag, _| tags.contains(tag));
         self.delay_testing.retain(|tag| tags.contains(tag));
+        self.quality.prune(&tags);
     }
 
     fn sync_preferred_node(&mut self) {
         if let Some(tag) = self.preferred_node.clone() {
             if !self.nodes.iter().any(|node| node.tag == tag) {
+                let name = self
+                    .proxy_node_names
+                    .get(&tag)
+                    .map(|name| sanitize_display(name))
+                    .filter(|name| !name.is_empty())
+                    .map(|name| format!(" ({name})"))
+                    .unwrap_or_default();
                 self.preferred_node = None;
                 self.pending_selection = None;
+                self.logger.app(
+                    LogLevel::Warn,
+                    format!(
+                        "manual node removed from subscription: {tag}{name}; falling back to auto"
+                    ),
+                );
                 self.notify(self.text().msg_preferred_missing);
             }
         }
@@ -2283,6 +2371,7 @@ impl App {
         self.pending_selection = None;
         self.invalidate_health_tasks();
         self.request_metrics_refresh();
+        self.set_switch_reason("manual");
         let tx = self.events_tx.clone();
         let auto_label = self.text().msg_auto_enabled;
         let generation = self.selection_generation.load(Ordering::Relaxed);
@@ -2319,6 +2408,7 @@ impl App {
         self.delay_testing.clear();
         self.delay_sweep_running = false;
         self.last_delay_sweep = None;
+        self.pending_refresh_apply = None;
         self.reset_health_state();
     }
 
@@ -2431,6 +2521,7 @@ impl App {
             }
         }
         self.maybe_probe_health();
+        self.maybe_apply_subscription_changes();
         if self.subscription_refresh_due() {
             self.refresh_subscriptions();
             changed = true;

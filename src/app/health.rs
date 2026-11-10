@@ -42,41 +42,47 @@ impl App {
         {
             return;
         }
-        if self
-            .last_health_activity
-            .is_none_or(|at| at.elapsed() > HEALTH_ACTIVE_WINDOW)
-        {
-            return;
-        }
-        if self
-            .last_health_probe
-            .is_some_and(|at| at.elapsed() < HEALTH_PROBE_INTERVAL)
-        {
-            return;
-        }
         let Some(tag) = self.health_target() else {
             return;
         };
+        let active = self
+            .last_health_activity
+            .is_some_and(|at| now.duration_since(at) <= HEALTH_ACTIVE_WINDOW);
+        let confirming =
+            self.health_failures > 0 && self.health_failure_tag.as_deref() == Some(tag.as_str());
+        let interval = if confirming {
+            HEALTH_PROBE_INTERVAL
+        } else if self.health_fast_probe_pending {
+            HEALTH_FAST_PROBE_GAP
+        } else if active {
+            HEALTH_PROBE_INTERVAL
+        } else {
+            HEALTH_IDLE_PROBE_INTERVAL
+        };
+        if self
+            .last_health_probe
+            .is_some_and(|at| now.duration_since(at) < interval)
+        {
+            return;
+        }
         let Some(proxy) = self.proxy.as_ref() else {
             return;
         };
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
-        let test_url = self.config.test_url.clone();
+        let targets = self.probe_targets();
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
         let generation = self.health_generation;
         self.health_probe_in_flight = true;
+        self.health_fast_probe_pending = false;
         self.last_health_probe = Some(now);
         self.spawn_guarded(BackgroundTask::HealthProbe, async move {
-            let result = client.delay(&tag, &test_url).await;
-            let outcome = health_outcome(&result);
+            let outcome = probe_node_outcome(&client, &tag, &targets).await;
             if matches!(outcome, HealthOutcome::Unavailable) {
-                if let Err(err) = &result {
-                    logger.app(
-                        LogLevel::Debug,
-                        format!("health probe unavailable for {tag}: {err}"),
-                    );
-                }
+                logger.app(
+                    LogLevel::Debug,
+                    format!("health probe unavailable for {tag}: no target produced a result"),
+                );
             }
             let _ = tx.send(AppEvent::HealthProbe {
                 generation,
@@ -89,6 +95,17 @@ impl App {
     pub(super) fn reset_health_failures(&mut self) {
         self.health_failures = 0;
         self.health_failure_tag = None;
+    }
+
+    /// Probe targets in priority order. The configured URL stays first; the
+    /// fallback only runs when the primary fails, so a healthy probe costs one
+    /// request and a target-specific block does not fail the node.
+    pub(super) fn probe_targets(&self) -> Vec<String> {
+        let mut targets = vec![self.config.test_url.clone()];
+        if !targets.iter().any(|target| target == FALLBACK_TEST_URL) {
+            targets.push(FALLBACK_TEST_URL.to_string());
+        }
+        targets
     }
 
     pub(super) fn schedule_no_node_pause(&mut self) {
@@ -105,6 +122,7 @@ impl App {
     pub(super) fn invalidate_health_tasks(&mut self) {
         self.health_generation = self.health_generation.wrapping_add(1);
         self.health_probe_in_flight = false;
+        self.health_fast_probe_pending = false;
         self.recovery_in_flight = false;
         self.health_pause_until = None;
         self.health_no_node_level = 0;
@@ -120,6 +138,9 @@ impl App {
         self.health_connection_ids.clear();
         self.last_metrics_at = None;
         self.recovery_refresh_pending = false;
+        self.idle_since = None;
+        self.last_logged_selection = None;
+        self.pending_switch_reason = None;
     }
 
     pub(super) fn recovery_candidates(&self, trigger: &str) -> Vec<String> {
@@ -150,17 +171,14 @@ impl App {
             .filter(|node| node.tag != trigger)
             .collect();
         ordered.sort_by(|left, right| {
-            self.node_delays
-                .get(&left.tag)
-                .copied()
-                .unwrap_or(u64::MAX)
-                .cmp(
-                    &self
-                        .node_delays
-                        .get(&right.tag)
-                        .copied()
-                        .unwrap_or(u64::MAX),
-                )
+            let left_score = self
+                .quality
+                .score(&left.tag, self.node_delays.get(&left.tag).copied());
+            let right_score = self
+                .quality
+                .score(&right.tag, self.node_delays.get(&right.tag).copied());
+            left_score
+                .total_cmp(&right_score)
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
                 .then_with(|| left.tag.cmp(&right.tag))
         });
@@ -177,6 +195,12 @@ impl App {
         {
             return;
         }
+        if self.proxy.is_none() {
+            return;
+        }
+        if !self.switch_budget_available() {
+            return;
+        }
         let Some(proxy) = self.proxy.as_ref() else {
             return;
         };
@@ -191,7 +215,7 @@ impl App {
             return;
         }
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
-        let test_url = self.config.test_url.clone();
+        let targets = self.probe_targets();
         let tx = self.events_tx.clone();
         let generation = self.health_generation;
         self.recovery_in_flight = true;
@@ -202,13 +226,12 @@ impl App {
                 let mut tasks = JoinSet::new();
                 for tag in chunk.iter().cloned() {
                     let client = client.clone();
-                    let test_url = test_url.clone();
+                    let targets = targets.clone();
                     tasks.spawn(async move {
-                        let delay = client
-                            .delay(&tag, &test_url)
-                            .await
-                            .ok()
-                            .filter(|delay| *delay > 0);
+                        let delay = match probe_node_outcome(&client, &tag, &targets).await {
+                            HealthOutcome::Healthy(delay) => Some(delay),
+                            HealthOutcome::Failed | HealthOutcome::Unavailable => None,
+                        };
                         (tag, delay)
                     });
                 }
@@ -230,6 +253,73 @@ impl App {
                 healthy,
             });
         });
+    }
+
+    pub(super) fn set_switch_reason(&mut self, reason: &'static str) {
+        self.pending_switch_reason = Some((reason, Instant::now()));
+    }
+
+    pub(super) fn record_auto_switch(&mut self) {
+        self.auto_switch_times.push_back(Instant::now());
+    }
+
+    pub(super) fn switch_budget_available(&mut self) -> bool {
+        let now = Instant::now();
+        self.auto_switch_times
+            .retain(|at| now.saturating_duration_since(*at) < AUTO_SWITCH_WINDOW);
+        if self.auto_switch_times.len() < AUTO_SWITCH_BUDGET {
+            return true;
+        }
+        self.auto_switch_times.clear();
+        self.health_pause_until = Some(now + AUTO_SWITCH_PAUSE);
+        self.logger.app(
+            LogLevel::Warn,
+            format!(
+                "health failover paused: automatic switch budget used ({AUTO_SWITCH_BUDGET} in {}m)",
+                AUTO_SWITCH_WINDOW.as_secs() / 60
+            ),
+        );
+        self.notify(self.text().msg_health_budget_paused);
+        false
+    }
+
+    fn selection_state(&self) -> Option<(bool, Option<String>)> {
+        let selected = self.metrics.selection.selected.as_ref()?;
+        if selected == "auto" {
+            Some((true, self.metrics.selection.auto_now.clone()))
+        } else {
+            Some((false, Some(selected.clone())))
+        }
+    }
+
+    pub(super) fn observe_selection_change(&mut self, now: Instant) {
+        let current = self.selection_state();
+        if current == self.last_logged_selection {
+            return;
+        }
+        if let (Some((auto, Some(tag))), Some((_, Some(previous)))) =
+            (&current, &self.last_logged_selection)
+        {
+            let mode = if *auto { "auto" } else { "manual" };
+            let reason = match self.pending_switch_reason.take() {
+                Some((reason, at)) if now.saturating_duration_since(at) <= SWITCH_REASON_TTL => {
+                    reason
+                }
+                _ if *auto => "urltest",
+                _ => "manual",
+            };
+            self.logger.app(
+                LogLevel::Info,
+                format!("selection changed: {previous} -> {tag} (mode={mode}, reason={reason})"),
+            );
+        } else if let Some((auto, Some(tag))) = &current {
+            let mode = if *auto { "auto" } else { "manual" };
+            self.logger.app(
+                LogLevel::Info,
+                format!("selection active: {tag} (mode={mode})"),
+            );
+        }
+        self.last_logged_selection = current;
     }
 
     pub(super) fn on_no_healthy_nodes(&mut self) {
@@ -288,5 +378,30 @@ impl App {
         } else {
             self.notify(self.text().msg_health_new_nodes);
         }
+    }
+}
+
+/// Probe one node against multiple targets in priority order. A success on any
+/// target means the node is healthy; only when every target reports a definite
+/// node failure do we count the probe as failed. API/config errors remain
+/// `Unavailable` so a broken Clash API cannot trigger a failover.
+async fn probe_node_outcome(client: &ClashClient, tag: &str, targets: &[String]) -> HealthOutcome {
+    let mut saw_failed = false;
+    let mut saw_unavailable = false;
+    for target in targets {
+        match health_outcome(&client.delay(tag, target).await) {
+            HealthOutcome::Healthy(delay) => return HealthOutcome::Healthy(delay),
+            HealthOutcome::Failed => saw_failed = true,
+            HealthOutcome::Unavailable => saw_unavailable = true,
+        }
+    }
+    probe_failure_outcome(saw_failed, saw_unavailable)
+}
+
+pub(super) fn probe_failure_outcome(saw_failed: bool, saw_unavailable: bool) -> HealthOutcome {
+    if saw_failed && !saw_unavailable {
+        HealthOutcome::Failed
+    } else {
+        HealthOutcome::Unavailable
     }
 }

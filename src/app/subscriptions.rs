@@ -68,6 +68,169 @@ impl App {
             (self.subscription_refresh_backoff * 2).min(SUBSCRIPTION_REFRESH_MAX_BACKOFF);
     }
 
+    pub(super) fn subscription_tag_diff(&self) -> (usize, usize) {
+        if self.proxy_node_tags.is_empty() {
+            return (0, 0);
+        }
+        let live: HashSet<&str> = self.proxy_node_tags.iter().map(String::as_str).collect();
+        let next: HashSet<&str> = self.nodes.iter().map(|node| node.tag.as_str()).collect();
+        (
+            next.difference(&live).count(),
+            live.difference(&next).count(),
+        )
+    }
+
+    /// Record that the refreshed node set differs from the running config.
+    /// The restart itself waits until the proxy is idle when configured.
+    pub(super) fn note_subscription_apply(&mut self) {
+        if self.proxy_node_tags.is_empty() {
+            self.pending_refresh_apply = None;
+            return;
+        }
+        let (added, removed) = self.subscription_tag_diff();
+        if added == 0 && removed == 0 {
+            if self.pending_refresh_apply.take().is_some() {
+                self.logger
+                    .app(LogLevel::Info, "subscription apply pending cleared");
+            }
+            return;
+        }
+        match self.pending_refresh_apply.as_mut() {
+            Some(pending) => {
+                pending.added = added;
+                pending.removed = removed;
+            }
+            None => {
+                self.pending_refresh_apply = Some(PendingRefreshApply {
+                    added,
+                    removed,
+                    since: Instant::now(),
+                    wait_logged: false,
+                });
+                self.logger.app(
+                    LogLevel::Info,
+                    format!("subscription apply pending: +{added} -{removed}"),
+                );
+            }
+        }
+    }
+
+    pub(super) fn maybe_apply_subscription_changes(&mut self) {
+        let Some(pending) = self.pending_refresh_apply.as_ref() else {
+            return;
+        };
+        let (added, removed, since, wait_logged) = (
+            pending.added,
+            pending.removed,
+            pending.since,
+            pending.wait_logged,
+        );
+        if self.proxy.is_none() || self.status != ProxyStatus::Running {
+            self.pending_refresh_apply = None;
+            self.logger.app(
+                LogLevel::Info,
+                "subscription apply pending cleared: proxy not running",
+            );
+            return;
+        }
+        if self.refreshing_subscriptions
+            || self.restart_in_progress
+            || self.preflight_in_flight
+            || self.recovery_in_flight
+            || self.pending_restart_subscription.is_some()
+            || self.setup.downloading
+            || self.setup.rollback_in_flight
+            || self.install_in_flight
+        {
+            return;
+        }
+        if self
+            .last_metrics_at
+            .is_none_or(|at| at.elapsed() > HEALTH_PROBE_STALE)
+        {
+            return;
+        }
+        let idle = self
+            .idle_since
+            .is_some_and(|at| at.elapsed() >= REFRESH_IDLE_GRACE);
+        if !idle {
+            if !wait_logged && since.elapsed() >= REFRESH_IDLE_WAIT_LOG {
+                if let Some(pending) = self.pending_refresh_apply.as_mut() {
+                    pending.wait_logged = true;
+                }
+                self.logger.app(
+                    LogLevel::Info,
+                    format!(
+                        "subscription changes pending for {}s: waiting for idle (+{added} -{removed})",
+                        since.elapsed().as_secs()
+                    ),
+                );
+            }
+            return;
+        }
+        if self.auto_restart_after_change() {
+            self.pending_refresh_apply = None;
+            self.logger.app(
+                LogLevel::Info,
+                format!("subscription changes applying while idle: +{added} -{removed}"),
+            );
+            self.notify(self.text().msg_subscription_applied_idle);
+        } else {
+            self.pending_refresh_apply = None;
+            self.logger.app(
+                LogLevel::Warn,
+                format!("subscription idle apply skipped: +{added} -{removed}"),
+            );
+        }
+    }
+
+    pub(super) fn reconcile_subscription_apply_after_start(&mut self) {
+        let (added, removed) = self.subscription_tag_diff();
+        if added == 0 && removed == 0 {
+            if self.pending_refresh_apply.take().is_some() {
+                self.logger.app(
+                    LogLevel::Info,
+                    "subscription apply pending resolved by restart",
+                );
+            }
+            return;
+        }
+        self.pending_refresh_apply = Some(PendingRefreshApply {
+            added,
+            removed,
+            since: Instant::now(),
+            wait_logged: false,
+        });
+        self.logger.app(
+            LogLevel::Info,
+            format!("subscription apply still pending after start: +{added} -{removed}"),
+        );
+    }
+
+    pub(super) fn restart_after_pending_subscription(&mut self) {
+        let Some(id) = self.pending_restart_subscription.take() else {
+            return;
+        };
+        let (added, removed) = self.subscription_tag_diff();
+        if added == 0 && removed == 0 {
+            self.logger.app(
+                LogLevel::Info,
+                format!("subscription {id} refresh produced no node changes; restart skipped"),
+            );
+            return;
+        }
+        self.logger.app(
+            LogLevel::Info,
+            format!("subscription {id} changed: +{added} -{removed}; restarting"),
+        );
+        if !self.auto_restart_after_change() {
+            self.logger.app(
+                LogLevel::Info,
+                "subscription restart deferred until next start",
+            );
+        }
+    }
+
     pub(super) fn save_subscription_cache(&self) {
         if let Err(err) =
             subscription::cache::save(&self.paths.subscription_cache(), &self.subscriptions)
