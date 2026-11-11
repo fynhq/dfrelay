@@ -767,20 +767,20 @@ mod tests {
         assert_eq!(node.server, "example.com");
         assert_eq!(node.port, 443);
         assert_eq!(node.name, "香港");
-        assert_eq!(node.outbound["method"], "aes-128-gcm");
+        assert_eq!(node.outbound.value()["method"], "aes-128-gcm");
     }
 
     #[test]
     fn decodes_credentials_and_names() {
         let node = parse_uri("trojan://p%40ss@example.com:443#%E6%97%A5%E6%9C%AC", "test").unwrap();
-        assert_eq!(node.outbound["password"], "p@ss");
+        assert_eq!(node.outbound.value()["password"], "p@ss");
         assert_eq!(node.name, "日本");
 
         let proxy = parse_uri("https://us%40er:p%20w@example.com#https", "test").unwrap();
-        assert_eq!(proxy.outbound["username"], "us@er");
-        assert_eq!(proxy.outbound["password"], "p w");
-        assert_eq!(proxy.outbound["server_port"], 443);
-        assert_eq!(proxy.outbound["tls"]["enabled"], true);
+        assert_eq!(proxy.outbound.value()["username"], "us@er");
+        assert_eq!(proxy.outbound.value()["password"], "p w");
+        assert_eq!(proxy.outbound.value()["server_port"], 443);
+        assert_eq!(proxy.outbound.value()["tls"]["enabled"], true);
         assert_eq!(proxy.name, "https");
     }
 
@@ -788,11 +788,11 @@ mod tests {
     fn treats_none_security_and_transport_errors_explicitly() {
         let plain = "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=none#v";
         let node = parse_uri(plain, "test").unwrap();
-        assert!(node.outbound.get("tls").is_none());
+        assert!(node.outbound.value().get("tls").is_none());
 
         let tls = "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls&sni=example.com#v";
         assert_eq!(
-            parse_uri(tls, "test").unwrap().outbound["tls"]["enabled"],
+            parse_uri(tls, "test").unwrap().outbound.value()["tls"]["enabled"],
             true
         );
 
@@ -813,7 +813,7 @@ mod tests {
         });
         let encoded = STANDARD.encode(payload.to_string());
         let node = parse_uri(&format!("vmess://{encoded}"), "test").unwrap();
-        assert!(node.outbound.get("tls").is_none());
+        assert!(node.outbound.value().get("tls").is_none());
     }
 
     #[test]
@@ -827,8 +827,11 @@ mod tests {
         let encoded = STANDARD.encode(payload.to_string());
         let node = parse_uri(&format!("vmess://{encoded}"), "test").unwrap();
         assert_eq!(node.protocol, "vmess");
-        assert_eq!(node.outbound["transport"]["type"], "ws");
-        assert_eq!(node.outbound["tls"]["server_name"], "cdn.example.com");
+        assert_eq!(node.outbound.value()["transport"]["type"], "ws");
+        assert_eq!(
+            node.outbound.value()["tls"]["server_name"],
+            "cdn.example.com"
+        );
     }
 
     #[test]
@@ -836,8 +839,11 @@ mod tests {
         let uri = "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=reality&sni=example.com&pbk=abc&sid=1234&fp=chrome#vless";
         let node = parse_uri(uri, "test").unwrap();
         assert_eq!(node.protocol, "vless");
-        assert_eq!(node.outbound["tls"]["reality"]["public_key"], "abc");
-        assert_eq!(node.outbound["tls"]["utls"]["fingerprint"], "chrome");
+        assert_eq!(node.outbound.value()["tls"]["reality"]["public_key"], "abc");
+        assert_eq!(
+            node.outbound.value()["tls"]["utls"]["fingerprint"],
+            "chrome"
+        );
     }
 
     #[test]
@@ -846,10 +852,10 @@ mod tests {
         assert_eq!(parse_uri(ss, "test").unwrap().protocol, "shadowsocks");
 
         let trojan = parse_uri("trojan://p:ss@example.com:443#t", "test").unwrap();
-        assert_eq!(trojan.outbound["password"], "p:ss");
+        assert_eq!(trojan.outbound.value()["password"], "p:ss");
 
         let hy2 = parse_uri("hysteria2://p:ss@example.com:443#h", "test").unwrap();
-        assert_eq!(hy2.outbound["password"], "p:ss");
+        assert_eq!(hy2.outbound.value()["password"], "p:ss");
     }
 
     #[test]
@@ -861,7 +867,7 @@ mod tests {
         let encoded = STANDARD.encode(payload.to_string());
         let node = parse_uri(&format!("vmess://{encoded}"), "test").unwrap();
         assert_eq!(node.server, "2001:db8::1");
-        assert_eq!(node.outbound["server"], "2001:db8::1");
+        assert_eq!(node.outbound.value()["server"], "2001:db8::1");
 
         let zero = serde_json::json!({
             "v": "2", "ps": "vmess", "add": "example.com", "port": "0",
@@ -880,13 +886,13 @@ mod tests {
     #[test]
     fn parses_trojan_and_hysteria2() {
         let trojan = parse_uri("trojan://pass@example.com:443?sni=example.com#t", "test").unwrap();
-        assert_eq!(trojan.outbound["type"], "trojan");
+        assert_eq!(trojan.outbound.value()["type"], "trojan");
         let hy2 = parse_uri(
             "hysteria2://pass@example.com:443?sni=example.com&obfs=salamander#h",
             "test",
         )
         .unwrap();
-        assert_eq!(hy2.outbound["obfs"]["type"], "salamander");
+        assert_eq!(hy2.outbound.value()["obfs"]["type"], "salamander");
     }
 
     #[test]

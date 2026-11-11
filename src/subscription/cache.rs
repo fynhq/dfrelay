@@ -89,8 +89,14 @@ pub fn save(path: &Path, runtimes: &[SubscriptionRuntime]) -> std::io::Result<()
 }
 
 fn url_hash(url: &str) -> String {
+    use std::fmt::Write as _;
+
     let digest = Sha256::digest(url.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    let mut hash = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(hash, "{byte:02x}");
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -141,6 +147,7 @@ mod tests {
         let loaded = load(&path, &[config]);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].nodes.len(), 1);
+        assert_eq!(loaded[0].nodes[0].outbound.value()["method"], "aes-128-gcm");
         assert!(loaded[0].stale);
         assert!(loaded[0].last_updated.is_some());
     }

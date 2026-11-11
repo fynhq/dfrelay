@@ -106,6 +106,14 @@ fn count_yaml_aliases(text: &str) -> usize {
     count
 }
 
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 fn ensure_alias_budget(text: &str) -> Result<(), String> {
     let aliases = count_yaml_aliases(text);
     if aliases > MAX_YAML_ALIASES {
@@ -133,8 +141,11 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
     if trimmed.is_empty() {
         return Err("empty subscription body".to_string());
     }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("<!doctype") || lower.contains("<html") {
+    if trimmed
+        .get(..9)
+        .is_some_and(|head| head.eq_ignore_ascii_case("<!doctype"))
+        || contains_ascii_case_insensitive(trimmed, "<html")
+    {
         return Err("subscription returned an HTML page; check URL or User-Agent".to_string());
     }
 
@@ -437,7 +448,7 @@ mod tests {
         })
         .to_string();
         let outcome = detect_and_parse(&body, "test").unwrap();
-        let outbound = &outcome.nodes[0].outbound;
+        let outbound = outcome.nodes[0].outbound.value();
         assert!(outbound["dial"].get("detour").is_none());
         assert_eq!(outbound["dial"]["bind_interface"], "eth0");
     }
@@ -460,6 +471,9 @@ mod tests {
     #[test]
     fn rejects_html() {
         let err = detect_and_parse("<html>login</html>", "test").unwrap_err();
+        assert!(err.contains("HTML"));
+
+        let err = detect_and_parse("<!DOCTYPE html><HTML><body>login</body>", "test").unwrap_err();
         assert!(err.contains("HTML"));
     }
 

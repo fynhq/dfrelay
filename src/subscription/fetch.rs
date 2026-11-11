@@ -144,7 +144,10 @@ async fn read_body(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    // Most subscriptions are valid UTF-8; move the buffer instead of copying
+    // the whole (up to 10 MiB) body just to replace invalid sequences.
+    let text = String::from_utf8(bytes)
+        .unwrap_or_else(|err| String::from_utf8_lossy(&err.into_bytes()).into_owned());
     if text.trim().is_empty() {
         return Err(FetchError::Empty);
     }

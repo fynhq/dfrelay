@@ -135,7 +135,7 @@ pub fn generate_with_selection(
 
     outbounds.push(json!({ "type": "direct", "tag": "direct" }));
     for node in nodes {
-        outbounds.push(node.outbound.clone());
+        outbounds.push(node.outbound.value());
     }
 
     let servers = if config.dns_servers.is_empty() {

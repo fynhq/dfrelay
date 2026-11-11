@@ -1267,7 +1267,7 @@ async fn nodes_beyond_the_old_render_cap_remain_selectable() {
             protocol: "ss".to_string(),
             server: "example.com".to_string(),
             port: 443,
-            outbound: serde_json::json!({}),
+            outbound: crate::subscription::model::Outbound::from_value(&serde_json::json!({})),
         })
         .collect();
     app.selected = 249;
@@ -1840,7 +1840,7 @@ fn node(tag: &str, name: &str) -> crate::subscription::model::Node {
         protocol: "ss".to_string(),
         server: "example.com".to_string(),
         port: 443,
-        outbound: serde_json::json!({}),
+        outbound: crate::subscription::model::Outbound::from_value(&serde_json::json!({})),
     }
 }
 

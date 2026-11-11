@@ -526,9 +526,12 @@ proxies:
         assert_eq!(nodes.len(), 3);
         assert_eq!(nodes[0].protocol, "shadowsocks");
         assert_eq!(nodes[1].server, "2001:db8::1");
-        assert_eq!(nodes[1].outbound["transport"]["type"], "ws");
-        assert_eq!(nodes[1].outbound["tls"]["server_name"], "cdn.example.com");
-        assert_eq!(nodes[2].outbound["type"], "trojan");
+        assert_eq!(nodes[1].outbound.value()["transport"]["type"], "ws");
+        assert_eq!(
+            nodes[1].outbound.value()["tls"]["server_name"],
+            "cdn.example.com"
+        );
+        assert_eq!(nodes[2].outbound.value()["type"], "trojan");
     }
 
     #[test]
@@ -656,7 +659,7 @@ proxies:
         let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
         assert!(unsupported.is_empty());
         assert_eq!(nodes.len(), 1);
-        let outbound = &nodes[0].outbound;
+        let outbound = nodes[0].outbound.value();
         assert_eq!(nodes[0].protocol, "anytls");
         assert_eq!(outbound["type"], "anytls");
         assert_eq!(outbound["server_port"], 8443);
@@ -700,8 +703,12 @@ proxies:
 "#;
         let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].outbound["tls"]["enabled"], true);
-        assert!(nodes[0].outbound.get("idle_session_timeout").is_none());
+        assert_eq!(nodes[0].outbound.value()["tls"]["enabled"], true);
+        assert!(nodes[0]
+            .outbound
+            .value()
+            .get("idle_session_timeout")
+            .is_none());
         assert_eq!(unsupported.len(), 3);
         assert!(unsupported[0].1.contains("missing password"));
         assert!(unsupported[1].1.contains("missing password"));
@@ -740,9 +747,12 @@ proxies:
 "#;
         let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].outbound["tls"]["enabled"], true);
-        assert_eq!(nodes[0].outbound["tls"]["insecure"], true);
-        assert_eq!(nodes[0].outbound["tls"]["server_name"], "proxy.example.com");
+        assert_eq!(nodes[0].outbound.value()["tls"]["enabled"], true);
+        assert_eq!(nodes[0].outbound.value()["tls"]["insecure"], true);
+        assert_eq!(
+            nodes[0].outbound.value()["tls"]["server_name"],
+            "proxy.example.com"
+        );
         assert_eq!(unsupported.len(), 1);
         assert!(unsupported[0].1.contains("unsupported transport"));
     }
