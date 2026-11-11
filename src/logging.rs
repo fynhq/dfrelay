@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -154,14 +155,14 @@ impl LogLine {
 
 pub fn parse_singbox_line(line: &str) -> (Option<LogLevel>, String) {
     let line = strip_ansi(line);
-    let rest = strip_timestamp(&line).unwrap_or(line.as_str());
+    let rest = strip_timestamp(line.as_ref()).unwrap_or(line.as_ref());
     let (level, rest) = strip_level(rest);
     (level, rest.trim_start().to_string())
 }
 
-fn strip_ansi(line: &str) -> String {
+fn strip_ansi(line: &str) -> Cow<'_, str> {
     if !line.contains('\x1b') {
-        return line.to_string();
+        return Cow::Borrowed(line);
     }
     let mut out = String::with_capacity(line.len());
     let mut chars = line.chars();
@@ -195,7 +196,7 @@ fn strip_ansi(line: &str) -> String {
             Some(_) | None => {}
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 fn strip_timestamp(line: &str) -> Option<&str> {
@@ -282,13 +283,21 @@ fn level_token(token: &str) -> Option<LogLevel> {
     let token = token.split(']').next().unwrap_or(token);
     let token = token.split('[').next().unwrap_or(token);
     let token = token.trim_end_matches(':');
-    match token.to_ascii_uppercase().as_str() {
-        "TRACE" => Some(LogLevel::Trace),
-        "DEBUG" => Some(LogLevel::Debug),
-        "INFO" => Some(LogLevel::Info),
-        "WARN" | "WARNING" => Some(LogLevel::Warn),
-        "ERROR" | "FATAL" | "PANIC" => Some(LogLevel::Error),
-        _ => None,
+    if token.eq_ignore_ascii_case("TRACE") {
+        Some(LogLevel::Trace)
+    } else if token.eq_ignore_ascii_case("DEBUG") {
+        Some(LogLevel::Debug)
+    } else if token.eq_ignore_ascii_case("INFO") {
+        Some(LogLevel::Info)
+    } else if token.eq_ignore_ascii_case("WARN") || token.eq_ignore_ascii_case("WARNING") {
+        Some(LogLevel::Warn)
+    } else if token.eq_ignore_ascii_case("ERROR")
+        || token.eq_ignore_ascii_case("FATAL")
+        || token.eq_ignore_ascii_case("PANIC")
+    {
+        Some(LogLevel::Error)
+    } else {
+        None
     }
 }
 
@@ -321,7 +330,9 @@ impl Logger {
             dir: dir.to_path_buf(),
             date: today(),
             file: None,
-            lines: VecDeque::with_capacity(MAX_BUFFER_LINES),
+            // Grow on demand: most processes keep far fewer than the cap, so a
+            // full-cap VecDeque would reserve the whole ring up front.
+            lines: VecDeque::new(),
             app_level,
             singbox_level,
         };
@@ -377,7 +388,7 @@ impl Logger {
             timestamp: now.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
             level,
             component,
-            message: crate::text::sanitize_display(&message),
+            message: crate::text::sanitize_owned(message),
         };
 
         if let Some(file) = inner.file.as_mut() {

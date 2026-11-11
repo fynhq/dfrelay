@@ -105,13 +105,13 @@ impl Command {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover(cli.config.clone(), cli.data_dir.clone())?;
     paths.ensure()?;
     if let Some(Command::Service { action }) = &cli.command {
-        return service_command(&paths, *action).await;
+        let runtime = current_thread_runtime()?;
+        return runtime.block_on(service_command(&paths, *action));
     }
     let (config, warnings) = Config::load_or_default(&paths.config_file);
     let logger = Logger::new(
@@ -123,6 +123,23 @@ async fn main() -> anyhow::Result<()> {
         logger.app(LogLevel::Warn, warning);
     }
 
+    // The daemon needs concurrent background tasks; the TUI, status and
+    // lifecycle commands are short-lived or single-viewer and do not need a
+    // worker pool per CPU core.
+    let runtime = if matches!(cli.command.as_ref(), Some(Command::Serve)) {
+        daemon_runtime()?
+    } else {
+        current_thread_runtime()?
+    };
+    runtime.block_on(run_with_config(cli, paths, config, logger))
+}
+
+async fn run_with_config(
+    cli: Cli,
+    paths: Paths,
+    config: Config,
+    logger: Logger,
+) -> anyhow::Result<()> {
     let command = cli.command.clone().and_then(Command::into_runtime);
     match command {
         Some(RuntimeCommand::Start) => return start_daemon(&cli, &paths).await,
@@ -143,6 +160,23 @@ async fn main() -> anyhow::Result<()> {
     install_panic_hook();
     logger.app(LogLevel::Info, "TUI client attached");
     client::run(socket, config.language).await
+}
+
+fn current_thread_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+fn daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    // Two workers are enough for the daemon's I/O-bound polling, process
+    // supervision and at most four concurrent subscription fetches, and avoid
+    // a thread per CPU core on large hosts.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("dfr-daemon")
+        .enable_all()
+        .build()
 }
 
 async fn serve(config: Config, paths: Paths, logger: Logger) -> anyhow::Result<()> {

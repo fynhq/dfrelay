@@ -19,6 +19,20 @@ pub fn sanitize_display(input: &str) -> String {
     out
 }
 
+/// Sanitize an already-owned string without copying it when it is clean.
+/// Most log lines and node names need no rewriting, so this keeps the hot path
+/// allocation-free instead of copying every value.
+pub fn sanitize_owned(input: String) -> String {
+    if input
+        .chars()
+        .any(|ch| matches!(ch, '\n' | '\r' | '\t') || ch.is_control() || is_unsafe_format_char(ch))
+    {
+        sanitize_display(&input)
+    } else {
+        input
+    }
+}
+
 /// Zero-width and bidirectional formatting characters (`Unicode` category Cf)
 /// that have no legitimate use in a node or host name and can visually spoof
 /// or reorder surrounding text.
@@ -75,5 +89,16 @@ mod tests {
     fn removes_bidi_and_zero_width_format_characters() {
         let input = "ab\u{202E}cd\u{200B}ef\u{2066}gh\u{FEFF}\u{00AD}\u{E0001}\u{E0041}\u{FFF9}";
         assert_eq!(sanitize_display(input), "abcdefgh");
+    }
+
+    #[test]
+    fn sanitize_owned_reuses_clean_strings_and_cleans_dirty_ones() {
+        let clean = String::from("香港 01");
+        let pointer = clean.as_ptr();
+        let sanitized = sanitize_owned(clean);
+        assert_eq!(sanitized, "香港 01");
+        assert_eq!(sanitized.as_ptr(), pointer);
+
+        assert_eq!(sanitize_owned("a\nb".to_string()), "a b");
     }
 }

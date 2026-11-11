@@ -1466,7 +1466,41 @@ async fn metrics_node_delays_feed_the_nodes_view() {
     metrics.node_delays.insert("n1".to_string(), 42);
     app.handle_event(AppEvent::Metrics(metrics)).await;
     assert_eq!(app.node_delays.get("n1"), Some(&42));
+    assert!(
+        app.metrics.node_delays.is_empty(),
+        "the metrics snapshot must not keep a second delay map"
+    );
     assert_eq!(app.view().node_delays.get("n1"), Some(&42));
+}
+
+#[tokio::test]
+async fn new_connection_ids_only_flag_new_traffic() {
+    let (mut app, _dir) = test_app().await;
+    let connection = |id: &str| crate::singbox::clash::ConnectionInfo {
+        id: id.to_string(),
+        ..Default::default()
+    };
+    app.handle_event(AppEvent::Metrics(MetricsSnapshot {
+        connections: vec![connection("a")],
+        ..Default::default()
+    }))
+    .await;
+    assert!(app.health_fast_probe_pending);
+
+    app.health_fast_probe_pending = false;
+    app.handle_event(AppEvent::Metrics(MetricsSnapshot {
+        connections: vec![connection("a")],
+        ..Default::default()
+    }))
+    .await;
+    assert!(!app.health_fast_probe_pending);
+
+    app.handle_event(AppEvent::Metrics(MetricsSnapshot {
+        connections: vec![connection("a"), connection("b")],
+        ..Default::default()
+    }))
+    .await;
+    assert!(app.health_fast_probe_pending);
 }
 
 fn tagged_node(name: &str, tag: &str) -> Node {

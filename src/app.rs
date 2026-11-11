@@ -26,7 +26,7 @@ use crate::state::{
 };
 use crate::subscription::model::Node;
 use crate::subscription::{self, merge_nodes, FetchOptions, SubscriptionRuntime};
-use crate::text::sanitize_display;
+use crate::text::{sanitize_display, sanitize_owned};
 use crate::view::{BinaryStatus, DaemonStatus, View};
 
 mod health;
@@ -67,8 +67,19 @@ const IDLE_METRICS_INTERVAL: Duration = Duration::from_secs(3);
 const PROXIES_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub const MAX_LIST_ROWS: usize = 200;
 pub const TOAST_TTL: Duration = Duration::from_secs(3);
-pub const VIEW_QUEUE_LIMIT: usize = 8;
+pub const VIEW_QUEUE_LIMIT: usize = 2;
 pub const MAX_CLIENTS: usize = 16;
+/// Bound on the connection IDs kept for new-traffic detection. The Clash API
+/// can return an unbounded list; hashing keeps the guard cheap while still
+/// noticing new connections on a busy proxy.
+const MAX_HEALTH_CONNECTION_IDS: usize = 8192;
+
+fn connection_id_hash(id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum NodeSort {
@@ -317,7 +328,7 @@ pub struct App {
     health_generation: u64,
     last_health_probe: Option<Instant>,
     last_health_activity: Option<Instant>,
-    health_connection_ids: HashSet<String>,
+    health_connection_ids: HashSet<u64>,
     last_metrics_at: Option<Instant>,
     recovery_in_flight: bool,
     last_recovery: Option<Instant>,
@@ -623,7 +634,7 @@ impl App {
             .message
             .clone()
             .filter(|_| self.message_at.is_none_or(|at| at.elapsed() < TOAST_TTL))
-            .map(|message| crate::text::sanitize_display(&message));
+            .map(crate::text::sanitize_owned);
         let show_nodes = self.page == Page::Nodes;
         let filtered = if show_nodes {
             self.auto_candidate_tags()
@@ -645,18 +656,16 @@ impl App {
         };
         let mut config = self.config.clone();
         config.subscriptions.clear();
-        config.lan_username = crate::text::sanitize_display(&config.lan_username);
-        config.keywords_include = config
-            .keywords_include
-            .iter()
-            .map(|keyword| crate::text::sanitize_display(keyword))
+        config.lan_username = crate::text::sanitize_owned(config.lan_username);
+        config.keywords_include = std::mem::take(&mut config.keywords_include)
+            .into_iter()
+            .map(crate::text::sanitize_owned)
             .collect();
-        config.keywords_exclude = config
-            .keywords_exclude
-            .iter()
-            .map(|keyword| crate::text::sanitize_display(keyword))
+        config.keywords_exclude = std::mem::take(&mut config.keywords_exclude)
+            .into_iter()
+            .map(crate::text::sanitize_owned)
             .collect();
-        config.test_url = crate::text::sanitize_display(&config.test_url);
+        config.test_url = crate::text::sanitize_owned(config.test_url);
         let lan_password_set = !config.lan_password.is_empty();
         config.lan_password.clear();
         let binary_status = if !self.binary_installed {
@@ -694,9 +703,9 @@ impl App {
                     .iter()
                     .map(|node| crate::view::NodeView {
                         tag: node.tag.clone(),
-                        name: sanitize_display(&node.name),
-                        source: sanitize_display(&node.source),
-                        protocol: sanitize_display(&node.protocol),
+                        name: sanitize_owned(node.name.clone()),
+                        source: sanitize_owned(node.source.clone()),
+                        protocol: sanitize_owned(node.protocol.clone()),
                     })
                     .collect()
             } else {
@@ -709,13 +718,13 @@ impl App {
                 .subscriptions
                 .iter()
                 .map(|runtime| crate::view::SubscriptionView {
-                    name: sanitize_display(&runtime.config.name),
-                    url: sanitize_display(&subscription::redact_url(&runtime.config.url)),
+                    name: sanitize_owned(runtime.config.name.clone()),
+                    url: sanitize_owned(subscription::redact_url(&runtime.config.url)),
                     enabled: runtime.config.enabled,
                     node_count: runtime.nodes.len(),
                     unsupported_count: runtime.unsupported.len(),
                     last_updated: runtime.last_updated.clone(),
-                    error: runtime.error.as_deref().map(sanitize_display),
+                    error: runtime.error.clone().map(sanitize_owned),
                     stale: runtime.stale,
                 })
                 .collect(),
@@ -729,20 +738,17 @@ impl App {
             down_speed: self.down_speed,
             local_ips: self.local_ips.clone(),
             proxy_ips: self.proxy_ips.clone(),
-            binary_version: self.binary_version.as_deref().map(sanitize_display),
+            binary_version: self.binary_version.clone().map(sanitize_owned),
             binary_verified: self.binary_verified,
             binary_status,
-            latest_binary_version: self.latest_binary_version.as_deref().map(sanitize_display),
+            latest_binary_version: self.latest_binary_version.clone().map(sanitize_owned),
             previous_binary_available: self.previous_binary_available,
-            previous_binary_version: self
-                .previous_binary_version
-                .as_deref()
-                .map(sanitize_display),
+            previous_binary_version: self.previous_binary_version.clone().map(sanitize_owned),
             setup: {
                 let mut setup = self.setup.clone();
-                setup.message = setup.message.as_deref().map(sanitize_display);
+                setup.message = setup.message.map(sanitize_owned);
                 for candidate in &mut setup.candidates {
-                    candidate.label = sanitize_display(&candidate.label);
+                    candidate.label = sanitize_owned(std::mem::take(&mut candidate.label));
                 }
                 setup
             },
@@ -758,7 +764,7 @@ impl App {
                 Vec::new()
             },
             log_file: self.logger.current_file(),
-            last_error: self.last_error.as_deref().map(sanitize_display),
+            last_error: self.last_error.clone().map(sanitize_owned),
             toast,
             restart_confirm: self.restart_confirm,
             rollback_confirm: self.rollback_confirm,
@@ -1116,7 +1122,7 @@ impl App {
                     self.restart_in_progress = false;
                 }
             }
-            AppEvent::Metrics(metrics) => {
+            AppEvent::Metrics(mut metrics) => {
                 let now = Instant::now();
                 if let Some((up, down, at)) = self.last_totals {
                     let seconds = now.duration_since(at).as_secs_f64();
@@ -1128,21 +1134,28 @@ impl App {
                 }
                 self.last_totals = Some((metrics.upload_total, metrics.download_total, now));
                 self.last_metrics_at = Some(now);
-                let new_connection = metrics
-                    .connections
-                    .iter()
-                    .any(|connection| !self.health_connection_ids.contains(&connection.id));
-                self.health_connection_ids = metrics
-                    .connections
-                    .iter()
-                    .map(|connection| connection.id.clone())
-                    .collect();
+                let new_connection = metrics.connections.iter().any(|connection| {
+                    !self
+                        .health_connection_ids
+                        .contains(&connection_id_hash(&connection.id))
+                });
+                self.health_connection_ids.clear();
+                self.health_connection_ids.extend(
+                    metrics
+                        .connections
+                        .iter()
+                        .take(MAX_HEALTH_CONNECTION_IDS)
+                        .map(|connection| connection_id_hash(&connection.id)),
+                );
                 if new_connection && !self.proxy_ips_in_flight && !self.health_probe_in_flight {
                     self.last_health_activity = Some(now);
                     self.health_fast_probe_pending = true;
                 }
-                for (tag, delay) in &metrics.node_delays {
-                    self.node_delays.insert(tag.clone(), *delay);
+                // Node delays live in their own map; keeping a second copy in
+                // the metrics snapshot doubles the per-node bookkeeping and is
+                // resent every second.
+                for (tag, delay) in metrics.node_delays.drain() {
+                    self.node_delays.insert(tag, delay);
                 }
                 self.metrics = metrics;
                 if self.metrics.connections.is_empty() {
@@ -1690,7 +1703,7 @@ impl App {
                 let name = self
                     .proxy_node_names
                     .get(&tag)
-                    .map(|name| sanitize_display(name))
+                    .map(|name| sanitize_owned(name.clone()))
                     .filter(|name| !name.is_empty())
                     .map(|name| format!(" ({name})"))
                     .unwrap_or_default();
@@ -1952,7 +1965,7 @@ impl App {
         self.metrics_task = Some(
             self.spawn_guarded_handle(BackgroundTask::Metrics, async move {
                 let mut selection = ProxySelection::default();
-                let mut node_delays = HashMap::new();
+                let mut pending_node_delays = HashMap::new();
                 let mut next_proxies = Instant::now();
                 let mut last_connection_error: Option<String> = None;
                 let mut last_proxy_error: Option<String> = None;
@@ -1978,7 +1991,9 @@ impl App {
                         match client.proxies().await {
                             Ok(snapshot) => {
                                 selection = snapshot.selection;
-                                node_delays = snapshot.node_delays;
+                                // Publish the delay map once per proxies poll;
+                                // the app merges it into its own copy.
+                                pending_node_delays = snapshot.node_delays;
                                 last_proxy_error = None;
                             }
                             Err(err) => {
@@ -2000,7 +2015,7 @@ impl App {
                             download_total: connections.download_total,
                             connections: connections.connections,
                             selection: selection.clone(),
-                            node_delays: node_delays.clone(),
+                            node_delays: std::mem::take(&mut pending_node_delays),
                         };
                         if tx.send(AppEvent::Metrics(metrics)).is_err() {
                             break;
@@ -2665,26 +2680,20 @@ fn sort_nodes(
     auto_tags: &HashSet<String>,
     delays: &HashMap<String, u64>,
 ) {
+    // Compute the sort keys once per node instead of lowercasing and probing
+    // the maps on every comparison (O(n log n) allocations on each refresh).
     match mode {
-        NodeSort::AutoLatency => nodes.sort_by(|left, right| {
-            (!auto_tags.contains(&left.tag))
-                .cmp(&(!auto_tags.contains(&right.tag)))
-                .then_with(|| {
-                    delays
-                        .get(&left.tag)
-                        .copied()
-                        .unwrap_or(u64::MAX)
-                        .cmp(&delays.get(&right.tag).copied().unwrap_or(u64::MAX))
-                })
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-                .then_with(|| left.tag.cmp(&right.tag))
+        NodeSort::AutoLatency => nodes.sort_by_cached_key(|node| {
+            (
+                !auto_tags.contains(&node.tag),
+                delays.get(&node.tag).copied().unwrap_or(u64::MAX),
+                node.name.to_lowercase(),
+                node.tag.clone(),
+            )
         }),
-        NodeSort::Name => nodes.sort_by(|left, right| {
-            left.name
-                .to_lowercase()
-                .cmp(&right.name.to_lowercase())
-                .then_with(|| left.tag.cmp(&right.tag))
-        }),
+        NodeSort::Name => {
+            nodes.sort_by_cached_key(|node| (node.name.to_lowercase(), node.tag.clone()))
+        }
     }
 }
 

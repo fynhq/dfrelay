@@ -245,12 +245,12 @@ impl RawConnection {
         let metadata = self.metadata.unwrap_or_default();
         ConnectionInfo {
             id: self.id.unwrap_or_default(),
-            host: crate::text::sanitize_display(metadata.host.as_deref().unwrap_or("")),
-            destination_ip: crate::text::sanitize_display(
-                metadata.destination_ip.as_deref().unwrap_or(""),
+            host: crate::text::sanitize_owned(metadata.host.unwrap_or_default()),
+            destination_ip: crate::text::sanitize_owned(
+                metadata.destination_ip.unwrap_or_default(),
             ),
-            destination_port: crate::text::sanitize_display(&metadata.destination_port),
-            network: crate::text::sanitize_display(metadata.network.as_deref().unwrap_or("")),
+            destination_port: crate::text::sanitize_owned(metadata.destination_port),
+            network: crate::text::sanitize_owned(metadata.network.unwrap_or_default()),
             upload: self.upload.unwrap_or(0),
             download: self.download.unwrap_or(0),
             duration_secs: connection_duration(self.start.as_deref()),
