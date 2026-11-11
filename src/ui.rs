@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -20,21 +18,11 @@ use crate::theme::Palette;
 use crate::view::{BinaryStatus, View};
 
 const HEADER_HEIGHT: u16 = 4;
-const TOAST_FADE: Duration = Duration::from_millis(600);
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PROGRESS_BAR_WIDTH: usize = 12;
 
 mod format;
 use format::*;
-
-/// Client-side animation inputs. `tick` counts 100 ms units since the current
-/// page was entered; `toast_remaining` comes from the daemon snapshot and is
-/// counted down locally between snapshots.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Anim {
-    pub tick: u64,
-    pub toast_remaining: Option<Duration>,
-}
 
 /// Whether the current snapshot contains visible motion that needs periodic
 /// redraws. Idle pages stay static.
@@ -42,7 +30,6 @@ pub fn needs_animation(view: &View) -> bool {
     let setup_busy = matches!(view.overlay, Some(Overlay::Setup { .. }))
         && (view.setup.downloading || view.setup.installing || view.setup.rollback_in_flight);
     matches!(view.page, Page::Nodes | Page::Subscriptions)
-        || view.toast_remaining_ms.is_some()
         || view.restart_in_progress
         || matches!(view.status, ProxyStatus::Starting | ProxyStatus::Stopping)
         || setup_busy
@@ -70,26 +57,9 @@ fn progress_fill(tick: u64, width: usize) -> (usize, usize) {
     (offset, fill)
 }
 
-fn toast_style(remaining: Option<Duration>) -> Style {
-    let yellow = Style::default().fg(Color::Yellow);
-    let Some(remaining) = remaining else {
-        return yellow;
-    };
-    let ratio = (remaining.as_secs_f32() / TOAST_FADE.as_secs_f32()).clamp(0.0, 1.0);
-    if ratio >= 1.0 {
-        return yellow;
-    }
-    let mix = |start: f32, end: f32| -> u8 { (end + (start - end) * ratio).round() as u8 };
-    Style::default().fg(Color::Rgb(
-        mix(255.0, 140.0),
-        mix(255.0, 140.0),
-        mix(0.0, 140.0),
-    ))
-}
-
-/// Renders the view; `anim` drives time-based effects (marquee, spinners,
-/// download bar and toast fade).
-pub fn render_at(frame: &mut Frame, view: &View, anim: Anim, palette: Palette) {
+/// Renders the view; `tick` advances time-based effects (marquee, spinners and
+/// the download bar).
+pub fn render_at(frame: &mut Frame, view: &View, tick: u64, palette: Palette) {
     let area = frame.area();
     frame.render_widget(Clear, area);
     if area.width < 60 || area.height < 16 {
@@ -108,13 +78,13 @@ pub fn render_at(frame: &mut Frame, view: &View, anim: Anim, palette: Palette) {
     ])
     .split(area);
 
-    render_header(frame, view, chunks[0], anim, palette);
+    render_header(frame, view, chunks[0], tick, palette);
     render_tabs(frame, view, chunks[1]);
     if view.overlay.is_none() {
-        render_page(frame, view, chunks[2], anim.tick, palette);
+        render_page(frame, view, chunks[2], tick, palette);
     }
-    render_footer(frame, view, chunks[3], anim.tick, palette);
-    render_overlay(frame, view, area, anim.tick, palette);
+    render_footer(frame, view, chunks[3], tick, palette);
+    render_overlay(frame, view, area, tick, palette);
 }
 
 fn titled_block(title: impl Into<String>) -> Block<'static> {
@@ -128,12 +98,12 @@ fn render_header(
     frame: &mut Frame,
     view: &View,
     area: ratatui::layout::Rect,
-    anim: Anim,
+    tick: u64,
     palette: Palette,
 ) {
     let text = view.text();
     let status_display = if matches!(view.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
-        format!("{} {}", spinner_frame(anim.tick), view.status.label(text))
+        format!("{} {}", spinner_frame(tick), view.status.label(text))
     } else if view.status == ProxyStatus::Running && view.uptime() != text.common_none {
         view.config
             .language
@@ -173,7 +143,7 @@ fn render_header(
         status_style.add_modifier(Modifier::BOLD),
     )];
     let (right_text, right_style) = if let Some(toast) = &view.toast {
-        (toast.as_str(), toast_style(anim.toast_remaining))
+        (toast.as_str(), Style::default().fg(Color::Yellow))
     } else {
         (text.slogan, Style::default().fg(palette.muted()))
     };

@@ -94,10 +94,6 @@ pub struct View {
     pub log_file: PathBuf,
     pub last_error: Option<String>,
     pub toast: Option<String>,
-    /// Milliseconds until the daemon clears `toast`; `None` when no timed toast
-    /// is active or the snapshot comes from an older daemon.
-    #[serde(default)]
-    pub toast_remaining_ms: Option<u64>,
     pub restart_confirm: bool,
     pub rollback_confirm: bool,
     pub restart_in_progress: bool,

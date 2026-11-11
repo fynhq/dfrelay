@@ -771,7 +771,7 @@ async fn subscriptions_scroll_long_name_url_and_status_text() {
         let mut terminal = Terminal::new(backend).unwrap();
         let view = view.clone();
         terminal
-            .draw(|frame| render_at(frame, &view, anim(tick), Palette::Dark))
+            .draw(|frame| render_at(frame, &view, tick, Palette::Dark))
             .unwrap();
         terminal
             .backend()
@@ -812,7 +812,7 @@ async fn nodes_scroll_long_source_names_inside_the_column() {
         let mut terminal = Terminal::new(backend).unwrap();
         let view = view.clone();
         terminal
-            .draw(|frame| render_at(frame, &view, anim(tick), Palette::Dark))
+            .draw(|frame| render_at(frame, &view, tick, Palette::Dark))
             .unwrap();
         terminal
             .backend()
@@ -939,7 +939,7 @@ async fn dark_palette_uses_dark_gray_for_muted_text() {
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
     terminal
-        .draw(|frame| render_at(frame, &view, Anim::default(), Palette::Dark))
+        .draw(|frame| render_at(frame, &view, 0, Palette::Dark))
         .unwrap();
     let cells = terminal.backend().buffer().content.clone();
     let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
@@ -958,7 +958,7 @@ async fn light_palette_uses_dark_gray_for_muted_text() {
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
     terminal
-        .draw(|frame| render_at(frame, &view, Anim::default(), Palette::Light))
+        .draw(|frame| render_at(frame, &view, 0, Palette::Light))
         .unwrap();
     let cells = terminal.backend().buffer().content.clone();
     let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
@@ -2331,23 +2331,6 @@ fn download_bar_ping_pongs_across_the_track() {
     assert!(offset + fill <= width, "{offset}+{fill}");
 }
 
-#[test]
-fn toast_fades_toward_gray_in_the_last_moments() {
-    assert_eq!(toast_style(None).fg, Some(Color::Yellow));
-    assert_eq!(toast_style(Some(TOAST_FADE)).fg, Some(Color::Yellow));
-    assert_eq!(
-        toast_style(Some(Duration::ZERO)).fg,
-        Some(Color::Rgb(140, 140, 140))
-    );
-    match toast_style(Some(TOAST_FADE / 2)).fg {
-        Some(Color::Rgb(r, g, b)) => {
-            assert_eq!(r, g);
-            assert!(b > 0 && b < 255, "{b}");
-        }
-        other => panic!("unexpected toast color: {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn animation_runs_only_while_motion_is_visible() {
     let (mut app, _dir) = test_app(Lang::En).await;
@@ -2368,10 +2351,9 @@ async fn animation_runs_only_while_motion_is_visible() {
     assert!(!needs_animation(&app.view()));
 
     app.notify("saved");
-    assert!(needs_animation(&app.view()));
+    assert!(!needs_animation(&app.view()));
     app.message = None;
     app.message_at = None;
-    assert!(!needs_animation(&app.view()));
 
     app.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.downloading = true;
@@ -2384,7 +2366,7 @@ fn footer_text(view: &View, tick: u64) -> String {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render_at(frame, view, anim(tick), Palette::Dark))
+        .draw(|frame| render_at(frame, view, tick, Palette::Dark))
         .unwrap();
     terminal
         .backend()
@@ -2418,13 +2400,6 @@ async fn starting_status_shows_a_spinner() {
     assert!(header.contains("Starting"), "{header}");
 }
 
-fn anim(tick: u64) -> Anim {
-    Anim {
-        tick,
-        toast_remaining: None,
-    }
-}
-
 fn render(frame: &mut Frame, view: &View) {
-    render_at(frame, view, Anim::default(), Palette::Dark);
+    render_at(frame, view, 0, Palette::Dark);
 }

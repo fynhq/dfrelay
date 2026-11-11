@@ -1422,24 +1422,9 @@ async fn toast_expires_after_ttl() {
     let (mut app, _dir) = test_app().await;
     assert_eq!(TOAST_TTL, Duration::from_secs(3));
     app.notify("saved");
-    let view = app.view();
-    assert!(view.toast.is_some());
-    let remaining = view.toast_remaining_ms.expect("timed toast");
-    assert!(remaining > 0 && remaining <= 3000, "{remaining}");
+    assert!(app.view().toast.is_some());
     app.message_at = Some(Instant::now() - TOAST_TTL - Duration::from_secs(1));
-    let view = app.view();
-    assert!(view.toast.is_none());
-    assert!(view.toast_remaining_ms.is_none());
-}
-
-#[tokio::test]
-async fn untimed_toast_has_no_remaining_time() {
-    let (mut app, _dir) = test_app().await;
-    app.message = Some("sticky".to_string());
-    app.message_at = None;
-    let view = app.view();
-    assert_eq!(view.toast.as_deref(), Some("sticky"));
-    assert!(view.toast_remaining_ms.is_none());
+    assert!(app.view().toast.is_none());
 }
 
 #[tokio::test]
