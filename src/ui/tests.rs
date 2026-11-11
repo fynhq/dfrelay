@@ -771,7 +771,7 @@ async fn subscriptions_scroll_long_name_url_and_status_text() {
         let mut terminal = Terminal::new(backend).unwrap();
         let view = view.clone();
         terminal
-            .draw(|frame| render_at(frame, &view, tick, Palette::Dark))
+            .draw(|frame| render_at(frame, &view, tick, false, Palette::Dark))
             .unwrap();
         terminal
             .backend()
@@ -812,7 +812,7 @@ async fn nodes_scroll_long_source_names_inside_the_column() {
         let mut terminal = Terminal::new(backend).unwrap();
         let view = view.clone();
         terminal
-            .draw(|frame| render_at(frame, &view, tick, Palette::Dark))
+            .draw(|frame| render_at(frame, &view, tick, false, Palette::Dark))
             .unwrap();
         terminal
             .backend()
@@ -939,7 +939,7 @@ async fn dark_palette_uses_dark_gray_for_muted_text() {
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
     terminal
-        .draw(|frame| render_at(frame, &view, 0, Palette::Dark))
+        .draw(|frame| render_at(frame, &view, 0, false, Palette::Dark))
         .unwrap();
     let cells = terminal.backend().buffer().content.clone();
     let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
@@ -958,7 +958,7 @@ async fn light_palette_uses_dark_gray_for_muted_text() {
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
     terminal
-        .draw(|frame| render_at(frame, &view, 0, Palette::Light))
+        .draw(|frame| render_at(frame, &view, 0, false, Palette::Light))
         .unwrap();
     let cells = terminal.backend().buffer().content.clone();
     let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
@@ -2360,10 +2360,7 @@ async fn animation_runs_only_while_motion_is_visible() {
     );
     app.status = ProxyStatus::Running;
     assert!(!needs_animation(&app.view()));
-    assert_eq!(
-        animation_period(&app.view()),
-        Some(Duration::from_millis(500))
-    );
+    assert_eq!(animation_period(&app.view()), Some(STATUS_PULSE));
     app.status = ProxyStatus::Stopped;
     assert_eq!(animation_period(&app.view()), None);
 
@@ -2383,11 +2380,36 @@ async fn animation_runs_only_while_motion_is_visible() {
     assert!(!needs_animation(&app.view()));
 }
 
+#[test]
+fn running_pulse_switches_every_800ms() {
+    assert!(!status_pulse_green(Duration::ZERO));
+    assert!(!status_pulse_green(Duration::from_millis(799)));
+    assert!(status_pulse_green(Duration::from_millis(800)));
+    assert!(!status_pulse_green(Duration::from_millis(1600)));
+}
+
+#[test]
+fn pulse_redraws_stay_on_the_800ms_grid() {
+    let start = Instant::now();
+    assert_eq!(
+        next_animation_deadline(STATUS_PULSE, start, start + Duration::from_millis(300)),
+        start + Duration::from_millis(800)
+    );
+    assert_eq!(
+        next_animation_deadline(STATUS_PULSE, start, start + Duration::from_millis(800)),
+        start + Duration::from_millis(1600)
+    );
+    assert_eq!(
+        next_animation_deadline(Duration::from_millis(100), start, start),
+        start + Duration::from_millis(100)
+    );
+}
+
 fn footer_text(view: &View, tick: u64) -> String {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render_at(frame, view, tick, Palette::Dark))
+        .draw(|frame| render_at(frame, view, tick, false, Palette::Dark))
         .unwrap();
     terminal
         .backend()
@@ -2422,11 +2444,11 @@ async fn starting_status_shows_a_spinner() {
     assert!(!header.contains('◉'), "{header}");
 }
 
-fn header_dot_color(view: &View, tick: u64) -> Color {
+fn header_dot_color(view: &View, status_green: bool) -> Color {
     let backend = TestBackend::new(100, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render_at(frame, view, tick, Palette::Dark))
+        .draw(|frame| render_at(frame, view, 0, status_green, Palette::Dark))
         .unwrap();
     terminal
         .backend()
@@ -2443,19 +2465,18 @@ async fn status_dot_follows_state_and_pulses_while_running() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.status = ProxyStatus::Stopped;
     let view = app.view();
-    assert_eq!(header_dot_color(&view, 0), Color::DarkGray);
+    assert_eq!(header_dot_color(&view, false), Color::DarkGray);
 
     app.status = ProxyStatus::Failed;
     let view = app.view();
-    assert_eq!(header_dot_color(&view, 0), Color::Red);
+    assert_eq!(header_dot_color(&view, false), Color::Red);
 
     app.status = ProxyStatus::Running;
     let view = app.view();
-    assert_eq!(header_dot_color(&view, 0), Color::DarkGray);
-    assert_eq!(header_dot_color(&view, 5), Color::Green);
-    assert_eq!(header_dot_color(&view, 10), Color::DarkGray);
+    assert_eq!(header_dot_color(&view, false), Color::DarkGray);
+    assert_eq!(header_dot_color(&view, true), Color::Green);
 }
 
 fn render(frame: &mut Frame, view: &View) {
-    render_at(frame, view, 0, Palette::Dark);
+    render_at(frame, view, 0, false, Palette::Dark);
 }

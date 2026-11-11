@@ -61,8 +61,10 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         let mut last_log_detail_max: Option<u16> = None;
         let mut last_page: Option<Page> = None;
         let mut animation_start = Instant::now();
-        let mut needs_draw = true;
+        let status_start = Instant::now();
         let mut animation_period: Option<Duration> = None;
+        let mut animation_deadline: Option<Instant> = None;
+        let mut needs_draw = true;
 
         loop {
             if needs_draw {
@@ -78,8 +80,9 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                     }
                 }
                 let tick = (animation_start.elapsed().as_millis() / 100) as u64;
+                let status_green = crate::ui::status_pulse_green(status_start.elapsed());
                 terminal.draw(|frame| match &view {
-                    Some(view) => crate::ui::render_at(frame, view, tick, palette),
+                    Some(view) => crate::ui::render_at(frame, view, tick, status_green, palette),
                     None => render_connecting(frame, lang),
                 })?;
                 if let Some(current) = &view {
@@ -128,6 +131,13 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                                     break;
                                 }
                                 animation_period = crate::ui::animation_period(&frame);
+                                animation_deadline = animation_period.map(|period| {
+                                    crate::ui::next_animation_deadline(
+                                        period,
+                                        status_start,
+                                        Instant::now(),
+                                    )
+                                });
                                 view = Some(*frame);
                                 needs_draw = true;
                             }
@@ -172,8 +182,17 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                         InputEvent::Resize => needs_draw = true,
                     }
                 }
-                _ = tokio::time::sleep(animation_period.unwrap_or(Duration::from_millis(100))), if animation_period.is_some() => {
+                _ = tokio::time::sleep_until(animation_deadline.unwrap_or_else(Instant::now).into()), if animation_deadline.is_some() => {
                     needs_draw = true;
+                    let now = Instant::now();
+                    animation_deadline = animation_period.map(|period| {
+                        let next = animation_deadline.unwrap_or(now) + period;
+                        if next <= now {
+                            now + period
+                        } else {
+                            next
+                        }
+                    });
                 }
             }
         }

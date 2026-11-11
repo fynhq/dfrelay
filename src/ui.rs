@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -20,6 +20,8 @@ use crate::theme::Palette;
 use crate::view::{BinaryStatus, View};
 
 const HEADER_HEIGHT: u16 = 4;
+const FAST_TICK: Duration = Duration::from_millis(100);
+pub const STATUS_PULSE: Duration = Duration::from_millis(800);
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PROGRESS_BAR_WIDTH: usize = 12;
 
@@ -38,19 +40,35 @@ pub fn needs_animation(view: &View) -> bool {
 }
 
 /// Redraw cadence for the current snapshot. Fast effects tick at 100 ms, the
-/// running indicator pulses at 500 ms, and everything else stays static.
+/// running indicator pulses at 800 ms, and everything else stays static.
 pub fn animation_period(view: &View) -> Option<Duration> {
     if needs_animation(view) {
-        Some(Duration::from_millis(100))
+        Some(FAST_TICK)
     } else if view.status == ProxyStatus::Running {
-        Some(Duration::from_millis(500))
+        Some(STATUS_PULSE)
     } else {
         None
     }
 }
 
-fn status_dot_style(tick: u64, palette: Palette) -> Style {
-    if (tick / 5) % 2 == 1 {
+/// Next redraw deadline. The running pulse stays on its 800 ms grid even when
+/// view snapshots trigger extra draws in between.
+pub fn next_animation_deadline(period: Duration, status_start: Instant, now: Instant) -> Instant {
+    if period == STATUS_PULSE {
+        let elapsed = now.duration_since(status_start).as_millis();
+        let remainder = elapsed % STATUS_PULSE.as_millis();
+        now + Duration::from_millis((STATUS_PULSE.as_millis() - remainder) as u64)
+    } else {
+        now + period
+    }
+}
+
+pub fn status_pulse_green(elapsed: Duration) -> bool {
+    (elapsed.as_millis() / STATUS_PULSE.as_millis()) % 2 == 1
+}
+
+fn status_dot_style(green: bool, palette: Palette) -> Style {
+    if green {
         Style::default().fg(Color::Green)
     } else {
         Style::default().fg(palette.muted())
@@ -80,8 +98,8 @@ fn progress_fill(tick: u64, width: usize) -> (usize, usize) {
 }
 
 /// Renders the view; `tick` advances time-based effects (marquee, spinners and
-/// the download bar).
-pub fn render_at(frame: &mut Frame, view: &View, tick: u64, palette: Palette) {
+/// the download bar), `status_green` sets the running indicator phase.
+pub fn render_at(frame: &mut Frame, view: &View, tick: u64, status_green: bool, palette: Palette) {
     let area = frame.area();
     frame.render_widget(Clear, area);
     if area.width < 60 || area.height < 16 {
@@ -100,7 +118,7 @@ pub fn render_at(frame: &mut Frame, view: &View, tick: u64, palette: Palette) {
     ])
     .split(area);
 
-    render_header(frame, view, chunks[0], tick, palette);
+    render_header(frame, view, chunks[0], tick, status_green, palette);
     render_tabs(frame, view, chunks[1]);
     if view.overlay.is_none() {
         render_page(frame, view, chunks[2], tick, palette);
@@ -121,6 +139,7 @@ fn render_header(
     view: &View,
     area: ratatui::layout::Rect,
     tick: u64,
+    status_green: bool,
     palette: Palette,
 ) {
     let text = view.text();
@@ -141,7 +160,7 @@ fn render_header(
         ProxyStatus::Starting | ProxyStatus::Stopping => {
             (format!("{} ", spinner_frame(tick)), status_style)
         }
-        ProxyStatus::Running => ("◉ ".to_string(), status_dot_style(tick, palette)),
+        ProxyStatus::Running => ("◉ ".to_string(), status_dot_style(status_green, palette)),
         ProxyStatus::Stopped | ProxyStatus::Failed => ("◉ ".to_string(), status_style),
     };
     let current = view.current_node().unwrap_or(text.no_nodes);
