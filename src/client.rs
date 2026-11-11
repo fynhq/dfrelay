@@ -62,7 +62,7 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         let mut last_page: Option<Page> = None;
         let mut animation_start = Instant::now();
         let mut needs_draw = true;
-        let mut animate = false;
+        let mut animation_period: Option<Duration> = None;
 
         loop {
             if needs_draw {
@@ -127,7 +127,7 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                                 if frame.quitting {
                                     break;
                                 }
-                                animate = crate::ui::needs_animation(&frame);
+                                animation_period = crate::ui::animation_period(&frame);
                                 view = Some(*frame);
                                 needs_draw = true;
                             }
@@ -172,7 +172,7 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                         InputEvent::Resize => needs_draw = true,
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)), if animate => {
+                _ = tokio::time::sleep(animation_period.unwrap_or(Duration::from_millis(100))), if animation_period.is_some() => {
                     needs_draw = true;
                 }
             }

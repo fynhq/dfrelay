@@ -1970,7 +1970,7 @@ async fn nodes_mark_a_single_active_node() {
     let marks: Vec<String> = rows
         .iter()
         .map(|row| row.concat())
-        .filter(|row| row.contains('◉'))
+        .filter(|row| row.contains('◉') && row.contains("test"))
         .collect();
     assert_eq!(marks.len(), 1, "{marks:?}");
     assert!(marks[0].contains("hk-01"), "{marks:?}");
@@ -1982,7 +1982,7 @@ async fn nodes_mark_a_single_active_node() {
     let marks: Vec<String> = rows
         .iter()
         .map(|row| row.concat())
-        .filter(|row| row.contains('◉'))
+        .filter(|row| row.contains('◉') && row.contains("test"))
         .collect();
     assert_eq!(marks.len(), 1, "{marks:?}");
     assert!(marks[0].contains("jp-02"), "{marks:?}");
@@ -1994,7 +1994,7 @@ async fn nodes_mark_a_single_active_node() {
     let marks: Vec<String> = rows
         .iter()
         .map(|row| row.concat())
-        .filter(|row| row.contains('◉'))
+        .filter(|row| row.contains('◉') && row.contains("test"))
         .collect();
     assert_eq!(marks.len(), 1, "{marks:?}");
     assert!(marks[0].contains("jp-02"), "{marks:?}");
@@ -2052,7 +2052,14 @@ async fn nodes_active_row_uses_the_tab_accent_without_bold() {
 
     let active = rows
         .iter()
-        .find(|row| row.iter().any(|cell| cell.symbol() == "◉"))
+        .find(|row| {
+            row.iter().any(|cell| cell.symbol() == "◉")
+                && row
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("hk-01")
+        })
         .expect("active node row");
     let dot = active
         .iter()
@@ -2347,8 +2354,18 @@ async fn animation_runs_only_while_motion_is_visible() {
 
     app.status = ProxyStatus::Starting;
     assert!(needs_animation(&app.view()));
+    assert_eq!(
+        animation_period(&app.view()),
+        Some(Duration::from_millis(100))
+    );
     app.status = ProxyStatus::Running;
     assert!(!needs_animation(&app.view()));
+    assert_eq!(
+        animation_period(&app.view()),
+        Some(Duration::from_millis(500))
+    );
+    app.status = ProxyStatus::Stopped;
+    assert_eq!(animation_period(&app.view()), None);
 
     app.notify("saved");
     assert!(!needs_animation(&app.view()));
@@ -2358,6 +2375,10 @@ async fn animation_runs_only_while_motion_is_visible() {
     app.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.downloading = true;
     assert!(needs_animation(&app.view()));
+    assert_eq!(
+        animation_period(&app.view()),
+        Some(Duration::from_millis(100))
+    );
     app.overlay = None;
     assert!(!needs_animation(&app.view()));
 }
@@ -2398,6 +2419,41 @@ async fn starting_status_shows_a_spinner() {
     let header: String = content.chars().take(100 * 4).collect();
     assert!(header.contains(spinner_frame(0)), "{header}");
     assert!(header.contains("Starting"), "{header}");
+    assert!(!header.contains('◉'), "{header}");
+}
+
+fn header_dot_color(view: &View, tick: u64) -> Color {
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| render_at(frame, view, tick, Palette::Dark))
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .find(|cell| cell.symbol() == "◉")
+        .expect("status dot")
+        .fg
+}
+
+#[tokio::test]
+async fn status_dot_follows_state_and_pulses_while_running() {
+    let (mut app, _dir) = test_app(Lang::En).await;
+    app.status = ProxyStatus::Stopped;
+    let view = app.view();
+    assert_eq!(header_dot_color(&view, 0), Color::DarkGray);
+
+    app.status = ProxyStatus::Failed;
+    let view = app.view();
+    assert_eq!(header_dot_color(&view, 0), Color::Red);
+
+    app.status = ProxyStatus::Running;
+    let view = app.view();
+    assert_eq!(header_dot_color(&view, 0), Color::DarkGray);
+    assert_eq!(header_dot_color(&view, 5), Color::Green);
+    assert_eq!(header_dot_color(&view, 10), Color::DarkGray);
 }
 
 fn render(frame: &mut Frame, view: &View) {

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -33,6 +35,26 @@ pub fn needs_animation(view: &View) -> bool {
         || view.restart_in_progress
         || matches!(view.status, ProxyStatus::Starting | ProxyStatus::Stopping)
         || setup_busy
+}
+
+/// Redraw cadence for the current snapshot. Fast effects tick at 100 ms, the
+/// running indicator pulses at 500 ms, and everything else stays static.
+pub fn animation_period(view: &View) -> Option<Duration> {
+    if needs_animation(view) {
+        Some(Duration::from_millis(100))
+    } else if view.status == ProxyStatus::Running {
+        Some(Duration::from_millis(500))
+    } else {
+        None
+    }
+}
+
+fn status_dot_style(tick: u64, palette: Palette) -> Style {
+    if (tick / 5) % 2 == 1 {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(palette.muted())
+    }
 }
 
 fn spinner_frame(tick: u64) -> &'static str {
@@ -102,9 +124,7 @@ fn render_header(
     palette: Palette,
 ) {
     let text = view.text();
-    let status_display = if matches!(view.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
-        format!("{} {}", spinner_frame(tick), view.status.label(text))
-    } else if view.status == ProxyStatus::Running && view.uptime() != text.common_none {
+    let status_text = if view.status == ProxyStatus::Running && view.uptime() != text.common_none {
         view.config
             .language
             .running_with_uptime(text.status_running, view.uptime())
@@ -116,6 +136,13 @@ fn render_header(
         ProxyStatus::Starting | ProxyStatus::Stopping => Style::default().fg(Color::Yellow),
         ProxyStatus::Failed => Style::default().fg(Color::Red),
         ProxyStatus::Stopped => Style::default().fg(palette.muted()),
+    };
+    let (status_prefix, prefix_style) = match view.status {
+        ProxyStatus::Starting | ProxyStatus::Stopping => {
+            (format!("{} ", spinner_frame(tick)), status_style)
+        }
+        ProxyStatus::Running => ("◉ ".to_string(), status_dot_style(tick, palette)),
+        ProxyStatus::Stopped | ProxyStatus::Failed => ("◉ ".to_string(), status_style),
     };
     let current = view.current_node().unwrap_or(text.no_nodes);
     let prefix = format!("{}: ", text.nodes_title);
@@ -137,11 +164,12 @@ fn render_header(
         + UnicodeWidthStr::width(suffix.as_str());
     let current = truncate_to_width(current, available.saturating_sub(fixed).max(1));
 
-    let left_width = UnicodeWidthStr::width(status_display.as_str());
-    let mut first_line = vec![Span::styled(
-        status_display,
-        status_style.add_modifier(Modifier::BOLD),
-    )];
+    let left_width = UnicodeWidthStr::width(status_prefix.as_str())
+        + UnicodeWidthStr::width(status_text.as_str());
+    let mut first_line = vec![
+        Span::styled(status_prefix, prefix_style.add_modifier(Modifier::BOLD)),
+        Span::styled(status_text, status_style.add_modifier(Modifier::BOLD)),
+    ];
     let (right_text, right_style) = if let Some(toast) = &view.toast {
         (toast.as_str(), Style::default().fg(Color::Yellow))
     } else {
