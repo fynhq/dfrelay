@@ -12,6 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::i18n::Text;
 use crate::logging::{LogLevel, LogLine, LogSource};
+use crate::singbox::tags;
 use crate::state::{
     settings_items, EditForm, KeywordForm, LineInput, Overlay, Page, ProxyStatus, SettingsField,
     SettingsForm, SettingsItem, SubscriptionForm, MAIN_PAGES,
@@ -514,7 +515,7 @@ const NODE_COLUMNS: [Constraint; 5] = [
 /// manual pick and the stale urltest result at the same time.
 fn active_node_tag(view: &View) -> Option<&str> {
     match view.metrics.selection.selected.as_deref() {
-        Some("auto") => view.metrics.selection.auto_now.as_deref(),
+        Some(tags::AUTO) => view.metrics.selection.auto_now.as_deref(),
         Some(tag) => Some(tag),
         None => view
             .metrics

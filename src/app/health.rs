@@ -4,16 +4,17 @@
 //! the parent module, so this file only adds an `impl App` block.
 
 use super::*;
+use crate::singbox::tags;
 
 impl App {
     pub(super) fn health_target(&self) -> Option<String> {
         let selected = self.metrics.selection.selected.as_deref()?;
-        let tag = if selected == "auto" {
+        let tag = if selected == tags::AUTO {
             self.metrics
                 .selection
                 .auto_now
                 .as_deref()
-                .filter(|tag| *tag != "auto")?
+                .filter(|tag| *tag != tags::AUTO)?
         } else {
             selected
         };
@@ -145,7 +146,7 @@ impl App {
 
     pub(super) fn recovery_candidates(&self, trigger: &str) -> Vec<String> {
         let runtime: HashSet<&str> = self.proxy_node_tags.iter().map(String::as_str).collect();
-        let auto_mode = self.metrics.selection.selected.as_deref() == Some("auto");
+        let auto_mode = self.metrics.selection.selected.as_deref() == Some(tags::AUTO);
         let auto_nodes = if auto_mode {
             crate::selection::filter_nodes(
                 &self.nodes,
@@ -285,7 +286,7 @@ impl App {
 
     fn selection_state(&self) -> Option<(bool, Option<String>)> {
         let selected = self.metrics.selection.selected.as_ref()?;
-        if selected == "auto" {
+        if selected == tags::AUTO {
             Some((true, self.metrics.selection.auto_now.clone()))
         } else {
             Some((false, Some(selected.clone())))

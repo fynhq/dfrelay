@@ -18,6 +18,10 @@ use crate::app::{AppEvent, BackgroundTask};
 use crate::view::{DaemonStatus, View};
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
+/// Bumped when `ClientMsg`/`ServerMsg` or the `View` snapshot changes
+/// incompatibly. A mismatched client is rejected at the Hello step instead of
+/// failing later on every poll.
+pub const PROTOCOL_VERSION: u32 = 2;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
@@ -96,6 +100,7 @@ impl InputCode {
 pub enum ClientMsg {
     Hello {
         viewer: bool,
+        version: u32,
     },
     Key {
         code: InputCode,
@@ -216,7 +221,7 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
     .await
     {
         Ok(Ok(Some(line))) => match serde_json::from_str::<ClientMsg>(&line) {
-            Ok(ClientMsg::Hello { viewer }) => viewer,
+            Ok(ClientMsg::Hello { viewer, version }) if version == PROTOCOL_VERSION => viewer,
             _ => return,
         },
         _ => return,
@@ -480,7 +485,14 @@ pub async fn daemon_is_running(socket: &Path) -> bool {
 pub async fn control_start(socket: &Path) -> io::Result<Ack> {
     let stream = UnixStream::connect(socket).await?;
     let (read_half, mut write_half) = stream.into_split();
-    send(&mut write_half, &ClientMsg::Hello { viewer: false }).await?;
+    send(
+        &mut write_half,
+        &ClientMsg::Hello {
+            viewer: false,
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
     send(&mut write_half, &ClientMsg::StartProxy).await?;
     let mut lines = BufReader::new(read_half).lines();
     loop {
@@ -502,7 +514,14 @@ pub async fn control_start(socket: &Path) -> io::Result<Ack> {
 pub async fn control_status(socket: &Path) -> io::Result<DaemonStatus> {
     let stream = UnixStream::connect(socket).await?;
     let (read_half, mut write_half) = stream.into_split();
-    send(&mut write_half, &ClientMsg::Hello { viewer: false }).await?;
+    send(
+        &mut write_half,
+        &ClientMsg::Hello {
+            viewer: false,
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
     send(&mut write_half, &ClientMsg::Status).await?;
     let mut lines = BufReader::new(read_half).lines();
     loop {
@@ -526,7 +545,14 @@ pub async fn control_status(socket: &Path) -> io::Result<DaemonStatus> {
 pub async fn control_shutdown(socket: &Path) -> io::Result<()> {
     let stream = UnixStream::connect(socket).await?;
     let (read_half, mut write_half) = stream.into_split();
-    send(&mut write_half, &ClientMsg::Hello { viewer: false }).await?;
+    send(
+        &mut write_half,
+        &ClientMsg::Hello {
+            viewer: false,
+            version: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
     send(&mut write_half, &ClientMsg::Shutdown).await?;
     let mut lines = BufReader::new(read_half).lines();
     loop {
@@ -623,6 +649,23 @@ mod tests {
             assert!(event.modifiers.contains(KeyModifiers::CONTROL));
         }
         assert!(InputCode::from_key_code(KeyCode::F(1)).is_none());
+    }
+
+    #[test]
+    fn hello_carries_the_protocol_version() {
+        let line = serde_json::to_string(&ClientMsg::Hello {
+            viewer: true,
+            version: PROTOCOL_VERSION,
+        })
+        .unwrap();
+        let parsed: ClientMsg = serde_json::from_str(&line).unwrap();
+        match parsed {
+            ClientMsg::Hello { viewer, version } => {
+                assert!(viewer);
+                assert_eq!(version, PROTOCOL_VERSION);
+            }
+            _ => panic!("expected hello"),
+        }
     }
 
     #[test]

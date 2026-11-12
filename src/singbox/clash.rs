@@ -6,6 +6,8 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use super::tags;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectionInfo {
     pub id: String,
@@ -143,7 +145,7 @@ impl ClashClient {
     pub async fn select(&self, name: &str) -> Result<(), ClashError> {
         let response = self
             .http()?
-            .put(format!("{}/proxies/proxy", self.base))
+            .put(format!("{}/proxies/{}", self.base, tags::SELECTOR))
             .bearer_auth(&self.secret)
             .json(&serde_json::json!({ "name": name }))
             .send()
@@ -284,9 +286,9 @@ impl ProxiesResponse {
     fn into_snapshot(self) -> ProxiesSnapshot {
         let selected = self
             .proxies
-            .get("proxy")
+            .get(tags::SELECTOR)
             .and_then(|proxy| proxy.now.clone());
-        let auto = self.proxies.get("auto");
+        let auto = self.proxies.get(tags::AUTO);
         let auto_now = auto.and_then(|proxy| proxy.now.clone());
         let auto_delay = auto.and_then(ProxyEntry::last_delay);
         let mut node_delays = HashMap::new();

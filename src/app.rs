@@ -20,6 +20,7 @@ use crate::service::ServiceIdentity;
 use crate::singbox::binary::{is_newer_version, BinaryManager, BinaryMetadata};
 use crate::singbox::clash::{ClashClient, ClashError, MetricsSnapshot, ProxySelection};
 use crate::singbox::supervisor::{self, RunningProxy};
+use crate::singbox::tags;
 use crate::state::{
     settings_items, EditForm, KeywordForm, LineInput, Overlay, Page, ProxyStatus, SettingsForm,
     SetupState, SubscriptionForm,
@@ -27,7 +28,7 @@ use crate::state::{
 use crate::subscription::model::Node;
 use crate::subscription::{self, merge_nodes, FetchOptions, SubscriptionRuntime};
 use crate::text::{sanitize_display, sanitize_owned};
-use crate::view::{BinaryStatus, DaemonStatus, View};
+use crate::view::{BinaryStatus, ConfigView, DaemonStatus, View};
 
 mod health;
 mod keys;
@@ -153,7 +154,7 @@ fn choose_recovery_target(
     if healthy.is_empty() {
         return None;
     }
-    if selected == Some("auto") {
+    if selected == Some(tags::AUTO) {
         return Some(RecoveryTarget::Auto);
     }
     healthy
@@ -654,20 +655,8 @@ impl App {
             // Nodes carry their own delay map; avoid shipping a second copy.
             node_delays: HashMap::new(),
         };
-        let mut config = self.config.clone();
-        config.subscriptions.clear();
-        config.lan_username = crate::text::sanitize_owned(config.lan_username);
-        config.keywords_include = std::mem::take(&mut config.keywords_include)
-            .into_iter()
-            .map(crate::text::sanitize_owned)
-            .collect();
-        config.keywords_exclude = std::mem::take(&mut config.keywords_exclude)
-            .into_iter()
-            .map(crate::text::sanitize_owned)
-            .collect();
-        config.test_url = crate::text::sanitize_owned(config.test_url);
-        let lan_password_set = !config.lan_password.is_empty();
-        config.lan_password.clear();
+        let lan_password_set = !self.config.lan_password.is_empty();
+        let config = ConfigView::from_config(&self.config);
         let binary_status = if !self.binary_installed {
             BinaryStatus::NotInstalled
         } else if let (Some(latest), Some(current)) = (
@@ -1134,19 +1123,20 @@ impl App {
                 }
                 self.last_totals = Some((metrics.upload_total, metrics.download_total, now));
                 self.last_metrics_at = Some(now);
-                let new_connection = metrics.connections.iter().any(|connection| {
-                    !self
-                        .health_connection_ids
-                        .contains(&connection_id_hash(&connection.id))
-                });
+                // Check and store the same bounded window. Scanning the full
+                // list while keeping only the first ids would mark every
+                // connection beyond the cap as new on each poll and keep fast
+                // health probes permanently armed.
+                let connection_ids = metrics
+                    .connections
+                    .iter()
+                    .take(MAX_HEALTH_CONNECTION_IDS)
+                    .map(|connection| connection_id_hash(&connection.id));
+                let new_connection = connection_ids
+                    .clone()
+                    .any(|id| !self.health_connection_ids.contains(&id));
                 self.health_connection_ids.clear();
-                self.health_connection_ids.extend(
-                    metrics
-                        .connections
-                        .iter()
-                        .take(MAX_HEALTH_CONNECTION_IDS)
-                        .map(|connection| connection_id_hash(&connection.id)),
-                );
+                self.health_connection_ids.extend(connection_ids);
                 if new_connection && !self.proxy_ips_in_flight && !self.health_probe_in_flight {
                     self.last_health_activity = Some(now);
                     self.health_fast_probe_pending = true;
@@ -1270,7 +1260,7 @@ impl App {
                 let (tag, name) = match &target {
                     RecoveryTarget::Auto => {
                         self.preferred_node = None;
-                        ("auto".to_string(), String::new())
+                        (tags::AUTO.to_string(), String::new())
                     }
                     RecoveryTarget::Node(tag) => {
                         let name = self
@@ -2156,7 +2146,7 @@ impl App {
                     let _ = self.events_tx.send(AppEvent::Error(message));
                     return;
                 };
-                if target == "auto" && !self.runtime_has_auto {
+                if target == tags::AUTO && !self.runtime_has_auto {
                     target = self
                         .auto_candidate_tags()
                         .first()
@@ -2339,7 +2329,7 @@ impl App {
     fn auto_selection_target(&self) -> Option<String> {
         let filtered = self.auto_candidate_tags();
         if filtered.len() >= 2 {
-            Some("auto".to_string())
+            Some(tags::AUTO.to_string())
         } else {
             filtered.first().cloned()
         }
@@ -2365,7 +2355,7 @@ impl App {
         // urltest group. If a refresh added candidates, restart to regenerate
         // the topology instead of sending a selector request for a missing
         // "auto" child.
-        if target == "auto" && !self.runtime_has_auto {
+        if target == tags::AUTO && !self.runtime_has_auto {
             self.preferred_node = None;
             self.pending_selection = Some(PendingSelection::Auto);
             if self.auto_restart_after_change() {
@@ -2561,19 +2551,19 @@ impl App {
 
     pub fn current_node(&self) -> Option<String> {
         let active = self.metrics.selection.selected.as_deref().map(|selected| {
-            if selected == "auto" {
+            if selected == tags::AUTO {
                 self.metrics
                     .selection
                     .auto_now
                     .clone()
-                    .unwrap_or_else(|| "auto".to_string())
+                    .unwrap_or_else(|| tags::AUTO.to_string())
             } else {
                 selected.to_string()
             }
         });
         let fallback = self.preferred_node.clone();
         match active.or(fallback) {
-            Some(tag) if tag == "auto" => Some(self.text().common_auto.to_string()),
+            Some(tag) if tag == tags::AUTO => Some(self.text().common_auto.to_string()),
             Some(tag) => Some(self.node_display_name(&tag)),
             None if !self.nodes.is_empty() => Some(self.text().common_auto.to_string()),
             None => None,
@@ -2586,7 +2576,7 @@ impl App {
     /// pending preferred node decides the mode.
     pub fn selection_mode_auto(&self) -> bool {
         match self.metrics.selection.selected.as_deref() {
-            Some(selected) => selected == "auto",
+            Some(selected) => selected == tags::AUTO,
             None => self.preferred_node.is_none(),
         }
     }

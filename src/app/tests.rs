@@ -878,8 +878,10 @@ async fn lan_auth_is_one_setting_and_persists_both_fields() {
 
     let view = app.view();
     assert!(view.lan_password_set);
-    assert!(view.config.lan_password.is_empty());
     assert!(view.lan_auth_configured());
+    let encoded = serde_json::to_string(&view).unwrap();
+    assert!(!encoded.contains("s3cret"));
+    assert!(!encoded.contains("\"lan_password\":"));
 }
 
 #[tokio::test]
@@ -1460,6 +1462,29 @@ async fn view_roundtrips_through_json() {
 }
 
 #[tokio::test]
+async fn view_does_not_expose_secrets_or_unused_config_fields() {
+    let (mut app, _dir) = test_app().await;
+    app.page = Page::Nodes;
+    app.config.allow_lan = true;
+    app.config.lan_password = "s3cret".to_string();
+    app.config.subscriptions = vec![SubscriptionConfig {
+        id: "s1".to_string(),
+        name: "sub".to_string(),
+        url: "https://example.com/path?token=secret".to_string(),
+        enabled: true,
+    }];
+    app.nodes = vec![node("node")];
+
+    let encoded = serde_json::to_string(&app.view()).unwrap();
+    assert!(!encoded.contains("s3cret"), "{encoded}");
+    assert!(!encoded.contains("token=secret"), "{encoded}");
+    assert!(!encoded.contains("\"lan_password\":"), "{encoded}");
+    assert!(!encoded.contains("\"password\":\"secret\""), "{encoded}");
+    assert!(!encoded.contains("github_mirrors"), "{encoded}");
+    assert!(!encoded.contains("proxy_ip_v4_url"), "{encoded}");
+}
+
+#[tokio::test]
 async fn metrics_node_delays_feed_the_nodes_view() {
     let (mut app, _dir) = test_app().await;
     let mut metrics = MetricsSnapshot::default();
@@ -1501,6 +1526,31 @@ async fn new_connection_ids_only_flag_new_traffic() {
     }))
     .await;
     assert!(app.health_fast_probe_pending);
+}
+
+#[tokio::test]
+async fn connection_ids_beyond_the_cap_do_not_rearm_fast_probes() {
+    let (mut app, _dir) = test_app().await;
+    let connections: Vec<_> = (0..=MAX_HEALTH_CONNECTION_IDS)
+        .map(|id| crate::singbox::clash::ConnectionInfo {
+            id: format!("c{id}"),
+            ..Default::default()
+        })
+        .collect();
+    let metrics = MetricsSnapshot {
+        connections: connections.clone(),
+        ..Default::default()
+    };
+
+    app.handle_event(AppEvent::Metrics(metrics.clone())).await;
+    assert!(app.health_fast_probe_pending);
+
+    app.health_fast_probe_pending = false;
+    app.handle_event(AppEvent::Metrics(metrics)).await;
+    assert!(
+        !app.health_fast_probe_pending,
+        "connections beyond the id cap must not look new on every poll"
+    );
 }
 
 fn tagged_node(name: &str, tag: &str) -> Node {

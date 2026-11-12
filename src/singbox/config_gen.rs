@@ -8,6 +8,8 @@ use crate::logging::LogLevel;
 use crate::selection::filter_nodes;
 use crate::subscription::model::Node;
 
+use super::tags;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigGenError {
     #[error("no nodes available")]
@@ -99,7 +101,7 @@ pub fn generate_with_selection(
     }
     let auto_tags: Vec<String> = auto_nodes.iter().map(|node| node.tag.clone()).collect();
     let selector_outbounds = if auto_tags.len() >= 2 {
-        let mut values = vec!["auto".to_string()];
+        let mut values = vec![tags::AUTO.to_string()];
         values.extend(node_tags.iter().cloned());
         values
     } else {
@@ -109,14 +111,14 @@ pub fn generate_with_selection(
     let selector_default = if let Some(tag) = preferred {
         tag.to_string()
     } else if auto_tags.len() >= 2 {
-        "auto".to_string()
+        tags::AUTO.to_string()
     } else {
         auto_tags[0].clone()
     };
 
     let mut outbounds = vec![json!({
         "type": "selector",
-        "tag": "proxy",
+        "tag": tags::SELECTOR,
         "outbounds": selector_outbounds,
         "default": selector_default
     })];
@@ -124,7 +126,7 @@ pub fn generate_with_selection(
     if auto_tags.len() >= 2 {
         outbounds.push(json!({
             "type": "urltest",
-            "tag": "auto",
+            "tag": tags::AUTO,
             "outbounds": auto_tags,
             "url": config.test_url,
             "interval": config.test_interval,
@@ -133,7 +135,7 @@ pub fn generate_with_selection(
         }));
     }
 
-    outbounds.push(json!({ "type": "direct", "tag": "direct" }));
+    outbounds.push(json!({ "type": "direct", "tag": tags::DIRECT }));
     for node in nodes {
         outbounds.push(node.outbound.value());
     }
@@ -165,7 +167,7 @@ pub fn generate_with_selection(
     });
 
     let mut route = json!({
-        "final": "proxy",
+        "final": tags::SELECTOR,
         "default_domain_resolver": "dns-1"
     });
     if config.bypass_lan {
@@ -174,12 +176,12 @@ pub fn generate_with_selection(
                 "domain_suffix": [".local", ".lan", ".home.arpa"],
                 "domain": ["localhost"],
                 "action": "route",
-                "outbound": "direct"
+                "outbound": tags::DIRECT
             },
             {
                 "ip_is_private": true,
                 "action": "route",
-                "outbound": "direct"
+                "outbound": tags::DIRECT
             }
         ]);
     }

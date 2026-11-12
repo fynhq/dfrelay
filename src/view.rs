@@ -8,6 +8,7 @@ use crate::i18n::{Lang, Text};
 use crate::logging::{LogLevel, LogLine, LogSource, LogTimestamp};
 use crate::service::ServiceIdentity;
 use crate::singbox::clash::MetricsSnapshot;
+use crate::singbox::tags;
 use crate::state::{Overlay, Page, ProxyStatus, SetupState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +38,49 @@ pub struct SubscriptionView {
     pub stale: bool,
 }
 
+/// The subset of `Config` the TUI needs. Keeping this as a dedicated type
+/// prevents future secret fields from being serialized into `View` by default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigView {
+    pub language: Lang,
+    pub port: u16,
+    pub allow_lan: bool,
+    pub lan_username: String,
+    pub dns_servers: Vec<String>,
+    pub test_url: String,
+    pub keywords_include: Vec<String>,
+    pub keywords_exclude: Vec<String>,
+    pub app_log_level: LogLevel,
+    pub singbox_log_level: LogLevel,
+}
+
+impl ConfigView {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            language: config.language,
+            port: config.port,
+            allow_lan: config.allow_lan,
+            lan_username: crate::text::sanitize_owned(config.lan_username.clone()),
+            dns_servers: config.dns_servers.clone(),
+            test_url: crate::text::sanitize_owned(config.test_url.clone()),
+            keywords_include: config
+                .keywords_include
+                .iter()
+                .cloned()
+                .map(crate::text::sanitize_owned)
+                .collect(),
+            keywords_exclude: config
+                .keywords_exclude
+                .iter()
+                .cloned()
+                .map(crate::text::sanitize_owned)
+                .collect(),
+            app_log_level: config.app_log_level,
+            singbox_log_level: config.singbox_log_level,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub pid: u32,
@@ -53,7 +97,7 @@ pub struct DaemonStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct View {
-    pub config: Config,
+    pub config: ConfigView,
     pub lan_password_set: bool,
     pub page: Page,
     pub tab_page: Page,
@@ -139,13 +183,13 @@ impl View {
     pub fn current_delay(&self) -> Option<u64> {
         let selected = self.metrics.selection.selected.as_deref();
         let tag = match selected {
-            Some("auto") | None => self.metrics.selection.auto_now.as_deref(),
+            Some(tags::AUTO) | None => self.metrics.selection.auto_now.as_deref(),
             Some(tag) => Some(tag),
         };
         if let Some(delay) = tag.and_then(|tag| self.node_delays.get(tag)) {
             return Some(*delay);
         }
-        if selected.is_none() || selected == Some("auto") {
+        if selected.is_none() || selected == Some(tags::AUTO) {
             self.metrics.selection.auto_delay
         } else {
             None

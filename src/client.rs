@@ -23,7 +23,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::i18n::Lang;
-use crate::ipc::{ClientMsg, InputCode, ServerMsg};
+use crate::ipc::{ClientMsg, InputCode, ServerMsg, PROTOCOL_VERSION};
 use crate::state::Page;
 use crate::theme::Palette;
 use crate::view::View;
@@ -39,7 +39,10 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         .context("connect to the DFRelay daemon")?;
     let (read_half, write_half) = stream.into_split();
     let (out_tx, out_rx) = mpsc::unbounded_channel();
-    let _ = out_tx.send(ClientMsg::Hello { viewer: true });
+    let _ = out_tx.send(ClientMsg::Hello {
+        viewer: true,
+        version: PROTOCOL_VERSION,
+    });
     tokio::spawn(write_out(write_half, out_rx));
 
     let note = {
