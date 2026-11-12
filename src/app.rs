@@ -55,6 +55,9 @@ const FALLBACK_TEST_URL: &str = "https://cp.cloudflare.com/generate_204";
 const AUTO_SWITCH_BUDGET: usize = 6;
 const AUTO_SWITCH_WINDOW: Duration = Duration::from_secs(60 * 60);
 const AUTO_SWITCH_PAUSE: Duration = Duration::from_secs(10 * 60);
+const SELECTION_STORM_WINDOW: Duration = Duration::from_secs(60 * 60);
+const SELECTION_STORM_THRESHOLD: usize = 30;
+const SELECTION_STORM_WARN_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const SWITCH_REASON_TTL: Duration = Duration::from_secs(15);
 const REFRESH_IDLE_GRACE: Duration = Duration::from_secs(10);
 const REFRESH_IDLE_WAIT_LOG: Duration = Duration::from_secs(5 * 60);
@@ -87,6 +90,22 @@ enum NodeSort {
     #[default]
     AutoLatency,
     Name,
+}
+
+/// Process-lifetime counters for diagnosing selection churn without adding
+/// user-facing configuration. The rolling deque is bounded by time, not by a
+/// hard capacity; selection changes are logged at most once per window.
+#[derive(Debug, Default)]
+struct RuntimeStats {
+    selection_change_times: VecDeque<Instant>,
+    selection_changes_total: u64,
+    last_storm_warn: Option<Instant>,
+    health_probes_total: u64,
+    health_probe_failures_total: u64,
+    recovery_attempts: u64,
+    recovery_selected: u64,
+    recovery_aborted: u64,
+    recovery_no_healthy: u64,
 }
 
 fn edit_line_input(input: &mut LineInput, key: &KeyEvent) -> bool {
@@ -338,6 +357,7 @@ pub struct App {
     recovery_refresh_pending: bool,
     last_recovery_refresh: Option<Instant>,
     quality: QualityBook,
+    stats: RuntimeStats,
     auto_switch_times: VecDeque<Instant>,
     idle_since: Option<Instant>,
     last_logged_selection: Option<(bool, Option<String>)>,
@@ -585,6 +605,7 @@ impl App {
             recovery_refresh_pending: false,
             last_recovery_refresh: None,
             quality: QualityBook::default(),
+            stats: RuntimeStats::default(),
             auto_switch_times: VecDeque::new(),
             idle_since: None,
             last_logged_selection: None,
@@ -1200,6 +1221,8 @@ impl App {
                             self.reset_health_failures();
                             return;
                         }
+                        self.stats.health_probe_failures_total =
+                            self.stats.health_probe_failures_total.saturating_add(1);
                         if self.health_failure_tag.as_deref() != Some(tag.as_str()) {
                             self.health_failure_tag = Some(tag.clone());
                             self.health_failures = 0;
@@ -1235,9 +1258,11 @@ impl App {
                 }
                 self.recovery_in_flight = false;
                 if self.status != ProxyStatus::Running || self.proxy.is_none() {
+                    self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
                     return;
                 }
                 if self.health_target().as_deref() != Some(trigger.as_str()) {
+                    self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
                     self.reset_health_failures();
                     self.logger.app(
                         LogLevel::Info,
@@ -1254,8 +1279,10 @@ impl App {
                     return;
                 };
                 let Some(proxy) = self.proxy.as_ref() else {
+                    self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
                     return;
                 };
+                self.stats.recovery_selected = self.stats.recovery_selected.saturating_add(1);
                 let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
                 let (tag, name) = match &target {
                     RecoveryTarget::Auto => {

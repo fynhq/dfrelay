@@ -1553,6 +1553,48 @@ async fn connection_ids_beyond_the_cap_do_not_rearm_fast_probes() {
     );
 }
 
+#[tokio::test]
+async fn selection_storm_warns_once_per_window() {
+    let (mut app, _dir) = test_app().await;
+    let now = Instant::now();
+    for _ in 0..SELECTION_STORM_THRESHOLD {
+        app.record_selection_change(now);
+    }
+    let warnings = |app: &App| {
+        app.logger
+            .recent(20)
+            .iter()
+            .filter(|line| line.message.contains("selection storm"))
+            .count()
+    };
+    assert_eq!(warnings(&app), 1);
+    app.record_selection_change(now + Duration::from_secs(1));
+    assert_eq!(
+        warnings(&app),
+        1,
+        "cooldown must suppress repeated warnings"
+    );
+    assert_eq!(
+        app.stats.selection_changes_total,
+        SELECTION_STORM_THRESHOLD as u64 + 1
+    );
+}
+
+#[tokio::test]
+async fn observe_selection_change_counts_only_transitions() {
+    let (mut app, _dir) = test_app().await;
+    app.last_logged_selection = Some((true, Some("n-old".to_string())));
+    app.metrics.selection.selected = Some(crate::singbox::tags::AUTO.to_string());
+    app.metrics.selection.auto_now = Some("n-new".to_string());
+
+    app.observe_selection_change(Instant::now());
+    assert_eq!(app.stats.selection_changes_total, 1);
+    assert_eq!(app.stats.selection_change_times.len(), 1);
+
+    app.observe_selection_change(Instant::now());
+    assert_eq!(app.stats.selection_changes_total, 1);
+}
+
 fn tagged_node(name: &str, tag: &str) -> Node {
     let mut item = node(name);
     item.tag = tag.to_string();

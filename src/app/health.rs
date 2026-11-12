@@ -77,6 +77,7 @@ impl App {
         self.health_probe_in_flight = true;
         self.health_fast_probe_pending = false;
         self.last_health_probe = Some(now);
+        self.stats.health_probes_total = self.stats.health_probes_total.saturating_add(1);
         self.spawn_guarded(BackgroundTask::HealthProbe, async move {
             let outcome = probe_node_outcome(&client, &tag, &targets).await;
             if matches!(outcome, HealthOutcome::Unavailable) {
@@ -205,6 +206,7 @@ impl App {
         let Some(proxy) = self.proxy.as_ref() else {
             return;
         };
+        self.stats.recovery_attempts = self.stats.recovery_attempts.saturating_add(1);
         self.last_recovery = Some(Instant::now());
         self.logger.app(
             LogLevel::Warn,
@@ -298,15 +300,20 @@ impl App {
         if current == self.last_logged_selection {
             return;
         }
-        if let (Some((auto, Some(tag))), Some((_, Some(previous)))) =
-            (&current, &self.last_logged_selection)
-        {
-            let mode = if *auto { "auto" } else { "manual" };
+        let transition = match (&current, &self.last_logged_selection) {
+            (Some((auto, Some(tag))), Some((_, Some(previous)))) => {
+                Some((*auto, tag.clone(), previous.clone()))
+            }
+            _ => None,
+        };
+        if let Some((auto, tag, previous)) = transition {
+            self.record_selection_change(now);
+            let mode = if auto { "auto" } else { "manual" };
             let reason = match self.pending_switch_reason.take() {
                 Some((reason, at)) if now.saturating_duration_since(at) <= SWITCH_REASON_TTL => {
                     reason
                 }
-                _ if *auto => "urltest",
+                _ if auto => "urltest",
                 _ => "manual",
             };
             self.logger.app(
@@ -323,7 +330,46 @@ impl App {
         self.last_logged_selection = current;
     }
 
+    pub(super) fn record_selection_change(&mut self, now: Instant) {
+        self.stats.selection_changes_total = self.stats.selection_changes_total.saturating_add(1);
+        self.stats.selection_change_times.push_back(now);
+        while self
+            .stats
+            .selection_change_times
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= SELECTION_STORM_WINDOW)
+        {
+            self.stats.selection_change_times.pop_front();
+        }
+        if self.stats.selection_change_times.len() < SELECTION_STORM_THRESHOLD
+            || self
+                .stats
+                .last_storm_warn
+                .is_some_and(|at| now.saturating_duration_since(at) < SELECTION_STORM_WARN_COOLDOWN)
+        {
+            return;
+        }
+        self.stats.last_storm_warn = Some(now);
+        let current = self.metrics.selection.selected.as_deref().unwrap_or("-");
+        self.logger.app(
+            LogLevel::Warn,
+            format!(
+                "selection storm: {} changes in {}m (total {}); health probes={} failed={}; recovery attempts={} selected={} aborted={} no_healthy={}; current={current}",
+                self.stats.selection_change_times.len(),
+                SELECTION_STORM_WINDOW.as_secs() / 60,
+                self.stats.selection_changes_total,
+                self.stats.health_probes_total,
+                self.stats.health_probe_failures_total,
+                self.stats.recovery_attempts,
+                self.stats.recovery_selected,
+                self.stats.recovery_aborted,
+                self.stats.recovery_no_healthy,
+            ),
+        );
+    }
+
     pub(super) fn on_no_healthy_nodes(&mut self) {
+        self.stats.recovery_no_healthy = self.stats.recovery_no_healthy.saturating_add(1);
         self.recovery_in_flight = false;
         self.reset_health_failures();
         self.schedule_no_node_pause();
