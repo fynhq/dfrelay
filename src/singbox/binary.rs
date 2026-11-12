@@ -81,6 +81,9 @@ impl BinaryManager {
 
     pub fn locate(&self) -> Option<PathBuf> {
         let managed = self.paths.binary();
+        // Repair a binary swap interrupted by a crash before reporting the
+        // managed binary as missing.
+        self.recover_interrupted_install(&managed, &self.paths.previous_binary());
         managed.is_file().then_some(managed)
     }
 
@@ -428,12 +431,25 @@ impl BinaryManager {
         verified: bool,
     ) -> Result<(), BinaryError> {
         let target = self.paths.binary();
-        if target.exists() {
-            self.preserve_current_metadata();
-            let _ = fs::remove_file(self.paths.previous_binary());
-            fs::rename(&target, self.paths.previous_binary())?;
+        let previous = self.paths.previous_binary();
+        // A crash after moving the current binary aside but before committing
+        // the new one would otherwise leave no usable `bin/sing-box`.
+        self.recover_interrupted_install(&target, &previous);
+
+        let current_metadata = fs::read_to_string(self.paths.binary_metadata()).ok();
+        let had_target = target.is_file();
+        let staging = self.paths.bin_dir.join("sing-box.swap");
+
+        if had_target {
+            fs::rename(&target, &staging)?;
         }
-        fs::rename(temp, &target)?;
+        if let Err(err) = fs::rename(temp, &target) {
+            if had_target {
+                let _ = fs::rename(&staging, &target);
+            }
+            return Err(err.into());
+        }
+
         let metadata = BinaryMetadata {
             version: version.to_string(),
             source: source.display().to_string(),
@@ -441,21 +457,57 @@ impl BinaryManager {
             installed_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             verified,
         };
-        self.write_metadata(&metadata)?;
+        if let Err(err) = self.write_metadata(&metadata) {
+            // Restore the old binary so a metadata failure cannot leave the
+            // daemon without a runnable current version.
+            let _ = fs::remove_file(&target);
+            if had_target {
+                let _ = fs::rename(&staging, &target);
+            }
+            if let Some(text) = current_metadata.as_deref() {
+                let _ =
+                    fsutil::write_private_atomic(&self.paths.binary_metadata(), text.as_bytes());
+            }
+            return Err(err);
+        }
+
+        if had_target {
+            // The new current binary and metadata are already committed. A
+            // failure to rotate the previous version is recoverable on the
+            // next install and must not turn a successful install into an
+            // error for the running version.
+            let _ = fs::remove_file(&previous);
+            if fs::rename(&staging, &previous).is_ok() {
+                match current_metadata.as_deref() {
+                    Some(text) => {
+                        let _ = fsutil::write_private_atomic(
+                            &self.paths.previous_binary_metadata(),
+                            text.as_bytes(),
+                        );
+                    }
+                    None => {
+                        let _ = fs::remove_file(self.paths.previous_binary_metadata());
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
-    fn preserve_current_metadata(&self) {
-        match fs::read_to_string(self.paths.binary_metadata()) {
-            Ok(text) => {
-                let _ = fsutil::write_private_atomic(
-                    &self.paths.previous_binary_metadata(),
-                    text.as_bytes(),
-                );
-            }
-            Err(_) => {
-                let _ = fs::remove_file(self.paths.previous_binary_metadata());
-            }
+    /// Repair a leftover `sing-box.swap` from an interrupted install. If the
+    /// current binary is missing, the swap is the old current; otherwise it is
+    /// the old current waiting to become the previous version.
+    fn recover_interrupted_install(&self, target: &Path, previous: &Path) {
+        let staging = self.paths.bin_dir.join("sing-box.swap");
+        if !staging.is_file() {
+            return;
+        }
+        if !target.is_file() {
+            let _ = fs::rename(&staging, target);
+        } else if !previous.is_file() {
+            let _ = fs::rename(&staging, previous);
+        } else {
+            let _ = fs::remove_file(&staging);
         }
     }
 
@@ -1072,6 +1124,80 @@ mod tests {
         let metadata = manager.install_from_inbox(&archive, &logger).await.unwrap();
         assert_eq!(metadata.version, "1.14.4");
         assert_eq!(manager.version(&paths.binary()).await.unwrap(), "1.14.4");
+    }
+
+    #[test]
+    fn failed_metadata_write_restores_the_current_binary() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        };
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        fs::write(paths.binary(), b"v1").unwrap();
+        // A directory at the metadata path makes the atomic rename fail and
+        // exercises the restore path after the new binary was committed.
+        fs::create_dir(paths.binary_metadata()).unwrap();
+
+        let temp = manager.write_temp_binary(b"v2").unwrap();
+        let result = manager.install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true);
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(paths.binary()).unwrap(), b"v1");
+        assert!(!paths.bin_dir.join("sing-box.swap").exists());
+    }
+
+    #[test]
+    fn locate_restores_a_binary_left_in_the_swap_file() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        };
+        paths.ensure().unwrap();
+        fs::write(paths.bin_dir.join("sing-box.swap"), b"v1").unwrap();
+        let manager = BinaryManager::new(paths.clone());
+
+        assert_eq!(manager.locate(), Some(paths.binary()));
+        assert_eq!(fs::read(paths.binary()).unwrap(), b"v1");
+    }
+
+    #[test]
+    fn interrupted_install_is_recovered_before_the_next_install() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        };
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        fs::write(paths.binary(), b"v1").unwrap();
+        fs::write(paths.bin_dir.join("sing-box.swap"), b"v0").unwrap();
+
+        let temp = manager.write_temp_binary(b"v2").unwrap();
+        manager
+            .install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true)
+            .unwrap();
+
+        assert_eq!(fs::read(paths.binary()).unwrap(), b"v2");
+        assert_eq!(fs::read(paths.previous_binary()).unwrap(), b"v1");
+        assert!(!paths.bin_dir.join("sing-box.swap").exists());
     }
 
     #[test]
