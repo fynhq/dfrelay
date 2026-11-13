@@ -20,7 +20,7 @@ impl App {
             self.detach_clients();
             return;
         }
-        if self.restart_in_progress {
+        if self.proxy_runtime.restart_in_progress {
             if key.code == KeyCode::Char('q') {
                 self.detach_clients();
             }
@@ -756,7 +756,7 @@ impl App {
     /// subscriptions should stop the proxy rather than leave stale routing.
     pub(super) fn apply_nodes_change_to_proxy(&mut self) {
         if self.nodes.is_empty() {
-            if self.proxy.is_some() {
+            if self.proxy_runtime.proxy.is_some() {
                 self.stop_proxy();
             }
         } else {

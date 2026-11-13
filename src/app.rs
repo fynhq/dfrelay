@@ -32,11 +32,13 @@ use crate::view::{BinaryStatus, ConfigView, DaemonStatus, View};
 
 mod health;
 mod keys;
+mod proxy;
 mod quality;
 mod subscriptions;
 mod updates;
 
 use health::HealthState;
+use proxy::ProxyRuntime;
 use quality::QualityBook;
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -288,7 +290,7 @@ pub struct App {
     pub page: Page,
     pub dashboard_scroll: usize,
     dashboard_max_scroll: usize,
-    pub status: ProxyStatus,
+    pub(crate) proxy_runtime: ProxyRuntime,
     pub nodes: Vec<Node>,
     auto_tags_cache: Option<(u64, Vec<String>)>,
     last_node_sort: Option<Instant>,
@@ -327,9 +329,6 @@ pub struct App {
     pub message_at: Option<Instant>,
     pub restart_confirm: bool,
     pub rollback_confirm: bool,
-    pub restart_in_progress: bool,
-    restart_after_stop: bool,
-    preflight_in_flight: bool,
     managed: bool,
     service: Option<ServiceIdentity>,
     pub should_quit: bool,
@@ -346,8 +345,6 @@ pub struct App {
     stats: RuntimeStats,
     idle_since: Option<Instant>,
     pending_refresh_apply: Option<PendingRefreshApply>,
-    pub started_at: Option<Instant>,
-    pub metrics_task: Option<JoinHandle<()>>,
     viewer_active: Arc<AtomicBool>,
     metrics_wake: Arc<Notify>,
     proxies_refresh: Arc<AtomicBool>,
@@ -358,16 +355,9 @@ pub struct App {
     subscription_refresh_retry_at: Option<Instant>,
     subscription_refresh_backoff: Duration,
     pub preferred_node: Option<String>,
-    runtime_has_auto: bool,
     selection_generation: Arc<AtomicU64>,
     pending_selection: Option<PendingSelection>,
     pending_start: Option<u64>,
-    proxy_node_tags: Vec<String>,
-    proxy_node_names: HashMap<String, String>,
-    restart_attempts: u32,
-    restart_at: Option<Instant>,
-    stable_reset_at: Option<Instant>,
-    proxy: Option<RunningProxy>,
     binary_manager: BinaryManager,
     events_tx: UnboundedSender<AppEvent>,
     events_rx: UnboundedReceiver<AppEvent>,
@@ -518,7 +508,7 @@ impl App {
             page,
             dashboard_scroll: 0,
             dashboard_max_scroll: 0,
-            status: ProxyStatus::Stopped,
+            proxy_runtime: ProxyRuntime::default(),
             nodes: cached_nodes,
             auto_tags_cache: None,
             last_node_sort: None,
@@ -557,9 +547,6 @@ impl App {
             message_at: None,
             restart_confirm: false,
             rollback_confirm: false,
-            restart_in_progress: false,
-            restart_after_stop: false,
-            preflight_in_flight: false,
             managed: false,
             service: None,
             should_quit: false,
@@ -576,8 +563,6 @@ impl App {
             stats: RuntimeStats::default(),
             idle_since: None,
             pending_refresh_apply: None,
-            started_at: None,
-            metrics_task: None,
             viewer_active: Arc::new(AtomicBool::new(false)),
             metrics_wake: Arc::new(Notify::new()),
             proxies_refresh: Arc::new(AtomicBool::new(false)),
@@ -588,16 +573,9 @@ impl App {
             subscription_refresh_retry_at: None,
             subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
             preferred_node: None,
-            runtime_has_auto: false,
             selection_generation: Arc::new(AtomicU64::new(0)),
             pending_selection: None,
             pending_start: None,
-            proxy_node_tags: Vec::new(),
-            proxy_node_names: HashMap::new(),
-            restart_attempts: 0,
-            restart_at: None,
-            stable_reset_at: None,
-            proxy: None,
             binary_manager,
             events_tx,
             events_rx,
@@ -667,9 +645,9 @@ impl App {
             page: self.page,
             tab_page,
             dashboard_scroll: self.dashboard_scroll,
-            status: self.status.clone(),
-            metrics_stale: self.status == ProxyStatus::Running
-                && self.proxy.is_some()
+            status: self.proxy_runtime.status.clone(),
+            metrics_stale: self.proxy_runtime.status == ProxyStatus::Running
+                && self.proxy_runtime.proxy.is_some()
                 && self
                     .health
                     .last_metrics_at
@@ -744,7 +722,7 @@ impl App {
             toast,
             restart_confirm: self.restart_confirm,
             rollback_confirm: self.rollback_confirm,
-            restart_in_progress: self.restart_in_progress,
+            restart_in_progress: self.proxy_runtime.restart_in_progress,
             quitting: self.should_quit,
             help_scroll: self.help_scroll,
             binary_path: self.paths.binary().display().to_string(),
@@ -801,10 +779,10 @@ impl App {
         }
         self.broadcast(ServerMsg::Shutdown);
         self.clients.clear();
-        if let Some(task) = self.metrics_task.take() {
+        if let Some(task) = self.proxy_runtime.metrics_task.take() {
             task.abort();
         }
-        if let Some(proxy) = self.proxy.take() {
+        if let Some(proxy) = self.proxy_runtime.proxy.take() {
             let logger = self.logger.clone();
             let _ = tokio::time::timeout(Duration::from_secs(6), supervisor::stop(proxy, &logger))
                 .await;
@@ -1018,12 +996,13 @@ impl App {
                 Ok(proxy) => {
                     let clash = proxy.clash.clone();
                     let ipv6 = proxy.ipv6;
-                    self.proxy = Some(proxy);
-                    self.status = ProxyStatus::Running;
-                    self.restart_in_progress = false;
-                    self.started_at = Some(Instant::now());
-                    self.restart_at = None;
-                    self.stable_reset_at = Some(Instant::now() + Duration::from_secs(60));
+                    self.proxy_runtime.proxy = Some(proxy);
+                    self.proxy_runtime.status = ProxyStatus::Running;
+                    self.proxy_runtime.restart_in_progress = false;
+                    self.proxy_runtime.started_at = Some(Instant::now());
+                    self.proxy_runtime.restart_at = None;
+                    self.proxy_runtime.stable_reset_at =
+                        Some(Instant::now() + Duration::from_secs(60));
                     self.last_totals = None;
                     self.up_speed = 0.0;
                     self.down_speed = 0.0;
@@ -1055,12 +1034,12 @@ impl App {
                     );
                 }
                 Err(err) => {
-                    self.status = ProxyStatus::Failed;
-                    self.restart_in_progress = false;
-                    self.runtime_has_auto = false;
-                    self.proxy_node_tags.clear();
-                    self.proxy_node_names.clear();
-                    self.stable_reset_at = None;
+                    self.proxy_runtime.status = ProxyStatus::Failed;
+                    self.proxy_runtime.restart_in_progress = false;
+                    self.proxy_runtime.runtime_has_auto = false;
+                    self.proxy_runtime.proxy_node_tags.clear();
+                    self.proxy_runtime.proxy_node_names.clear();
+                    self.proxy_runtime.stable_reset_at = None;
                     self.last_error = Some(err);
                     self.logger.app(LogLevel::Error, "sing-box start failed");
                     let detail = self.last_error.clone().unwrap_or_default();
@@ -1069,23 +1048,23 @@ impl App {
                 }
             },
             AppEvent::ProxyStopped => {
-                self.status = ProxyStatus::Stopped;
-                self.runtime_has_auto = false;
-                self.proxy_node_tags.clear();
-                self.proxy_node_names.clear();
-                self.started_at = None;
-                self.restart_attempts = 0;
-                self.restart_at = None;
-                self.stable_reset_at = None;
+                self.proxy_runtime.status = ProxyStatus::Stopped;
+                self.proxy_runtime.runtime_has_auto = false;
+                self.proxy_runtime.proxy_node_tags.clear();
+                self.proxy_runtime.proxy_node_names.clear();
+                self.proxy_runtime.started_at = None;
+                self.proxy_runtime.restart_attempts = 0;
+                self.proxy_runtime.restart_at = None;
+                self.proxy_runtime.stable_reset_at = None;
                 self.restart_confirm = false;
                 self.reset_metrics();
-                if self.restart_after_stop {
-                    self.restart_after_stop = false;
+                if self.proxy_runtime.restart_after_stop {
+                    self.proxy_runtime.restart_after_stop = false;
                     if self.start_proxy().is_err() {
-                        self.restart_in_progress = false;
+                        self.proxy_runtime.restart_in_progress = false;
                     }
                 } else {
-                    self.restart_in_progress = false;
+                    self.proxy_runtime.restart_in_progress = false;
                 }
             }
             AppEvent::Metrics(mut metrics) => {
@@ -1142,7 +1121,7 @@ impl App {
                     return;
                 }
                 self.health.probe_in_flight = false;
-                if self.status != ProxyStatus::Running {
+                if self.proxy_runtime.status != ProxyStatus::Running {
                     self.reset_health_failures();
                     return;
                 }
@@ -1214,7 +1193,9 @@ impl App {
                     return;
                 }
                 self.health.recovery_in_flight = false;
-                if self.status != ProxyStatus::Running || self.proxy.is_none() {
+                if self.proxy_runtime.status != ProxyStatus::Running
+                    || self.proxy_runtime.proxy.is_none()
+                {
                     self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
                     return;
                 }
@@ -1235,7 +1216,7 @@ impl App {
                     self.on_no_healthy_nodes();
                     return;
                 };
-                let Some(proxy) = self.proxy.as_ref() else {
+                let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
                     self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
                     return;
                 };
@@ -1297,13 +1278,14 @@ impl App {
             }
             AppEvent::ProxyIps { ips, errors } => {
                 self.proxy_ips_in_flight = false;
-                if self.proxy.is_none() {
+                if self.proxy_runtime.proxy.is_none() {
                     return;
                 }
                 if ips.is_empty() {
                     self.proxy_ips.clear();
                     self.proxy_ip_backoff_secs = (self.proxy_ip_backoff_secs * 2).min(60);
                     let in_grace = self
+                        .proxy_runtime
                         .started_at
                         .is_some_and(|at| at.elapsed() < PROXY_IP_STARTUP_GRACE);
                     if !in_grace {
@@ -1321,7 +1303,7 @@ impl App {
             }
             AppEvent::NodeDelay { tag, delay } => {
                 self.delay_testing.remove(&tag);
-                if self.proxy.is_none() {
+                if self.proxy_runtime.proxy.is_none() {
                     return;
                 }
                 if let Some(delay) = delay.filter(|delay| *delay > 0) {
@@ -1481,8 +1463,9 @@ impl App {
             pid: std::process::id(),
             managed: self.managed,
             service: self.service.clone(),
-            proxy: self.status.clone(),
+            proxy: self.proxy_runtime.status.clone(),
             uptime_secs: self
+                .proxy_runtime
                 .started_at
                 .map(|started| started.elapsed().as_secs())
                 .unwrap_or(0),
@@ -1503,7 +1486,7 @@ impl App {
         if !self.clients.contains_key(&client_id) {
             return;
         }
-        if self.status == ProxyStatus::Running {
+        if self.proxy_runtime.status == ProxyStatus::Running {
             self.ack(client_id, true, "proxy is already running");
             return;
         }
@@ -1610,14 +1593,14 @@ impl App {
                 self.schedule_subscription_retry();
             }
             BackgroundTask::ProxyStart => {
-                self.restart_in_progress = false;
-                self.status = ProxyStatus::Failed;
+                self.proxy_runtime.restart_in_progress = false;
+                self.proxy_runtime.status = ProxyStatus::Failed;
                 self.ack_pending_start(false, "proxy start task failed");
             }
             BackgroundTask::ProxyStop => {
-                self.restart_in_progress = false;
-                self.status = ProxyStatus::Stopped;
-                self.restart_after_stop = false;
+                self.proxy_runtime.restart_in_progress = false;
+                self.proxy_runtime.status = ProxyStatus::Stopped;
+                self.proxy_runtime.restart_after_stop = false;
             }
             BackgroundTask::ProxyIps => self.proxy_ips_in_flight = false,
             BackgroundTask::DelaySweep => self.delay_sweep_running = false,
@@ -1631,11 +1614,11 @@ impl App {
             BackgroundTask::BinaryRollback => self.setup.rollback_in_flight = false,
             BackgroundTask::BinaryUpdateCheck => self.update_check_in_flight = false,
             BackgroundTask::Preflight => {
-                self.preflight_in_flight = false;
-                self.restart_in_progress = false;
+                self.proxy_runtime.preflight_in_flight = false;
+                self.proxy_runtime.restart_in_progress = false;
             }
             BackgroundTask::Metrics => {
-                self.metrics_task = None;
+                self.proxy_runtime.metrics_task = None;
             }
             BackgroundTask::DelayTest => {
                 self.delay_testing.clear();
@@ -1675,6 +1658,7 @@ impl App {
         if let Some(tag) = self.preferred_node.clone() {
             if !self.nodes.iter().any(|node| node.tag == tag) {
                 let name = self
+                    .proxy_runtime
                     .proxy_node_names
                     .get(&tag)
                     .map(|name| sanitize_owned(name.clone()))
@@ -1699,7 +1683,10 @@ impl App {
     }
 
     fn proxy_busy(&self) -> bool {
-        matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping)
+        matches!(
+            self.proxy_runtime.status,
+            ProxyStatus::Starting | ProxyStatus::Stopping
+        )
     }
 
     fn start_or_stop(&mut self) {
@@ -1707,13 +1694,13 @@ impl App {
             self.notify(self.text().msg_proxy_busy);
             return;
         }
-        if self.proxy.is_some() {
+        if self.proxy_runtime.proxy.is_some() {
             self.stop_proxy();
             return;
         }
-        self.restart_attempts = 0;
-        self.restart_at = None;
-        self.stable_reset_at = None;
+        self.proxy_runtime.restart_attempts = 0;
+        self.proxy_runtime.restart_at = None;
+        self.proxy_runtime.stable_reset_at = None;
         let _ = self.start_proxy();
     }
 
@@ -1726,7 +1713,7 @@ impl App {
             self.notify(self.text().msg_proxy_busy);
             return;
         }
-        if self.status != ProxyStatus::Running {
+        if self.proxy_runtime.status != ProxyStatus::Running {
             self.notify(self.text().msg_proxy_not_running);
             return;
         }
@@ -1743,7 +1730,7 @@ impl App {
             self.notify(self.text().msg_proxy_busy);
             return;
         }
-        if self.status != ProxyStatus::Running || self.proxy.is_none() {
+        if self.proxy_runtime.status != ProxyStatus::Running || self.proxy_runtime.proxy.is_none() {
             self.notify(self.text().msg_proxy_not_running);
             return;
         }
@@ -1751,10 +1738,10 @@ impl App {
     }
 
     fn auto_restart_after_change(&mut self) -> bool {
-        if self.restart_in_progress {
+        if self.proxy_runtime.restart_in_progress {
             return false;
         }
-        if self.status != ProxyStatus::Running || self.proxy.is_none() {
+        if self.proxy_runtime.status != ProxyStatus::Running || self.proxy_runtime.proxy.is_none() {
             return false;
         }
         if self.pending_restart_subscription.is_some() {
@@ -1778,7 +1765,7 @@ impl App {
     }
 
     fn begin_restart(&mut self) -> bool {
-        if self.preflight_in_flight || self.restart_in_progress {
+        if self.proxy_runtime.preflight_in_flight || self.proxy_runtime.restart_in_progress {
             return false;
         }
         // Validate the proposed configuration before tearing down the running
@@ -1787,8 +1774,8 @@ impl App {
         self.restart_confirm = false;
         self.rollback_confirm = false;
         self.subscription_delete = None;
-        self.preflight_in_flight = true;
-        self.restart_in_progress = true;
+        self.proxy_runtime.preflight_in_flight = true;
+        self.proxy_runtime.restart_in_progress = true;
         self.notify(self.text().msg_restarting);
         let paths = self.paths.clone();
         let config = self.config.clone();
@@ -1808,21 +1795,21 @@ impl App {
     }
 
     fn finish_restart_after_preflight(&mut self, result: Result<(), String>) {
-        self.preflight_in_flight = false;
+        self.proxy_runtime.preflight_in_flight = false;
         match result {
             Ok(()) => {
-                if self.proxy.is_some() {
-                    self.restart_after_stop = true;
+                if self.proxy_runtime.proxy.is_some() {
+                    self.proxy_runtime.restart_after_stop = true;
                     self.stop_proxy();
                 } else {
                     // The instance disappeared while the check was running;
                     // avoid leaving the busy flag set with nothing to restart.
-                    self.restart_in_progress = false;
+                    self.proxy_runtime.restart_in_progress = false;
                     let _ = self.start_proxy();
                 }
             }
             Err(err) => {
-                self.restart_in_progress = false;
+                self.proxy_runtime.restart_in_progress = false;
                 let message = format!("{}: {err}", self.text().msg_preflight_failed);
                 self.last_error = Some(message.clone());
                 self.logger.app(LogLevel::Warn, message);
@@ -1852,7 +1839,7 @@ impl App {
             self.last_error = Some(self.text().no_matching_nodes.to_string());
             return Err(self.text().no_matching_nodes.to_string());
         }
-        self.runtime_has_auto = filtered.len() >= 2;
+        self.proxy_runtime.runtime_has_auto = filtered.len() >= 2;
         let mut preferred = self.preferred_node.clone();
         if let Some(tag) = preferred.as_deref() {
             if !self.nodes.iter().any(|node| node.tag == tag) {
@@ -1862,13 +1849,14 @@ impl App {
                 self.notify(self.text().msg_preferred_missing);
             }
         }
-        self.proxy_node_tags = self.nodes.iter().map(|node| node.tag.clone()).collect();
-        self.proxy_node_names = self
+        self.proxy_runtime.proxy_node_tags =
+            self.nodes.iter().map(|node| node.tag.clone()).collect();
+        self.proxy_runtime.proxy_node_names = self
             .nodes
             .iter()
             .map(|node| (node.tag.clone(), node.name.clone()))
             .collect();
-        self.status = ProxyStatus::Starting;
+        self.proxy_runtime.status = ProxyStatus::Starting;
         let paths = self.paths.clone();
         let config = self.config.clone();
         let nodes = self.nodes.clone();
@@ -1884,41 +1872,41 @@ impl App {
     }
 
     fn schedule_restart(&mut self) {
-        if self.restart_attempts >= MAX_RESTART_ATTEMPTS {
-            self.restart_at = None;
+        if self.proxy_runtime.restart_attempts >= MAX_RESTART_ATTEMPTS {
+            self.proxy_runtime.restart_at = None;
             self.notify(self.text().msg_restart_paused);
             self.logger
                 .app(LogLevel::Error, "restart paused after 5 failures");
             return;
         }
-        let delay = RESTART_DELAYS[self.restart_attempts as usize];
-        self.restart_attempts += 1;
-        self.restart_at = Some(Instant::now() + Duration::from_secs(delay));
+        let delay = RESTART_DELAYS[self.proxy_runtime.restart_attempts as usize];
+        self.proxy_runtime.restart_attempts += 1;
+        self.proxy_runtime.restart_at = Some(Instant::now() + Duration::from_secs(delay));
         self.notify(format!(
             "{}: {}s (#{})",
             self.text().msg_restart_scheduled,
             delay,
-            self.restart_attempts
+            self.proxy_runtime.restart_attempts
         ));
         self.logger.app(
             LogLevel::Warn,
             format!(
                 "restart scheduled in {delay}s (attempt {}/{MAX_RESTART_ATTEMPTS})",
-                self.restart_attempts
+                self.proxy_runtime.restart_attempts
             ),
         );
     }
 
     fn stop_proxy(&mut self) {
-        if let Some(task) = self.metrics_task.take() {
+        if let Some(task) = self.proxy_runtime.metrics_task.take() {
             task.abort();
         }
-        self.restart_at = None;
-        self.restart_attempts = 0;
-        self.stable_reset_at = None;
+        self.proxy_runtime.restart_at = None;
+        self.proxy_runtime.restart_attempts = 0;
+        self.proxy_runtime.stable_reset_at = None;
         self.reset_metrics();
-        if let Some(proxy) = self.proxy.take() {
-            self.status = ProxyStatus::Stopping;
+        if let Some(proxy) = self.proxy_runtime.proxy.take() {
+            self.proxy_runtime.status = ProxyStatus::Stopping;
             let logger = self.logger.clone();
             let tx = self.events_tx.clone();
             self.spawn_guarded(BackgroundTask::ProxyStop, async move {
@@ -1926,12 +1914,12 @@ impl App {
                 let _ = tx.send(AppEvent::ProxyStopped);
             });
         } else {
-            self.status = ProxyStatus::Stopped;
+            self.proxy_runtime.status = ProxyStatus::Stopped;
         }
     }
 
     fn start_metrics(&mut self, port: u16, secret: String) {
-        if let Some(task) = self.metrics_task.take() {
+        if let Some(task) = self.proxy_runtime.metrics_task.take() {
             task.abort();
         }
         let tx = self.events_tx.clone();
@@ -1944,8 +1932,9 @@ impl App {
         let viewer_active = self.viewer_active.clone();
         let metrics_wake = self.metrics_wake.clone();
         let proxies_refresh = self.proxies_refresh.clone();
-        self.metrics_task = Some(
-            self.spawn_guarded_handle(BackgroundTask::Metrics, async move {
+        self.proxy_runtime.metrics_task = Some(self.spawn_guarded_handle(
+            BackgroundTask::Metrics,
+            async move {
                 let mut selection = ProxySelection::default();
                 let mut pending_node_delays = HashMap::new();
                 let mut next_proxies = Instant::now();
@@ -2011,12 +2000,12 @@ impl App {
                         _ = metrics_wake.notified() => {}
                     }
                 }
-            }),
-        );
+            },
+        ));
     }
 
     fn refresh_proxy_ips(&mut self) {
-        if self.proxy.is_none() || self.proxy_ips_in_flight {
+        if self.proxy_runtime.proxy.is_none() || self.proxy_ips_in_flight {
             return;
         }
         self.proxy_ips_in_flight = true;
@@ -2025,19 +2014,22 @@ impl App {
         let v4_url = self.config.proxy_ip_v4_url.clone();
         let v6_url = self.config.proxy_ip_v6_url.clone();
         let proxy_url = match self
+            .proxy_runtime
             .proxy
             .as_ref()
             .and_then(|proxy| proxy.lan_auth.as_ref())
         {
             Some((username, password)) => netinfo::local_proxy_url_with_auth(
-                self.proxy
+                self.proxy_runtime
+                    .proxy
                     .as_ref()
                     .map_or(self.config.port, |proxy| proxy.port),
                 username,
                 password,
             ),
             None => netinfo::local_proxy_url(
-                self.proxy
+                self.proxy_runtime
+                    .proxy
                     .as_ref()
                     .map_or(self.config.port, |proxy| proxy.port),
             ),
@@ -2069,7 +2061,7 @@ impl App {
             self.last_error = Some(self.text().msg_proxy_busy.to_string());
             return;
         }
-        if self.proxy.is_none() {
+        if self.proxy_runtime.proxy.is_none() {
             self.preferred_node = Some(node.tag.clone());
             self.pending_selection = Some(PendingSelection::Node(node.tag.clone()));
             self.notify(format!(
@@ -2080,7 +2072,9 @@ impl App {
             return;
         }
         self.selection_generation.fetch_add(1, Ordering::Relaxed);
-        if !self.proxy_node_tags.is_empty() && !self.proxy_node_tags.contains(&node.tag) {
+        if !self.proxy_runtime.proxy_node_tags.is_empty()
+            && !self.proxy_runtime.proxy_node_tags.contains(&node.tag)
+        {
             self.preferred_node = Some(node.tag.clone());
             self.pending_selection = None;
             let restarting = self.auto_restart_after_change();
@@ -2092,6 +2086,7 @@ impl App {
             return;
         }
         let Some(client) = self
+            .proxy_runtime
             .proxy
             .as_ref()
             .map(|proxy| ClashClient::new(proxy.clash.port, proxy.clash.secret.clone()))
@@ -2138,7 +2133,7 @@ impl App {
                     let _ = self.events_tx.send(AppEvent::Error(message));
                     return;
                 };
-                if target == tags::AUTO && !self.runtime_has_auto {
+                if target == tags::AUTO && !self.proxy_runtime.runtime_has_auto {
                     target = self
                         .auto_candidate_tags()
                         .first()
@@ -2190,7 +2185,7 @@ impl App {
         let Some(node) = self.nodes.get(self.selected) else {
             return;
         };
-        let Some(proxy) = self.proxy.as_ref() else {
+        let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
             self.last_error = Some(self.text().msg_proxy_not_running.to_string());
             return;
         };
@@ -2218,7 +2213,7 @@ impl App {
     }
 
     fn maybe_test_node_delays(&mut self, force: bool) {
-        if self.proxy.is_none() || self.delay_sweep_running {
+        if self.proxy_runtime.proxy.is_none() || self.delay_sweep_running {
             return;
         }
         if !force
@@ -2228,7 +2223,7 @@ impl App {
         {
             return;
         }
-        let Some(proxy) = self.proxy.as_ref() else {
+        let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
             return;
         };
         let tags: Vec<String> = self
@@ -2332,7 +2327,7 @@ impl App {
             self.last_error = Some(self.text().msg_proxy_busy.to_string());
             return;
         }
-        if self.proxy.is_none() {
+        if self.proxy_runtime.proxy.is_none() {
             self.preferred_node = None;
             self.pending_selection = Some(PendingSelection::Auto);
             self.notify(self.text().msg_auto_pending);
@@ -2347,7 +2342,7 @@ impl App {
         // urltest group. If a refresh added candidates, restart to regenerate
         // the topology instead of sending a selector request for a missing
         // "auto" child.
-        if target == tags::AUTO && !self.runtime_has_auto {
+        if target == tags::AUTO && !self.proxy_runtime.runtime_has_auto {
             self.preferred_node = None;
             self.pending_selection = Some(PendingSelection::Auto);
             if self.auto_restart_after_change() {
@@ -2358,6 +2353,7 @@ impl App {
             return;
         }
         let Some(client) = self
+            .proxy_runtime
             .proxy
             .as_ref()
             .map(|proxy| ClashClient::new(proxy.clash.port, proxy.clash.secret.clone()))
@@ -2470,23 +2466,23 @@ impl App {
             changed = true;
         }
         let mut crashed = None;
-        if let Some(proxy) = self.proxy.as_mut() {
+        if let Some(proxy) = self.proxy_runtime.proxy.as_mut() {
             if let Ok(Some(status)) = proxy.child.try_wait() {
                 crashed = Some(status);
             }
         }
         if let Some(status) = crashed {
-            self.proxy = None;
-            if let Some(task) = self.metrics_task.take() {
+            self.proxy_runtime.proxy = None;
+            if let Some(task) = self.proxy_runtime.metrics_task.take() {
                 task.abort();
             }
-            self.status = ProxyStatus::Failed;
-            self.runtime_has_auto = false;
-            self.stable_reset_at = None;
-            self.proxy_node_tags.clear();
-            self.proxy_node_names.clear();
+            self.proxy_runtime.status = ProxyStatus::Failed;
+            self.proxy_runtime.runtime_has_auto = false;
+            self.proxy_runtime.stable_reset_at = None;
+            self.proxy_runtime.proxy_node_tags.clear();
+            self.proxy_runtime.proxy_node_names.clear();
             self.last_error = Some(format!("{}: {status}", self.text().msg_singbox_exited));
-            self.started_at = None;
+            self.proxy_runtime.started_at = None;
             self.reset_metrics();
             self.logger.app(
                 LogLevel::Error,
@@ -2495,9 +2491,14 @@ impl App {
             self.schedule_restart();
             changed = true;
         }
-        if self.proxy.is_some() && self.stable_reset_at.is_some_and(|at| Instant::now() >= at) {
-            self.restart_attempts = 0;
-            self.stable_reset_at = None;
+        if self.proxy_runtime.proxy.is_some()
+            && self
+                .proxy_runtime
+                .stable_reset_at
+                .is_some_and(|at| Instant::now() >= at)
+        {
+            self.proxy_runtime.restart_attempts = 0;
+            self.proxy_runtime.stable_reset_at = None;
         }
         if self.has_viewer() && self.page == Page::Logs && self.log_follow {
             self.selected = self.log_count().saturating_sub(1);
@@ -2507,7 +2508,7 @@ impl App {
             self.last_local_ips = Instant::now();
             changed = true;
         }
-        if self.proxy.is_some() && !self.proxy_ips_in_flight {
+        if self.proxy_runtime.proxy.is_some() && !self.proxy_ips_in_flight {
             let interval = if self.proxy_ips.is_empty() {
                 Duration::from_secs(self.proxy_ip_backoff_secs)
             } else {
@@ -2523,13 +2524,16 @@ impl App {
             self.refresh_subscriptions();
             changed = true;
         }
-        if self.status == ProxyStatus::Failed
-            && self.proxy.is_none()
-            && !self.restart_in_progress
-            && !self.preflight_in_flight
-            && self.restart_at.is_some_and(|at| Instant::now() >= at)
+        if self.proxy_runtime.status == ProxyStatus::Failed
+            && self.proxy_runtime.proxy.is_none()
+            && !self.proxy_runtime.restart_in_progress
+            && !self.proxy_runtime.preflight_in_flight
+            && self
+                .proxy_runtime
+                .restart_at
+                .is_some_and(|at| Instant::now() >= at)
         {
-            self.restart_at = None;
+            self.proxy_runtime.restart_at = None;
             if self.start_proxy().is_err() {
                 // A synchronous failure (no matching nodes, missing binary, ...)
                 // must not silently end the scheduled retry loop.
@@ -2577,7 +2581,7 @@ impl App {
         if let Some(node) = self.nodes.iter().find(|node| node.tag == tag) {
             return sanitize_display(&node.name);
         }
-        if let Some(name) = self.proxy_node_names.get(tag) {
+        if let Some(name) = self.proxy_runtime.proxy_node_names.get(tag) {
             return format!(
                 "{}{}",
                 sanitize_display(name),
@@ -2588,11 +2592,15 @@ impl App {
     }
 
     pub fn proxy_pid(&self) -> u32 {
-        self.proxy.as_ref().map(|proxy| proxy.pid).unwrap_or(0)
+        self.proxy_runtime
+            .proxy
+            .as_ref()
+            .map(|proxy| proxy.pid)
+            .unwrap_or(0)
     }
 
     pub fn uptime(&self) -> String {
-        let Some(started) = self.started_at else {
+        let Some(started) = self.proxy_runtime.started_at else {
             return self.text().common_none.to_string();
         };
         let seconds = started.elapsed().as_secs();
@@ -2605,7 +2613,7 @@ impl App {
     }
 
     pub fn listen_addresses(&self) -> String {
-        let (v4, port, ipv6) = match self.proxy.as_ref() {
+        let (v4, port, ipv6) = match self.proxy_runtime.proxy.as_ref() {
             Some(proxy) => (proxy.listen_v4.as_str(), proxy.port, proxy.ipv6),
             None => (
                 if self.config.allow_lan {

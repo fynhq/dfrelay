@@ -555,8 +555,9 @@ async fn dashboard_proxy_ips_go_on_separate_indented_lines() {
 async fn header_shows_uptime_only_while_running() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.page = Page::Dashboard;
-    app.status = ProxyStatus::Running;
-    app.started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(3723));
+    app.proxy_runtime.status = ProxyStatus::Running;
+    app.proxy_runtime.started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(3723));
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -564,8 +565,8 @@ async fn header_shows_uptime_only_while_running() {
     assert!(content.contains("运行中（01:02:03）"), "{content}");
     assert!(!content.contains("运行时长"), "{content}");
 
-    app.status = ProxyStatus::Stopped;
-    app.started_at = None;
+    app.proxy_runtime.status = ProxyStatus::Stopped;
+    app.proxy_runtime.started_at = None;
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -1417,7 +1418,7 @@ async fn settings_lan_warning_is_compact_in_the_footer() {
 #[tokio::test]
 async fn restart_progress_replaces_footer_hints() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.restart_in_progress = true;
+    app.proxy_runtime.restart_in_progress = true;
     let content = rendered(&app, 30);
     let last_line: String = content.chars().skip(100 * 29).collect();
     let compact: String = last_line.chars().filter(|c| !c.is_whitespace()).collect();
@@ -2348,20 +2349,20 @@ async fn animation_runs_only_while_motion_is_visible() {
     assert!(needs_animation(&app.view()));
     app.page = Page::Dashboard;
 
-    app.restart_in_progress = true;
+    app.proxy_runtime.restart_in_progress = true;
     assert!(needs_animation(&app.view()));
-    app.restart_in_progress = false;
+    app.proxy_runtime.restart_in_progress = false;
 
-    app.status = ProxyStatus::Starting;
+    app.proxy_runtime.status = ProxyStatus::Starting;
     assert!(needs_animation(&app.view()));
     assert_eq!(
         animation_period(&app.view()),
         Some(Duration::from_millis(100))
     );
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     assert!(!needs_animation(&app.view()));
     assert_eq!(animation_period(&app.view()), Some(STATUS_PULSE));
-    app.status = ProxyStatus::Stopped;
+    app.proxy_runtime.status = ProxyStatus::Stopped;
     assert_eq!(animation_period(&app.view()), None);
 
     app.notify("saved");
@@ -2424,7 +2425,7 @@ fn footer_text(view: &View, tick: u64) -> String {
 #[tokio::test]
 async fn restart_footer_spinner_advances_with_the_tick() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.restart_in_progress = true;
+    app.proxy_runtime.restart_in_progress = true;
     let view = app.view();
     let first = footer_text(&view, 0);
     let second = footer_text(&view, 1);
@@ -2436,7 +2437,7 @@ async fn restart_footer_spinner_advances_with_the_tick() {
 #[tokio::test]
 async fn starting_status_shows_a_spinner() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.status = ProxyStatus::Starting;
+    app.proxy_runtime.status = ProxyStatus::Starting;
     let content = rendered(&app, 30);
     let header: String = content.chars().take(100 * 4).collect();
     assert!(header.contains(spinner_frame(0)), "{header}");
@@ -2463,15 +2464,15 @@ fn header_dot_color(view: &View, status_green: bool) -> Color {
 #[tokio::test]
 async fn status_dot_follows_state_and_pulses_while_running() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.status = ProxyStatus::Stopped;
+    app.proxy_runtime.status = ProxyStatus::Stopped;
     let view = app.view();
     assert_eq!(header_dot_color(&view, false), Color::DarkGray);
 
-    app.status = ProxyStatus::Failed;
+    app.proxy_runtime.status = ProxyStatus::Failed;
     let view = app.view();
     assert_eq!(header_dot_color(&view, false), Color::Red);
 
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     let view = app.view();
     assert_eq!(header_dot_color(&view, false), Color::DarkGray);
     assert_eq!(header_dot_color(&view, true), Color::Green);

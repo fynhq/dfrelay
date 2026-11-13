@@ -44,15 +44,16 @@ impl App {
         } else {
             selected
         };
-        self.proxy_node_tags
+        self.proxy_runtime
+            .proxy_node_tags
             .iter()
             .any(|item| item == tag)
             .then(|| tag.to_string())
     }
 
     pub(super) fn maybe_probe_health(&mut self) {
-        if self.proxy.is_none()
-            || self.status != ProxyStatus::Running
+        if self.proxy_runtime.proxy.is_none()
+            || self.proxy_runtime.status != ProxyStatus::Running
             || self.health.recovery_in_flight
             || self.health.recovery_refresh_pending
             || self.health.probe_in_flight
@@ -96,7 +97,7 @@ impl App {
         {
             return;
         }
-        let Some(proxy) = self.proxy.as_ref() else {
+        let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
             return;
         };
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
@@ -177,7 +178,12 @@ impl App {
     }
 
     pub(super) fn recovery_candidates(&self, trigger: &str) -> Vec<String> {
-        let runtime: HashSet<&str> = self.proxy_node_tags.iter().map(String::as_str).collect();
+        let runtime: HashSet<&str> = self
+            .proxy_runtime
+            .proxy_node_tags
+            .iter()
+            .map(String::as_str)
+            .collect();
         let auto_mode = self.metrics.selection.selected.as_deref() == Some(tags::AUTO);
         let auto_nodes = if auto_mode {
             crate::selection::filter_nodes(
@@ -231,13 +237,13 @@ impl App {
         {
             return;
         }
-        if self.proxy.is_none() {
+        if self.proxy_runtime.proxy.is_none() {
             return;
         }
         if !self.switch_budget_available() {
             return;
         }
-        let Some(proxy) = self.proxy.as_ref() else {
+        let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
             return;
         };
         self.stats.recovery_attempts = self.stats.recovery_attempts.saturating_add(1);
@@ -443,7 +449,7 @@ impl App {
         );
         let has_new = auto_nodes
             .iter()
-            .any(|node| !self.proxy_node_tags.contains(&node.tag));
+            .any(|node| !self.proxy_runtime.proxy_node_tags.contains(&node.tag));
         if !has_new {
             self.last_error = Some(self.text().msg_health_no_nodes.to_string());
             self.logger.app(
@@ -453,7 +459,7 @@ impl App {
             self.notify(self.text().msg_health_no_new_nodes);
             return;
         }
-        if self.proxy.is_some() && self.status == ProxyStatus::Running {
+        if self.proxy_runtime.proxy.is_some() && self.proxy_runtime.status == ProxyStatus::Running {
             self.preferred_node = None;
             self.pending_selection = None;
             self.perform_restart();

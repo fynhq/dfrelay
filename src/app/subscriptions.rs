@@ -69,10 +69,15 @@ impl App {
     }
 
     pub(super) fn subscription_tag_diff(&self) -> (usize, usize) {
-        if self.proxy_node_tags.is_empty() {
+        if self.proxy_runtime.proxy_node_tags.is_empty() {
             return (0, 0);
         }
-        let live: HashSet<&str> = self.proxy_node_tags.iter().map(String::as_str).collect();
+        let live: HashSet<&str> = self
+            .proxy_runtime
+            .proxy_node_tags
+            .iter()
+            .map(String::as_str)
+            .collect();
         let next: HashSet<&str> = self.nodes.iter().map(|node| node.tag.as_str()).collect();
         (
             next.difference(&live).count(),
@@ -83,7 +88,7 @@ impl App {
     /// Record that the refreshed node set differs from the running config.
     /// The restart itself waits until the proxy is idle when configured.
     pub(super) fn note_subscription_apply(&mut self) {
-        if self.proxy_node_tags.is_empty() {
+        if self.proxy_runtime.proxy_node_tags.is_empty() {
             self.pending_refresh_apply = None;
             return;
         }
@@ -125,7 +130,7 @@ impl App {
             pending.since,
             pending.wait_logged,
         );
-        if self.proxy.is_none() || self.status != ProxyStatus::Running {
+        if self.proxy_runtime.proxy.is_none() || self.proxy_runtime.status != ProxyStatus::Running {
             self.pending_refresh_apply = None;
             self.logger.app(
                 LogLevel::Info,
@@ -134,8 +139,8 @@ impl App {
             return;
         }
         if self.refreshing_subscriptions
-            || self.restart_in_progress
-            || self.preflight_in_flight
+            || self.proxy_runtime.restart_in_progress
+            || self.proxy_runtime.preflight_in_flight
             || self.health.recovery_in_flight
             || self.pending_restart_subscription.is_some()
             || self.setup.downloading
@@ -276,7 +281,7 @@ impl App {
             .collect();
         if !errors.is_empty() {
             self.last_error = Some(errors.join("; "));
-        } else if self.status != ProxyStatus::Failed {
+        } else if self.proxy_runtime.status != ProxyStatus::Failed {
             self.last_error = None;
         }
     }

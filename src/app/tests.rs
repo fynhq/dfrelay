@@ -102,7 +102,7 @@ async fn confirmation_keys_only_cancel() {
     app.page = Page::Nodes;
     app.selected = 0;
 
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.handle_key(key(KeyCode::Char('R'))).await;
     assert!(app.restart_confirm);
     app.handle_key(key(KeyCode::Char('j'))).await;
@@ -145,7 +145,7 @@ async fn ctrl_c_clears_other_confirmations() {
 #[tokio::test]
 async fn start_stop_reports_busy_state() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Starting;
+    app.proxy_runtime.status = ProxyStatus::Starting;
     app.handle_key(key(KeyCode::Char('s'))).await;
     assert_eq!(app.message.as_deref(), Some(app.text().msg_proxy_busy));
 }
@@ -343,7 +343,7 @@ async fn unregistered_control_requests_are_ignored() {
     assert!(!app.should_quit);
     app.handle_event(AppEvent::StartProxyRequest { client_id: 99 })
         .await;
-    assert_eq!(app.status, ProxyStatus::Stopped);
+    assert_eq!(app.proxy_runtime.status, ProxyStatus::Stopped);
 }
 
 #[tokio::test]
@@ -374,7 +374,7 @@ async fn restart_in_progress_blocks_keys_except_detach() {
     app.nodes = vec![node("one"), node("two")];
     app.page = Page::Nodes;
     app.selected = 0;
-    app.restart_in_progress = true;
+    app.proxy_runtime.restart_in_progress = true;
     let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
     app.handle_event(AppEvent::ClientAttached {
         id: 11,
@@ -393,7 +393,7 @@ async fn restart_in_progress_blocks_keys_except_detach() {
     assert!(!app.has_viewer());
     assert!(drain_until_detach(&mut rx));
     app.handle_key(key(KeyCode::Char('s'))).await;
-    assert_eq!(app.status, ProxyStatus::Stopped);
+    assert_eq!(app.proxy_runtime.status, ProxyStatus::Stopped);
 }
 
 #[tokio::test]
@@ -573,14 +573,14 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
 #[tokio::test]
 async fn restart_requires_two_presses_and_can_be_cancelled() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.handle_key(key(KeyCode::Char('R'))).await;
     assert!(app.restart_confirm);
     assert!(app.view().restart_confirm);
     app.handle_key(key(KeyCode::Esc)).await;
     assert!(!app.restart_confirm);
 
-    app.status = ProxyStatus::Stopped;
+    app.proxy_runtime.status = ProxyStatus::Stopped;
     app.handle_key(key(KeyCode::Char('R'))).await;
     assert!(!app.restart_confirm);
     assert_eq!(
@@ -961,7 +961,7 @@ fn drain_until_detach(rx: &mut mpsc::Receiver<ServerMsg>) -> bool {
 #[tokio::test]
 async fn status_request_reports_mode_and_proxy_state() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.managed = true;
     app.service = Some(crate::service::ServiceIdentity {
         manager: crate::service::ServiceManager::SystemdUser,
@@ -996,11 +996,11 @@ async fn restart_backoff_pauses_after_five_failures() {
     let (mut app, _dir) = test_app().await;
     for _ in 0..MAX_RESTART_ATTEMPTS {
         app.schedule_restart();
-        assert!(app.restart_at.is_some());
+        assert!(app.proxy_runtime.restart_at.is_some());
     }
-    assert_eq!(app.restart_attempts, MAX_RESTART_ATTEMPTS);
+    assert_eq!(app.proxy_runtime.restart_attempts, MAX_RESTART_ATTEMPTS);
     app.schedule_restart();
-    assert!(app.restart_at.is_none());
+    assert!(app.proxy_runtime.restart_at.is_none());
     assert_eq!(app.message.as_deref(), Some(app.text().msg_restart_paused));
 }
 
@@ -1141,7 +1141,8 @@ async fn current_node_falls_back_to_name_when_stopped() {
 async fn current_node_labels_removed_and_unknown_tags() {
     let (mut app, _dir) = test_app().await;
     app.nodes.clear();
-    app.proxy_node_names
+    app.proxy_runtime
+        .proxy_node_names
         .insert("n-old".to_string(), "香港 01".to_string());
     app.metrics.selection.selected = Some("n-old".to_string());
     assert_eq!(
@@ -1199,7 +1200,8 @@ async fn keyword_form_saves_each_field_separately() {
 async fn missing_preferred_node_is_cleared() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![node("香港 01")];
-    app.proxy_node_names
+    app.proxy_runtime
+        .proxy_node_names
         .insert("n-missing".to_string(), "旧节点".to_string());
     app.preferred_node = Some("n-missing".to_string());
     app.pending_selection = Some(PendingSelection::Node("n-missing".to_string()));
@@ -1222,7 +1224,7 @@ async fn missing_preferred_node_is_cleared() {
 async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
-    app.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.note_subscription_apply();
     let pending = app.pending_refresh_apply.as_ref().expect("pending diff");
     assert_eq!((pending.added, pending.removed), (1, 0));
@@ -1236,18 +1238,18 @@ async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
 async fn unchanged_subscription_refresh_skips_the_restart() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![tagged_node("A", "n1")];
-    app.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.pending_restart_subscription = Some("s-1".to_string());
     app.restart_after_pending_subscription();
     assert!(app.pending_restart_subscription.is_none());
-    assert!(!app.restart_in_progress);
+    assert!(!app.proxy_runtime.restart_in_progress);
 }
 
 #[tokio::test]
 async fn reconcile_clears_the_pending_apply_after_a_matching_start() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![tagged_node("A", "n1")];
-    app.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.pending_refresh_apply = Some(PendingRefreshApply {
         added: 1,
         removed: 0,
@@ -1262,7 +1264,7 @@ async fn reconcile_clears_the_pending_apply_after_a_matching_start() {
 async fn pending_apply_is_dropped_when_the_proxy_is_not_running() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![tagged_node("A", "n1")];
-    app.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
     app.note_subscription_apply();
     assert!(app.pending_refresh_apply.is_some());
     app.maybe_apply_subscription_changes();
@@ -1684,9 +1686,9 @@ fn failover_keeps_auto_mode_and_picks_the_best_quality_manual_node() {
 #[tokio::test]
 async fn health_probe_failures_are_counted_per_selected_node() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
-    app.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
     app.metrics.selection.selected = Some("n1".to_string());
 
     let generation = app.health.generation;
@@ -1760,9 +1762,9 @@ async fn only_new_proxy_connections_keep_health_probing_active() {
 #[tokio::test]
 async fn stale_health_probe_events_are_ignored() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.nodes = vec![tagged_node("A", "n1")];
-    app.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.metrics.selection.selected = Some("n1".to_string());
     let generation = app.health.generation;
     app.invalidate_health_tasks();
@@ -1779,13 +1781,13 @@ async fn stale_health_probe_events_are_ignored() {
 #[tokio::test]
 async fn recovery_candidates_respect_auto_filter_and_latency_order() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.nodes = vec![
         tagged_node("香港 A", "n1"),
         tagged_node("日本 B", "n2"),
         tagged_node("香港 C", "n3"),
     ];
-    app.proxy_node_tags = vec!["n1".to_string(), "n2".to_string(), "n3".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string(), "n3".to_string()];
     app.config.keywords_include = vec!["香港".to_string()];
     app.node_delays.insert("n2".to_string(), 10);
     app.node_delays.insert("n3".to_string(), 20);
@@ -1804,7 +1806,7 @@ async fn recovery_candidates_respect_auto_filter_and_latency_order() {
 #[tokio::test]
 async fn no_healthy_nodes_reports_the_failure_without_enabled_subscriptions() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.on_no_healthy_nodes();
     assert_eq!(
         app.last_error.as_deref(),
@@ -1820,7 +1822,7 @@ async fn no_healthy_nodes_reports_the_failure_without_enabled_subscriptions() {
 #[tokio::test]
 async fn no_node_pause_backs_off_progressively() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     for expected in HEALTH_NO_NODE_BACKOFF_SECS {
         app.on_no_healthy_nodes();
         let remaining = app
@@ -1848,9 +1850,9 @@ async fn no_node_pause_backs_off_progressively() {
 #[tokio::test]
 async fn healthy_probe_clears_no_node_error_and_backoff() {
     let (mut app, _dir) = test_app().await;
-    app.status = ProxyStatus::Running;
+    app.proxy_runtime.status = ProxyStatus::Running;
     app.nodes = vec![tagged_node("A", "n1")];
-    app.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.metrics.selection.selected = Some("n1".to_string());
     app.health.no_node_level = 2;
     app.health.pause_until = Some(Instant::now() - Duration::from_secs(1));
