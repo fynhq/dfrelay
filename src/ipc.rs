@@ -100,6 +100,9 @@ impl InputCode {
 pub enum ClientMsg {
     Hello {
         viewer: bool,
+        /// Missing on clients older than protocol v2; defaults to 0 so the
+        /// daemon can answer with an explicit incompatibility message.
+        #[serde(default)]
         version: u32,
     },
     Key {
@@ -130,6 +133,7 @@ pub enum ServerMsg {
     Copy { text: String },
     Ack { ok: bool, message: String },
     Status(Box<DaemonStatus>),
+    Incompatible { expected: u32, got: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +226,10 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
     {
         Ok(Ok(Some(line))) => match serde_json::from_str::<ClientMsg>(&line) {
             Ok(ClientMsg::Hello { viewer, version }) if version == PROTOCOL_VERSION => viewer,
+            Ok(ClientMsg::Hello { version, .. }) => {
+                reject_incompatible(write_half, version).await;
+                return;
+            }
             _ => return,
         },
         _ => return,
@@ -505,8 +513,12 @@ pub async fn control_start(socket: &Path) -> io::Result<Ack> {
                 "daemon closed the control connection",
             ));
         };
-        if let Ok(ServerMsg::Ack { ok, message }) = serde_json::from_str::<ServerMsg>(&line) {
-            return Ok(Ack { ok, message });
+        match serde_json::from_str::<ServerMsg>(&line) {
+            Ok(ServerMsg::Ack { ok, message }) => return Ok(Ack { ok, message }),
+            Ok(ServerMsg::Incompatible { expected, got }) => {
+                return Err(incompatible_error(expected, got));
+            }
+            _ => {}
         }
     }
 }
@@ -536,8 +548,12 @@ pub async fn control_status(socket: &Path) -> io::Result<DaemonStatus> {
                 "daemon closed the control connection",
             ));
         };
-        if let Ok(ServerMsg::Status(status)) = serde_json::from_str::<ServerMsg>(&line) {
-            return Ok(*status);
+        match serde_json::from_str::<ServerMsg>(&line) {
+            Ok(ServerMsg::Status(status)) => return Ok(*status),
+            Ok(ServerMsg::Incompatible { expected, got }) => {
+                return Err(incompatible_error(expected, got));
+            }
+            _ => {}
         }
     }
 }
@@ -557,14 +573,13 @@ pub async fn control_shutdown(socket: &Path) -> io::Result<()> {
     let mut lines = BufReader::new(read_half).lines();
     loop {
         match tokio::time::timeout(CONTROL_TIMEOUT, lines.next_line()).await {
-            Ok(Ok(Some(line))) => {
-                if matches!(
-                    serde_json::from_str::<ServerMsg>(&line),
-                    Ok(ServerMsg::Ack { .. })
-                ) {
-                    break;
+            Ok(Ok(Some(line))) => match serde_json::from_str::<ServerMsg>(&line) {
+                Ok(ServerMsg::Ack { .. }) => break,
+                Ok(ServerMsg::Incompatible { expected, got }) => {
+                    return Err(incompatible_error(expected, got));
                 }
-            }
+                _ => {}
+            },
             Ok(Ok(None)) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -593,11 +608,38 @@ pub async fn control_shutdown(socket: &Path) -> io::Result<()> {
     ))
 }
 
+/// Send an explicit incompatibility message before closing. Older TUI clients
+/// report a daemon as incompatible after three unparseable snapshots, so send
+/// three lines even though a current client only needs the first one.
+async fn reject_incompatible(mut write: OwnedWriteHalf, got: u32) {
+    let Ok(mut line) = serde_json::to_vec(&ServerMsg::Incompatible {
+        expected: PROTOCOL_VERSION,
+        got,
+    }) else {
+        return;
+    };
+    line.push(b'\n');
+    for _ in 0..3 {
+        if write.write_all(&line).await.is_err() {
+            break;
+        }
+    }
+}
+
 async fn send(write: &mut OwnedWriteHalf, message: &ClientMsg) -> io::Result<()> {
     let mut line = serde_json::to_vec(message)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     line.push(b'\n');
     write.write_all(&line).await
+}
+
+fn incompatible_error(expected: u32, got: u32) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "daemon protocol {got} does not match client protocol {expected}; restart the daemon"
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -948,6 +990,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    async fn expect_incompatible(
+        lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+        got: u32,
+    ) {
+        for _ in 0..3 {
+            let line = read_line(lines).await;
+            match serde_json::from_str::<ServerMsg>(&line).unwrap() {
+                ServerMsg::Incompatible {
+                    expected,
+                    got: actual,
+                } => {
+                    assert_eq!(expected, PROTOCOL_VERSION);
+                    assert_eq!(actual, got);
+                }
+                _ => panic!("expected Incompatible message"),
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none(),
+            "incompatible client must be disconnected"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn hello_version_mismatch_is_rejected() {
         let (_dir, path, mut events) = test_listener().await;
@@ -956,19 +1026,33 @@ mod tests {
         let mut lines = BufReader::new(read).lines();
         hello(&mut write, true, PROTOCOL_VERSION + 1).await;
 
+        expect_incompatible(&mut lines, PROTOCOL_VERSION + 1).await;
         assert!(
             tokio::time::timeout(Duration::from_millis(300), events.recv())
                 .await
                 .is_err(),
             "incompatible client must not be accepted"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_hello_version_is_rejected() {
+        let (_dir, path, mut events) = test_listener().await;
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(b"{\"Hello\":{\"viewer\":true}}\n")
+            .await
+            .unwrap();
+
+        expect_incompatible(&mut lines, 0).await;
         assert!(
-            tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+            tokio::time::timeout(Duration::from_millis(300), events.recv())
                 .await
-                .unwrap()
-                .unwrap()
-                .is_none(),
-            "incompatible client must be disconnected"
+                .is_err(),
+            "client without a protocol version must not be accepted"
         );
     }
 }

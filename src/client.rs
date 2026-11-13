@@ -153,6 +153,10 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                                 break;
                             }
                             Ok(ServerMsg::Shutdown) => break,
+                            Ok(ServerMsg::Incompatible { .. }) => {
+                                note = Some(lang.text().msg_daemon_incompatible);
+                                break;
+                            }
                             Ok(ServerMsg::Copy { text }) => copy_to_clipboard(&text),
                             Ok(ServerMsg::Ack { .. }) | Ok(ServerMsg::Status(_)) => {}
                             Err(_) => {
