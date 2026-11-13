@@ -417,4 +417,133 @@ mod tests {
             Err(SupervisorError::Check(_))
         ));
     }
+
+    #[cfg(unix)]
+    fn test_paths(dir: &Path) -> Paths {
+        Paths {
+            config_file: dir.join("config.toml"),
+            data_dir: dir.to_path_buf(),
+            bin_dir: dir.join("bin"),
+            cache_dir: dir.join("cache"),
+            runtime_dir: dir.join("runtime"),
+            logs_dir: dir.join("logs"),
+            inbox_dir: dir.join("inbox"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn test_node() -> Node {
+        Node::new(
+            "node".to_string(),
+            "test".to_string(),
+            "shadowsocks".to_string(),
+            "example.com".to_string(),
+            443,
+            serde_json::json!({
+                "type": "shadowsocks",
+                "server": "example.com",
+                "server_port": 443,
+                "method": "aes-128-gcm",
+                "password": "secret"
+            }),
+        )
+    }
+
+    #[cfg(unix)]
+    fn free_port() -> u16 {
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// A fake sing-box that answers `version`/`check` and serves the mixed
+    /// listener with a Python socket so `wait_healthy` can succeed.
+    #[cfg(unix)]
+    fn fake_server_script() -> &'static str {
+        r#"#!/bin/sh
+if [ "$1" = version ]; then echo "sing-box version 1.14.4"; exit 0; fi
+if [ "$1" = check ]; then exit 0; fi
+exec python3 -c 'import json,socket,sys,time
+c=json.load(open(sys.argv[1]))
+p=[i["listen_port"] for i in c["inbounds"] if i["type"]=="mixed"][0]
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", p))
+s.listen(16)
+time.sleep(30)' "$3"
+"#
+    }
+
+    #[cfg(unix)]
+    fn install_fake_binary(paths: &Paths, script: &str) {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(paths.binary(), script).unwrap();
+        fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn starts_and_stops_a_fake_sing_box() {
+        let has_python = StdCommand::new("python3")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !has_python {
+            eprintln!("skipping fake sing-box lifecycle test: python3 is unavailable");
+            return;
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = test_paths(dir.path());
+        paths.ensure().unwrap();
+        install_fake_binary(&paths, fake_server_script());
+        let port = free_port();
+        let config = Config {
+            port,
+            enable_ipv6: false,
+            ..Config::default()
+        };
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+
+        let proxy = start(&paths, &config, &[test_node()], &logger, None)
+            .await
+            .unwrap();
+        assert_eq!(proxy.port, port);
+        assert_eq!(proxy.listen_v4, "127.0.0.1");
+        assert!(!proxy.ipv6);
+        assert!(proxy.pid > 0);
+        assert!(paths.runtime_config().is_file());
+
+        stop(proxy, &logger).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn occupied_proxy_port_is_reported_before_spawn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = test_paths(dir.path());
+        paths.ensure().unwrap();
+        install_fake_binary(&paths, "#!/bin/sh\nexit 0\n");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let config = Config {
+            port,
+            enable_ipv6: false,
+            ..Config::default()
+        };
+
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
+        let result = start(&paths, &config, &[test_node()], &logger, None).await;
+
+        assert!(matches!(
+            result,
+            Err(SupervisorError::Port { port: reported, .. }) if reported == port
+        ));
+        drop(listener);
+    }
 }

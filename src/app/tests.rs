@@ -1554,6 +1554,34 @@ async fn connection_ids_beyond_the_cap_do_not_rearm_fast_probes() {
 }
 
 #[tokio::test]
+async fn nodes_view_payload_stays_bounded_at_the_node_cap() {
+    let (mut app, _dir) = test_app().await;
+    let base = node("node");
+    app.nodes = (0..crate::subscription::MAX_TOTAL_NODES)
+        .map(|index| {
+            let mut item = base.clone();
+            item.tag = format!("n-{index:016x}");
+            item.name = format!("node {index}");
+            item
+        })
+        .collect();
+    app.page = Page::Nodes;
+    for item in &app.nodes {
+        app.node_delays.insert(item.tag.clone(), 42);
+    }
+
+    let view = app.view();
+    assert_eq!(view.nodes.len(), crate::subscription::MAX_TOTAL_NODES);
+    assert_eq!(view.auto_tags.len(), crate::subscription::MAX_TOTAL_NODES);
+    let encoded = serde_json::to_vec(&view).unwrap();
+    assert!(
+        encoded.len() < 1_500_000,
+        "Nodes View payload grew to {} bytes; consider windowing the node list",
+        encoded.len()
+    );
+}
+
+#[tokio::test]
 async fn selection_storm_warns_once_per_window() {
     let (mut app, _dir) = test_app().await;
     let now = Instant::now();

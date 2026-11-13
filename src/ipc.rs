@@ -753,4 +753,222 @@ mod tests {
         let parsed: ServerMsg = serde_json::from_str(&line).unwrap();
         assert!(matches!(parsed, ServerMsg::Copy { text } if text == "/tmp/a"));
     }
+
+    #[cfg(unix)]
+    async fn test_listener() -> (
+        tempfile::TempDir,
+        PathBuf,
+        mpsc::UnboundedReceiver<AppEvent>,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        spawn_listener(listener, tx);
+        (dir, path, rx)
+    }
+
+    #[cfg(unix)]
+    async fn next_event(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> AppEvent {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("daemon event timeout")
+            .expect("daemon event channel closed")
+    }
+
+    #[cfg(unix)]
+    async fn hello(write: &mut OwnedWriteHalf, viewer: bool, version: u32) {
+        send(write, &ClientMsg::Hello { viewer, version })
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn read_line(
+        lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    ) -> String {
+        tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+            .await
+            .expect("server response timeout")
+            .expect("server read failed")
+            .expect("server closed the connection")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn viewer_hello_forwards_keys_and_copy() {
+        let (_dir, path, mut events) = test_listener().await;
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        hello(&mut write, true, PROTOCOL_VERSION).await;
+
+        let (id, tx, accept) = match next_event(&mut events).await {
+            AppEvent::ClientAttached {
+                id,
+                viewer,
+                tx,
+                accept,
+            } => {
+                assert!(viewer);
+                (id, tx, accept)
+            }
+            _ => panic!("expected ClientAttached"),
+        };
+        accept.send(true).unwrap();
+
+        tx.send(ServerMsg::Copy {
+            text: "copied".into(),
+        })
+        .await
+        .unwrap();
+        let line = read_line(&mut lines).await;
+        assert!(matches!(
+            serde_json::from_str::<ServerMsg>(&line).unwrap(),
+            ServerMsg::Copy { text } if text == "copied"
+        ));
+
+        send(
+            &mut write,
+            &ClientMsg::Key {
+                code: InputCode::Char('j'),
+                ctrl: false,
+                alt: false,
+            },
+        )
+        .await
+        .unwrap();
+        match next_event(&mut events).await {
+            AppEvent::Key(key) => assert_eq!(key.code, KeyCode::Char('j')),
+            _ => panic!("expected Key event"),
+        }
+
+        send(&mut write, &ClientMsg::Shutdown).await.unwrap();
+        match next_event(&mut events).await {
+            AppEvent::ShutdownRequest { client_id } => assert_eq!(client_id, id),
+            _ => panic!("expected ShutdownRequest"),
+        }
+
+        drop(write);
+        drop(lines);
+        match next_event(&mut events).await {
+            AppEvent::ClientDetached(detached) => assert_eq!(detached, id),
+            _ => panic!("expected ClientDetached"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn second_viewer_is_rejected_with_busy() {
+        let (_dir, path, mut events) = test_listener().await;
+        let first = UnixStream::connect(&path).await.unwrap();
+        let (first_read, mut first_write) = first.into_split();
+        let first_lines = BufReader::new(first_read).lines();
+        hello(&mut first_write, true, PROTOCOL_VERSION).await;
+        let (first_id, _first_tx, accept) = match next_event(&mut events).await {
+            AppEvent::ClientAttached { id, tx, accept, .. } => (id, tx, accept),
+            _ => panic!("expected first ClientAttached"),
+        };
+        accept.send(true).unwrap();
+
+        let second = UnixStream::connect(&path).await.unwrap();
+        let (second_read, mut second_write) = second.into_split();
+        let mut second_lines = BufReader::new(second_read).lines();
+        hello(&mut second_write, true, PROTOCOL_VERSION).await;
+        let (second_id, second_tx, accept) = match next_event(&mut events).await {
+            AppEvent::ClientAttached { id, tx, accept, .. } => (id, tx, accept),
+            _ => panic!("expected second ClientAttached"),
+        };
+        accept.send(false).unwrap();
+        second_tx.send(ServerMsg::Busy).await.unwrap();
+        let line = read_line(&mut second_lines).await;
+        assert!(matches!(
+            serde_json::from_str::<ServerMsg>(&line).unwrap(),
+            ServerMsg::Busy
+        ));
+        assert_ne!(first_id, second_id);
+
+        drop(first_write);
+        drop(first_lines);
+        match next_event(&mut events).await {
+            AppEvent::ClientDetached(id) => assert_eq!(id, first_id),
+            _ => panic!("expected first ClientDetached"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_client_receives_status() {
+        let (_dir, path, mut events) = test_listener().await;
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        hello(&mut write, false, PROTOCOL_VERSION).await;
+
+        let (id, tx, accept) = match next_event(&mut events).await {
+            AppEvent::ClientAttached {
+                id,
+                viewer,
+                tx,
+                accept,
+                ..
+            } => {
+                assert!(!viewer);
+                (id, tx, accept)
+            }
+            _ => panic!("expected ClientAttached"),
+        };
+        accept.send(true).unwrap();
+        send(&mut write, &ClientMsg::Status).await.unwrap();
+        match next_event(&mut events).await {
+            AppEvent::StatusRequest { client_id } => assert_eq!(client_id, id),
+            _ => panic!("expected StatusRequest"),
+        }
+
+        tx.send(ServerMsg::Status(Box::new(DaemonStatus {
+            pid: 42,
+            managed: false,
+            service: None,
+            proxy: ProxyStatus::Running,
+            uptime_secs: 1,
+            listen: "127.0.0.1:12000".into(),
+            current_node: Some("node".into()),
+            version: "1.0.0".into(),
+        })))
+        .await
+        .unwrap();
+        let line = read_line(&mut lines).await;
+        match serde_json::from_str::<ServerMsg>(&line).unwrap() {
+            ServerMsg::Status(status) => {
+                assert_eq!(status.pid, 42);
+                assert_eq!(status.proxy, ProxyStatus::Running);
+            }
+            _ => panic!("expected Status response"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hello_version_mismatch_is_rejected() {
+        let (_dir, path, mut events) = test_listener().await;
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        hello(&mut write, true, PROTOCOL_VERSION + 1).await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), events.recv())
+                .await
+                .is_err(),
+            "incompatible client must not be accepted"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none(),
+            "incompatible client must be disconnected"
+        );
+    }
 }
