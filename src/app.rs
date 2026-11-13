@@ -36,6 +36,7 @@ mod quality;
 mod subscriptions;
 mod updates;
 
+use health::HealthState;
 use quality::QualityBook;
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -341,27 +342,9 @@ pub struct App {
     proxy_ip_failures: u32,
     delay_sweep_running: bool,
     last_delay_sweep: Option<Instant>,
-    health_failures: u32,
-    health_failure_tag: Option<String>,
-    health_probe_in_flight: bool,
-    health_fast_probe_pending: bool,
-    health_generation: u64,
-    last_health_probe: Option<Instant>,
-    last_health_activity: Option<Instant>,
-    health_connection_ids: HashSet<u64>,
-    last_metrics_at: Option<Instant>,
-    recovery_in_flight: bool,
-    last_recovery: Option<Instant>,
-    health_pause_until: Option<Instant>,
-    health_no_node_level: u8,
-    recovery_refresh_pending: bool,
-    last_recovery_refresh: Option<Instant>,
-    quality: QualityBook,
+    health: HealthState,
     stats: RuntimeStats,
-    auto_switch_times: VecDeque<Instant>,
     idle_since: Option<Instant>,
-    last_logged_selection: Option<(bool, Option<String>)>,
-    pending_switch_reason: Option<(&'static str, Instant)>,
     pending_refresh_apply: Option<PendingRefreshApply>,
     pub started_at: Option<Instant>,
     pub metrics_task: Option<JoinHandle<()>>,
@@ -589,27 +572,9 @@ impl App {
             proxy_ip_failures: 0,
             delay_sweep_running: false,
             last_delay_sweep: None,
-            health_failures: 0,
-            health_failure_tag: None,
-            health_probe_in_flight: false,
-            health_fast_probe_pending: false,
-            health_generation: 0,
-            last_health_probe: None,
-            last_health_activity: None,
-            health_connection_ids: HashSet::new(),
-            last_metrics_at: None,
-            recovery_in_flight: false,
-            last_recovery: None,
-            health_pause_until: None,
-            health_no_node_level: 0,
-            recovery_refresh_pending: false,
-            last_recovery_refresh: None,
-            quality: QualityBook::default(),
+            health: HealthState::default(),
             stats: RuntimeStats::default(),
-            auto_switch_times: VecDeque::new(),
             idle_since: None,
-            last_logged_selection: None,
-            pending_switch_reason: None,
             pending_refresh_apply: None,
             started_at: None,
             metrics_task: None,
@@ -706,6 +671,7 @@ impl App {
             metrics_stale: self.status == ProxyStatus::Running
                 && self.proxy.is_some()
                 && self
+                    .health
                     .last_metrics_at
                     .is_none_or(|at| at.elapsed() >= Duration::from_secs(5)),
             nodes: if show_nodes {
@@ -858,8 +824,8 @@ impl App {
             }
             AppEvent::Subscriptions { seq, runtimes } => {
                 self.refreshing_subscriptions = false;
-                let recovery_refresh = self.recovery_refresh_pending;
-                self.recovery_refresh_pending = false;
+                let recovery_refresh = self.health.recovery_refresh_pending;
+                self.health.recovery_refresh_pending = false;
                 let mut accepted: HashMap<String, SubscriptionRuntime> = runtimes
                     .into_iter()
                     .filter(|runtime| {
@@ -1133,7 +1099,7 @@ impl App {
                     }
                 }
                 self.last_totals = Some((metrics.upload_total, metrics.download_total, now));
-                self.last_metrics_at = Some(now);
+                self.health.last_metrics_at = Some(now);
                 // Check and store the same bounded window. Scanning the full
                 // list while keeping only the first ids would mark every
                 // connection beyond the cap as new on each poll and keep fast
@@ -1145,12 +1111,12 @@ impl App {
                     .map(|connection| connection_id_hash(&connection.id));
                 let new_connection = connection_ids
                     .clone()
-                    .any(|id| !self.health_connection_ids.contains(&id));
-                self.health_connection_ids.clear();
-                self.health_connection_ids.extend(connection_ids);
-                if new_connection && !self.proxy_ips_in_flight && !self.health_probe_in_flight {
-                    self.last_health_activity = Some(now);
-                    self.health_fast_probe_pending = true;
+                    .any(|id| !self.health.connection_ids.contains(&id));
+                self.health.connection_ids.clear();
+                self.health.connection_ids.extend(connection_ids);
+                if new_connection && !self.proxy_ips_in_flight && !self.health.probe_in_flight {
+                    self.health.last_activity = Some(now);
+                    self.health.fast_probe_pending = true;
                 }
                 // Node delays live in their own map; keeping a second copy in
                 // the metrics snapshot doubles the per-node bookkeeping and is
@@ -1172,22 +1138,22 @@ impl App {
                 tag,
                 outcome,
             } => {
-                if generation != self.health_generation {
+                if generation != self.health.generation {
                     return;
                 }
-                self.health_probe_in_flight = false;
+                self.health.probe_in_flight = false;
                 if self.status != ProxyStatus::Running {
                     self.reset_health_failures();
                     return;
                 }
                 match outcome {
                     HealthOutcome::Healthy(delay) => {
-                        let recovered = self.health_pause_until.take().is_some()
-                            || self.health_no_node_level > 0;
-                        let had_failures = self.health_failures > 0;
-                        self.health_no_node_level = 0;
-                        self.health_failures = 0;
-                        self.health_failure_tag = None;
+                        let recovered = self.health.pause_until.take().is_some()
+                            || self.health.no_node_level > 0;
+                        let had_failures = self.health.failures > 0;
+                        self.health.no_node_level = 0;
+                        self.health.failures = 0;
+                        self.health.failure_tag = None;
                         if self.last_error.as_deref() == Some(self.text().msg_health_no_nodes) {
                             self.last_error = None;
                         }
@@ -1202,7 +1168,7 @@ impl App {
                                 format!("health recovered: {tag} ({delay} ms)"),
                             );
                         }
-                        self.quality.record_success(&tag, delay);
+                        self.health.quality.record_success(&tag, delay);
                         self.node_delays.insert(tag, delay);
                         self.sort_nodes_if_visible();
                     }
@@ -1213,22 +1179,23 @@ impl App {
                         }
                         self.stats.health_probe_failures_total =
                             self.stats.health_probe_failures_total.saturating_add(1);
-                        if self.health_failure_tag.as_deref() != Some(tag.as_str()) {
-                            self.health_failure_tag = Some(tag.clone());
-                            self.health_failures = 0;
+                        if self.health.failure_tag.as_deref() != Some(tag.as_str()) {
+                            self.health.failure_tag = Some(tag.clone());
+                            self.health.failures = 0;
                         }
-                        self.health_failures += 1;
-                        self.quality.record_failure(&tag);
-                        if self.health_failures == 1 {
+                        self.health.failures += 1;
+                        self.health.quality.record_failure(&tag);
+                        if self.health.failures == 1 {
                             self.logger.app(
                                 LogLevel::Info,
                                 format!("health degraded: {tag} (1/{HEALTH_FAILURE_THRESHOLD})"),
                             );
                         }
-                        if self.health_failures >= HEALTH_FAILURE_THRESHOLD
-                            && !self.recovery_in_flight
-                            && !self.recovery_refresh_pending
+                        if self.health.failures >= HEALTH_FAILURE_THRESHOLD
+                            && !self.health.recovery_in_flight
+                            && !self.health.recovery_refresh_pending
                             && self
+                                .health
                                 .last_recovery
                                 .is_none_or(|at| at.elapsed() >= HEALTH_RECOVERY_COOLDOWN)
                         {
@@ -1243,10 +1210,10 @@ impl App {
                 trigger,
                 healthy,
             } => {
-                if generation != self.health_generation {
+                if generation != self.health.generation {
                     return;
                 }
-                self.recovery_in_flight = false;
+                self.health.recovery_in_flight = false;
                 if self.status != ProxyStatus::Running || self.proxy.is_none() {
                     self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
                     return;
@@ -1263,7 +1230,7 @@ impl App {
                 let Some(target) = choose_recovery_target(
                     self.metrics.selection.selected.as_deref(),
                     &healthy,
-                    &self.quality,
+                    &self.health.quality,
                 ) else {
                     self.on_no_healthy_nodes();
                     return;
@@ -1294,10 +1261,10 @@ impl App {
                 self.record_auto_switch();
                 self.set_switch_reason("recovery");
                 self.selection_generation.fetch_add(1, Ordering::Relaxed);
-                self.health_failures = 0;
-                self.health_failure_tag = None;
-                self.health_no_node_level = 0;
-                self.health_pause_until = None;
+                self.health.failures = 0;
+                self.health.failure_tag = None;
+                self.health.no_node_level = 0;
+                self.health.pause_until = None;
                 self.last_error = None;
                 self.logger.app(
                     LogLevel::Warn,
@@ -1358,11 +1325,11 @@ impl App {
                     return;
                 }
                 if let Some(delay) = delay.filter(|delay| *delay > 0) {
-                    self.quality.record_success(&tag, delay);
+                    self.health.quality.record_success(&tag, delay);
                     self.node_delays.insert(tag, delay);
                     self.sort_nodes_if_visible();
                 } else {
-                    self.quality.record_failure(&tag);
+                    self.health.quality.record_failure(&tag);
                 }
             }
             AppEvent::NodeSelected(tag) => {
@@ -1639,7 +1606,7 @@ impl App {
         match task {
             BackgroundTask::SubscriptionRefresh => {
                 self.refreshing_subscriptions = false;
-                self.recovery_refresh_pending = false;
+                self.health.recovery_refresh_pending = false;
                 self.schedule_subscription_retry();
             }
             BackgroundTask::ProxyStart => {
@@ -1654,8 +1621,8 @@ impl App {
             }
             BackgroundTask::ProxyIps => self.proxy_ips_in_flight = false,
             BackgroundTask::DelaySweep => self.delay_sweep_running = false,
-            BackgroundTask::HealthProbe => self.health_probe_in_flight = false,
-            BackgroundTask::Recovery => self.recovery_in_flight = false,
+            BackgroundTask::HealthProbe => self.health.probe_in_flight = false,
+            BackgroundTask::Recovery => self.health.recovery_in_flight = false,
             BackgroundTask::BinaryDownload => self.setup.downloading = false,
             BackgroundTask::BinaryInstall => {
                 self.install_in_flight = false;
@@ -1701,7 +1668,7 @@ impl App {
         let tags: HashSet<String> = self.nodes.iter().map(|node| node.tag.clone()).collect();
         self.node_delays.retain(|tag, _| tags.contains(tag));
         self.delay_testing.retain(|tag| tags.contains(tag));
-        self.quality.prune(&tags);
+        self.health.quality.prune(&tags);
     }
 
     fn sync_preferred_node(&mut self) {

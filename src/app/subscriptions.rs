@@ -136,7 +136,7 @@ impl App {
         if self.refreshing_subscriptions
             || self.restart_in_progress
             || self.preflight_in_flight
-            || self.recovery_in_flight
+            || self.health.recovery_in_flight
             || self.pending_restart_subscription.is_some()
             || self.setup.downloading
             || self.setup.rollback_in_flight
@@ -145,6 +145,7 @@ impl App {
             return;
         }
         if self
+            .health
             .last_metrics_at
             .is_none_or(|at| at.elapsed() > HEALTH_PROBE_STALE)
         {

@@ -350,14 +350,14 @@ async fn unregistered_control_requests_are_ignored() {
 async fn background_panic_clears_related_in_flight_state() {
     let (mut app, _dir) = test_app().await;
     app.refreshing_subscriptions = true;
-    app.recovery_refresh_pending = true;
+    app.health.recovery_refresh_pending = true;
     app.handle_event(AppEvent::BackgroundPanic {
         task: BackgroundTask::SubscriptionRefresh,
         message: "boom".into(),
     })
     .await;
     assert!(!app.refreshing_subscriptions);
-    assert!(!app.recovery_refresh_pending);
+    assert!(!app.health.recovery_refresh_pending);
 
     app.pending_restart_subscription = Some("sub".into());
     app.handle_event(AppEvent::BackgroundPanic {
@@ -1292,8 +1292,8 @@ async fn switch_budget_pauses_health_failover_and_resets_the_window() {
         app.record_auto_switch();
     }
     assert!(!app.switch_budget_available());
-    assert!(app.auto_switch_times.is_empty());
-    assert!(app.health_pause_until.is_some_and(|at| at > Instant::now()));
+    assert!(app.health.auto_switch_times.is_empty());
+    assert!(app.health.pause_until.is_some_and(|at| at > Instant::now()));
 }
 
 #[tokio::test]
@@ -1510,22 +1510,22 @@ async fn new_connection_ids_only_flag_new_traffic() {
         ..Default::default()
     }))
     .await;
-    assert!(app.health_fast_probe_pending);
+    assert!(app.health.fast_probe_pending);
 
-    app.health_fast_probe_pending = false;
+    app.health.fast_probe_pending = false;
     app.handle_event(AppEvent::Metrics(MetricsSnapshot {
         connections: vec![connection("a")],
         ..Default::default()
     }))
     .await;
-    assert!(!app.health_fast_probe_pending);
+    assert!(!app.health.fast_probe_pending);
 
     app.handle_event(AppEvent::Metrics(MetricsSnapshot {
         connections: vec![connection("a"), connection("b")],
         ..Default::default()
     }))
     .await;
-    assert!(app.health_fast_probe_pending);
+    assert!(app.health.fast_probe_pending);
 }
 
 #[tokio::test]
@@ -1543,12 +1543,12 @@ async fn connection_ids_beyond_the_cap_do_not_rearm_fast_probes() {
     };
 
     app.handle_event(AppEvent::Metrics(metrics.clone())).await;
-    assert!(app.health_fast_probe_pending);
+    assert!(app.health.fast_probe_pending);
 
-    app.health_fast_probe_pending = false;
+    app.health.fast_probe_pending = false;
     app.handle_event(AppEvent::Metrics(metrics)).await;
     assert!(
-        !app.health_fast_probe_pending,
+        !app.health.fast_probe_pending,
         "connections beyond the id cap must not look new on every poll"
     );
 }
@@ -1611,7 +1611,7 @@ async fn selection_storm_warns_once_per_window() {
 #[tokio::test]
 async fn observe_selection_change_counts_only_transitions() {
     let (mut app, _dir) = test_app().await;
-    app.last_logged_selection = Some((true, Some("n-old".to_string())));
+    app.health.last_logged_selection = Some((true, Some("n-old".to_string())));
     app.metrics.selection.selected = Some(crate::singbox::tags::AUTO.to_string());
     app.metrics.selection.auto_now = Some("n-new".to_string());
 
@@ -1689,7 +1689,7 @@ async fn health_probe_failures_are_counted_per_selected_node() {
     app.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
     app.metrics.selection.selected = Some("n1".to_string());
 
-    let generation = app.health_generation;
+    let generation = app.health.generation;
     for _ in 0..HEALTH_FAILURE_THRESHOLD {
         app.handle_event(AppEvent::HealthProbe {
             generation,
@@ -1698,8 +1698,8 @@ async fn health_probe_failures_are_counted_per_selected_node() {
         })
         .await;
     }
-    assert_eq!(app.health_failures, HEALTH_FAILURE_THRESHOLD);
-    assert_eq!(app.health_failure_tag.as_deref(), Some("n1"));
+    assert_eq!(app.health.failures, HEALTH_FAILURE_THRESHOLD);
+    assert_eq!(app.health.failure_tag.as_deref(), Some("n1"));
 
     app.handle_event(AppEvent::HealthProbe {
         generation,
@@ -1707,8 +1707,8 @@ async fn health_probe_failures_are_counted_per_selected_node() {
         outcome: HealthOutcome::Healthy(35),
     })
     .await;
-    assert_eq!(app.health_failures, 0);
-    assert!(app.health_failure_tag.is_none());
+    assert_eq!(app.health.failures, 0);
+    assert!(app.health.failure_tag.is_none());
     assert_eq!(app.node_delays.get("n1"), Some(&35));
 
     app.handle_event(AppEvent::HealthProbe {
@@ -1717,7 +1717,7 @@ async fn health_probe_failures_are_counted_per_selected_node() {
         outcome: HealthOutcome::Failed,
     })
     .await;
-    assert_eq!(app.health_failures, 1);
+    assert_eq!(app.health.failures, 1);
     app.metrics.selection.selected = Some("n2".to_string());
     app.handle_event(AppEvent::HealthProbe {
         generation,
@@ -1725,7 +1725,7 @@ async fn health_probe_failures_are_counted_per_selected_node() {
         outcome: HealthOutcome::Failed,
     })
     .await;
-    assert_eq!(app.health_failures, 0);
+    assert_eq!(app.health.failures, 0);
 }
 
 #[tokio::test]
@@ -1739,12 +1739,12 @@ async fn only_new_proxy_connections_keep_health_probing_active() {
             ..Default::default()
         });
     app.handle_event(AppEvent::Metrics(metrics.clone())).await;
-    let first = app.last_health_activity.expect("first connection");
+    let first = app.health.last_activity.expect("first connection");
 
-    app.last_health_activity = Some(Instant::now() - Duration::from_secs(10));
-    let stale = app.last_health_activity.unwrap();
+    app.health.last_activity = Some(Instant::now() - Duration::from_secs(10));
+    let stale = app.health.last_activity.unwrap();
     app.handle_event(AppEvent::Metrics(metrics)).await;
-    assert_eq!(app.last_health_activity, Some(stale));
+    assert_eq!(app.health.last_activity, Some(stale));
 
     let mut next = MetricsSnapshot::default();
     next.connections
@@ -1753,8 +1753,8 @@ async fn only_new_proxy_connections_keep_health_probing_active() {
             ..Default::default()
         });
     app.handle_event(AppEvent::Metrics(next)).await;
-    assert!(app.last_health_activity.expect("new connection") > stale);
-    assert!(app.last_health_activity.expect("new connection") >= first);
+    assert!(app.health.last_activity.expect("new connection") > stale);
+    assert!(app.health.last_activity.expect("new connection") >= first);
 }
 
 #[tokio::test]
@@ -1764,7 +1764,7 @@ async fn stale_health_probe_events_are_ignored() {
     app.nodes = vec![tagged_node("A", "n1")];
     app.proxy_node_tags = vec!["n1".to_string()];
     app.metrics.selection.selected = Some("n1".to_string());
-    let generation = app.health_generation;
+    let generation = app.health.generation;
     app.invalidate_health_tasks();
 
     app.handle_event(AppEvent::HealthProbe {
@@ -1773,7 +1773,7 @@ async fn stale_health_probe_events_are_ignored() {
         outcome: HealthOutcome::Failed,
     })
     .await;
-    assert_eq!(app.health_failures, 0);
+    assert_eq!(app.health.failures, 0);
 }
 
 #[tokio::test]
@@ -1811,10 +1811,10 @@ async fn no_healthy_nodes_reports_the_failure_without_enabled_subscriptions() {
         Some(app.text().msg_health_no_nodes)
     );
     assert!(app.message.is_some());
-    assert!(!app.recovery_refresh_pending);
-    assert!(app.health_pause_until.is_some_and(|at| at > Instant::now()));
+    assert!(!app.health.recovery_refresh_pending);
+    assert!(app.health.pause_until.is_some_and(|at| at > Instant::now()));
     app.invalidate_health_tasks();
-    assert!(app.health_pause_until.is_none());
+    assert!(app.health.pause_until.is_none());
 }
 
 #[tokio::test]
@@ -1824,7 +1824,8 @@ async fn no_node_pause_backs_off_progressively() {
     for expected in HEALTH_NO_NODE_BACKOFF_SECS {
         app.on_no_healthy_nodes();
         let remaining = app
-            .health_pause_until
+            .health
+            .pause_until
             .expect("pause")
             .saturating_duration_since(Instant::now())
             .as_secs();
@@ -1835,7 +1836,8 @@ async fn no_node_pause_backs_off_progressively() {
     }
     app.on_no_healthy_nodes();
     let remaining = app
-        .health_pause_until
+        .health
+        .pause_until
         .expect("pause")
         .saturating_duration_since(Instant::now())
         .as_secs();
@@ -1850,11 +1852,11 @@ async fn healthy_probe_clears_no_node_error_and_backoff() {
     app.nodes = vec![tagged_node("A", "n1")];
     app.proxy_node_tags = vec!["n1".to_string()];
     app.metrics.selection.selected = Some("n1".to_string());
-    app.health_no_node_level = 2;
-    app.health_pause_until = Some(Instant::now() - Duration::from_secs(1));
+    app.health.no_node_level = 2;
+    app.health.pause_until = Some(Instant::now() - Duration::from_secs(1));
     let no_nodes = app.text().msg_health_no_nodes.to_string();
     app.last_error = Some(no_nodes);
-    let generation = app.health_generation;
+    let generation = app.health.generation;
 
     app.handle_event(AppEvent::HealthProbe {
         generation,
@@ -1864,8 +1866,8 @@ async fn healthy_probe_clears_no_node_error_and_backoff() {
     .await;
 
     assert!(app.last_error.is_none());
-    assert!(app.health_pause_until.is_none());
-    assert_eq!(app.health_no_node_level, 0);
+    assert!(app.health.pause_until.is_none());
+    assert_eq!(app.health.no_node_level, 0);
 }
 
 #[test]

@@ -1,10 +1,36 @@
 //! Health probing and failover for the active node.
 //!
-//! Method group extracted from `app.rs`; `App` itself and its fields stay in
-//! the parent module, so this file only adds an `impl App` block.
+//! `HealthState` lives here; `App` holds one instance and this file adds the
+//! related `impl App` block.
 
+use super::quality::QualityBook;
 use super::*;
 use crate::singbox::tags;
+use std::collections::VecDeque;
+
+/// Health probing, failover and selection-quality state.
+#[derive(Debug, Default)]
+pub(super) struct HealthState {
+    pub(super) failures: u32,
+    pub(super) failure_tag: Option<String>,
+    pub(super) probe_in_flight: bool,
+    pub(super) fast_probe_pending: bool,
+    pub(super) generation: u64,
+    pub(super) last_probe: Option<Instant>,
+    pub(super) last_activity: Option<Instant>,
+    pub(super) connection_ids: HashSet<u64>,
+    pub(super) last_metrics_at: Option<Instant>,
+    pub(super) recovery_in_flight: bool,
+    pub(super) last_recovery: Option<Instant>,
+    pub(super) pause_until: Option<Instant>,
+    pub(super) no_node_level: u8,
+    pub(super) recovery_refresh_pending: bool,
+    pub(super) last_recovery_refresh: Option<Instant>,
+    pub(super) quality: QualityBook,
+    pub(super) auto_switch_times: VecDeque<Instant>,
+    pub(super) last_logged_selection: Option<(bool, Option<String>)>,
+    pub(super) pending_switch_reason: Option<(&'static str, Instant)>,
+}
 
 impl App {
     pub(super) fn health_target(&self) -> Option<String> {
@@ -27,17 +53,19 @@ impl App {
     pub(super) fn maybe_probe_health(&mut self) {
         if self.proxy.is_none()
             || self.status != ProxyStatus::Running
-            || self.recovery_in_flight
-            || self.recovery_refresh_pending
-            || self.health_probe_in_flight
+            || self.health.recovery_in_flight
+            || self.health.recovery_refresh_pending
+            || self.health.probe_in_flight
             || self
-                .health_pause_until
+                .health
+                .pause_until
                 .is_some_and(|at| at > Instant::now())
         {
             return;
         }
         let now = Instant::now();
         if self
+            .health
             .last_metrics_at
             .is_none_or(|at| at.elapsed() > HEALTH_PROBE_STALE)
         {
@@ -47,13 +75,14 @@ impl App {
             return;
         };
         let active = self
-            .last_health_activity
+            .health
+            .last_activity
             .is_some_and(|at| now.duration_since(at) <= HEALTH_ACTIVE_WINDOW);
         let confirming =
-            self.health_failures > 0 && self.health_failure_tag.as_deref() == Some(tag.as_str());
+            self.health.failures > 0 && self.health.failure_tag.as_deref() == Some(tag.as_str());
         let interval = if confirming {
             HEALTH_PROBE_INTERVAL
-        } else if self.health_fast_probe_pending {
+        } else if self.health.fast_probe_pending {
             HEALTH_FAST_PROBE_GAP
         } else if active {
             HEALTH_PROBE_INTERVAL
@@ -61,7 +90,8 @@ impl App {
             HEALTH_IDLE_PROBE_INTERVAL
         };
         if self
-            .last_health_probe
+            .health
+            .last_probe
             .is_some_and(|at| now.duration_since(at) < interval)
         {
             return;
@@ -73,10 +103,10 @@ impl App {
         let targets = self.probe_targets();
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
-        let generation = self.health_generation;
-        self.health_probe_in_flight = true;
-        self.health_fast_probe_pending = false;
-        self.last_health_probe = Some(now);
+        let generation = self.health.generation;
+        self.health.probe_in_flight = true;
+        self.health.fast_probe_pending = false;
+        self.health.last_probe = Some(now);
         self.stats.health_probes_total = self.stats.health_probes_total.saturating_add(1);
         self.spawn_guarded(BackgroundTask::HealthProbe, async move {
             let outcome = probe_node_outcome(&client, &tag, &targets).await;
@@ -95,8 +125,8 @@ impl App {
     }
 
     pub(super) fn reset_health_failures(&mut self) {
-        self.health_failures = 0;
-        self.health_failure_tag = None;
+        self.health.failures = 0;
+        self.health.failure_tag = None;
     }
 
     /// Probe targets in priority order. The configured URL stays first; the
@@ -111,38 +141,39 @@ impl App {
     }
 
     pub(super) fn schedule_no_node_pause(&mut self) {
-        let index = (self.health_no_node_level as usize)
+        let index = (self.health.no_node_level as usize)
             .min(HEALTH_NO_NODE_BACKOFF_SECS.len().saturating_sub(1));
-        self.health_pause_until =
+        self.health.pause_until =
             Some(Instant::now() + Duration::from_secs(HEALTH_NO_NODE_BACKOFF_SECS[index]));
-        self.health_no_node_level = self
-            .health_no_node_level
+        self.health.no_node_level = self
+            .health
+            .no_node_level
             .saturating_add(1)
             .min(HEALTH_NO_NODE_BACKOFF_SECS.len() as u8 - 1);
     }
 
     pub(super) fn invalidate_health_tasks(&mut self) {
-        self.health_generation = self.health_generation.wrapping_add(1);
-        self.health_probe_in_flight = false;
-        self.health_fast_probe_pending = false;
-        self.recovery_in_flight = false;
-        self.health_pause_until = None;
-        self.health_no_node_level = 0;
-        self.recovery_refresh_pending = false;
+        self.health.generation = self.health.generation.wrapping_add(1);
+        self.health.probe_in_flight = false;
+        self.health.fast_probe_pending = false;
+        self.health.recovery_in_flight = false;
+        self.health.pause_until = None;
+        self.health.no_node_level = 0;
+        self.health.recovery_refresh_pending = false;
         self.reset_health_failures();
-        self.last_recovery = None;
+        self.health.last_recovery = None;
     }
 
     pub(super) fn reset_health_state(&mut self) {
         self.invalidate_health_tasks();
-        self.last_health_probe = None;
-        self.last_health_activity = None;
-        self.health_connection_ids.clear();
-        self.last_metrics_at = None;
-        self.recovery_refresh_pending = false;
+        self.health.last_probe = None;
+        self.health.last_activity = None;
+        self.health.connection_ids.clear();
+        self.health.last_metrics_at = None;
+        self.health.recovery_refresh_pending = false;
         self.idle_since = None;
-        self.last_logged_selection = None;
-        self.pending_switch_reason = None;
+        self.health.last_logged_selection = None;
+        self.health.pending_switch_reason = None;
     }
 
     pub(super) fn recovery_candidates(&self, trigger: &str) -> Vec<String> {
@@ -174,9 +205,11 @@ impl App {
             .collect();
         ordered.sort_by(|left, right| {
             let left_score = self
+                .health
                 .quality
                 .score(&left.tag, self.node_delays.get(&left.tag).copied());
             let right_score = self
+                .health
                 .quality
                 .score(&right.tag, self.node_delays.get(&right.tag).copied());
             left_score
@@ -189,10 +222,11 @@ impl App {
     }
 
     pub(super) fn start_recovery(&mut self, trigger: String) {
-        if self.recovery_in_flight
-            || self.recovery_refresh_pending
+        if self.health.recovery_in_flight
+            || self.health.recovery_refresh_pending
             || self
-                .health_pause_until
+                .health
+                .pause_until
                 .is_some_and(|at| at > Instant::now())
         {
             return;
@@ -207,7 +241,7 @@ impl App {
             return;
         };
         self.stats.recovery_attempts = self.stats.recovery_attempts.saturating_add(1);
-        self.last_recovery = Some(Instant::now());
+        self.health.last_recovery = Some(Instant::now());
         self.logger.app(
             LogLevel::Warn,
             format!("health failover: {trigger} failed {HEALTH_FAILURE_THRESHOLD} probes"),
@@ -220,8 +254,8 @@ impl App {
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
         let targets = self.probe_targets();
         let tx = self.events_tx.clone();
-        let generation = self.health_generation;
-        self.recovery_in_flight = true;
+        let generation = self.health.generation;
+        self.health.recovery_in_flight = true;
         self.notify(self.text().msg_health_recovering);
         self.spawn_guarded(BackgroundTask::Recovery, async move {
             let mut healthy = Vec::new();
@@ -259,22 +293,23 @@ impl App {
     }
 
     pub(super) fn set_switch_reason(&mut self, reason: &'static str) {
-        self.pending_switch_reason = Some((reason, Instant::now()));
+        self.health.pending_switch_reason = Some((reason, Instant::now()));
     }
 
     pub(super) fn record_auto_switch(&mut self) {
-        self.auto_switch_times.push_back(Instant::now());
+        self.health.auto_switch_times.push_back(Instant::now());
     }
 
     pub(super) fn switch_budget_available(&mut self) -> bool {
         let now = Instant::now();
-        self.auto_switch_times
+        self.health
+            .auto_switch_times
             .retain(|at| now.saturating_duration_since(*at) < AUTO_SWITCH_WINDOW);
-        if self.auto_switch_times.len() < AUTO_SWITCH_BUDGET {
+        if self.health.auto_switch_times.len() < AUTO_SWITCH_BUDGET {
             return true;
         }
-        self.auto_switch_times.clear();
-        self.health_pause_until = Some(now + AUTO_SWITCH_PAUSE);
+        self.health.auto_switch_times.clear();
+        self.health.pause_until = Some(now + AUTO_SWITCH_PAUSE);
         self.logger.app(
             LogLevel::Warn,
             format!(
@@ -297,10 +332,10 @@ impl App {
 
     pub(super) fn observe_selection_change(&mut self, now: Instant) {
         let current = self.selection_state();
-        if current == self.last_logged_selection {
+        if current == self.health.last_logged_selection {
             return;
         }
-        let transition = match (&current, &self.last_logged_selection) {
+        let transition = match (&current, &self.health.last_logged_selection) {
             (Some((auto, Some(tag))), Some((_, Some(previous)))) => {
                 Some((*auto, tag.clone(), previous.clone()))
             }
@@ -309,7 +344,7 @@ impl App {
         if let Some((auto, tag, previous)) = transition {
             self.record_selection_change(now);
             let mode = if auto { "auto" } else { "manual" };
-            let reason = match self.pending_switch_reason.take() {
+            let reason = match self.health.pending_switch_reason.take() {
                 Some((reason, at)) if now.saturating_duration_since(at) <= SWITCH_REASON_TTL => {
                     reason
                 }
@@ -327,7 +362,7 @@ impl App {
                 format!("selection active: {tag} (mode={mode})"),
             );
         }
-        self.last_logged_selection = current;
+        self.health.last_logged_selection = current;
     }
 
     pub(super) fn record_selection_change(&mut self, now: Instant) {
@@ -370,7 +405,7 @@ impl App {
 
     pub(super) fn on_no_healthy_nodes(&mut self) {
         self.stats.recovery_no_healthy = self.stats.recovery_no_healthy.saturating_add(1);
-        self.recovery_in_flight = false;
+        self.health.recovery_in_flight = false;
         self.reset_health_failures();
         self.schedule_no_node_pause();
         let message = self.text().msg_health_no_nodes.to_string();
@@ -382,6 +417,7 @@ impl App {
             return;
         }
         if self
+            .health
             .last_recovery_refresh
             .is_some_and(|at| at.elapsed() < HEALTH_REFRESH_COOLDOWN)
         {
@@ -389,11 +425,11 @@ impl App {
             return;
         }
         if self.refreshing_subscriptions {
-            self.recovery_refresh_pending = true;
+            self.health.recovery_refresh_pending = true;
             return;
         }
-        self.last_recovery_refresh = Some(Instant::now());
-        self.recovery_refresh_pending = true;
+        self.health.last_recovery_refresh = Some(Instant::now());
+        self.health.recovery_refresh_pending = true;
         self.notify(self.text().msg_health_refreshing);
         self.refresh_subscriptions();
     }
