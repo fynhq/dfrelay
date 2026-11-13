@@ -36,6 +36,7 @@ mod keys;
 mod metrics_state;
 mod proxy;
 mod quality;
+mod selection_state;
 mod subscriptions;
 mod ui_state;
 mod updates;
@@ -45,6 +46,7 @@ use health::HealthState;
 use metrics_state::MetricsState;
 use proxy::ProxyRuntime;
 use quality::QualityBook;
+use selection_state::{PendingSelection, SelectionState};
 use subscriptions::SubscriptionState;
 use ui_state::{NodeSort, UiState};
 
@@ -128,12 +130,6 @@ fn edit_line_input(input: &mut LineInput, key: &KeyEvent) -> bool {
         _ => return false,
     }
     true
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PendingSelection {
-    Auto,
-    Node(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,16 +279,13 @@ pub struct App {
     pub(crate) proxy_runtime: ProxyRuntime,
     pub(crate) metrics_state: MetricsState,
     pub(crate) binary_state: BinaryState,
+    pub(crate) selection_state: SelectionState,
     subscription_state: SubscriptionState,
     managed: bool,
     service: Option<ServiceIdentity>,
     pub should_quit: bool,
     health: HealthState,
     stats: RuntimeStats,
-    pub preferred_node: Option<String>,
-    selection_generation: Arc<AtomicU64>,
-    pending_selection: Option<PendingSelection>,
-    pending_start: Option<u64>,
     binary_manager: BinaryManager,
     events_tx: UnboundedSender<AppEvent>,
     events_rx: UnboundedReceiver<AppEvent>,
@@ -466,10 +459,7 @@ impl App {
             should_quit: false,
             health: HealthState::default(),
             stats: RuntimeStats::default(),
-            preferred_node: None,
-            selection_generation: Arc::new(AtomicU64::new(0)),
-            pending_selection: None,
-            pending_start: None,
+            selection_state: SelectionState::default(),
             binary_manager,
             events_tx,
             events_rx,
@@ -583,7 +573,7 @@ impl App {
                 })
                 .collect(),
             selected: self.ui_state.selected,
-            preferred_node: self.preferred_node.clone(),
+            preferred_node: self.selection_state.preferred_node.clone(),
             metrics,
             connection_count,
             node_delays: self.metrics_state.node_delays.clone(),
@@ -1167,7 +1157,7 @@ impl App {
                 let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
                 let (tag, name) = match &target {
                     RecoveryTarget::Auto => {
-                        self.preferred_node = None;
+                        self.selection_state.preferred_node = None;
                         (tags::AUTO.to_string(), String::new())
                     }
                     RecoveryTarget::Node(tag) => {
@@ -1178,14 +1168,16 @@ impl App {
                             .find(|node| node.tag == *tag)
                             .map(|node| node.name.clone())
                             .unwrap_or_else(|| tag.clone());
-                        self.preferred_node = Some(tag.clone());
+                        self.selection_state.preferred_node = Some(tag.clone());
                         (tag.clone(), name)
                     }
                 };
-                self.pending_selection = None;
+                self.selection_state.pending_selection = None;
                 self.record_auto_switch();
                 self.set_switch_reason("recovery");
-                self.selection_generation.fetch_add(1, Ordering::Relaxed);
+                self.selection_state
+                    .selection_generation
+                    .fetch_add(1, Ordering::Relaxed);
                 self.health.failures = 0;
                 self.health.failure_tag = None;
                 self.health.no_node_level = 0;
@@ -1202,8 +1194,11 @@ impl App {
                     }
                 };
                 let tx = self.events_tx.clone();
-                let generation = self.selection_generation.load(Ordering::Relaxed);
-                let token = self.selection_generation.clone();
+                let generation = self
+                    .selection_state
+                    .selection_generation
+                    .load(Ordering::Relaxed);
+                let token = self.selection_state.selection_generation.clone();
                 self.spawn_guarded(BackgroundTask::Selection, async move {
                     if token.load(Ordering::Relaxed) != generation {
                         return;
@@ -1267,7 +1262,7 @@ impl App {
                     {
                         self.set_switch_reason("manual");
                     }
-                    self.preferred_node = Some(tag);
+                    self.selection_state.preferred_node = Some(tag);
                 }
             }
             AppEvent::SelectionApplied => self.request_metrics_refresh(),
@@ -1429,7 +1424,7 @@ impl App {
     }
 
     fn ack_pending_start(&mut self, ok: bool, message: impl Into<String>) {
-        if let Some(client_id) = self.pending_start.take() {
+        if let Some(client_id) = self.selection_state.pending_start.take() {
             self.ack(client_id, ok, message);
         }
     }
@@ -1447,7 +1442,7 @@ impl App {
             return;
         }
         if self.metrics_state.nodes.is_empty() {
-            self.pending_start = Some(client_id);
+            self.selection_state.pending_start = Some(client_id);
             if self.subscription_state.refreshing_subscriptions {
                 return;
             }
@@ -1459,13 +1454,13 @@ impl App {
             return;
         }
         match self.start_proxy() {
-            Ok(()) => self.pending_start = Some(client_id),
+            Ok(()) => self.selection_state.pending_start = Some(client_id),
             Err(err) => self.ack(client_id, false, err),
         }
     }
 
     fn retry_pending_start(&mut self) {
-        if self.pending_start.is_none() {
+        if self.selection_state.pending_start.is_none() {
             return;
         }
         if self.metrics_state.nodes.is_empty() {
@@ -1618,7 +1613,7 @@ impl App {
     }
 
     fn sync_preferred_node(&mut self) {
-        if let Some(tag) = self.preferred_node.clone() {
+        if let Some(tag) = self.selection_state.preferred_node.clone() {
             if !self.metrics_state.nodes.iter().any(|node| node.tag == tag) {
                 let name = self
                     .proxy_runtime
@@ -1628,8 +1623,8 @@ impl App {
                     .filter(|name| !name.is_empty())
                     .map(|name| format!(" ({name})"))
                     .unwrap_or_default();
-                self.preferred_node = None;
-                self.pending_selection = None;
+                self.selection_state.preferred_node = None;
+                self.selection_state.pending_selection = None;
                 self.logger.app(
                     LogLevel::Warn,
                     format!(
@@ -1749,7 +1744,7 @@ impl App {
         let paths = self.paths.clone();
         let config = self.config.clone();
         let nodes = self.metrics_state.nodes.clone();
-        let preferred = self.preferred_node.clone();
+        let preferred = self.selection_state.preferred_node.clone();
         let tx = self.events_tx.clone();
         self.spawn_guarded(BackgroundTask::Preflight, async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -1809,12 +1804,12 @@ impl App {
             return Err(self.text().no_matching_nodes.to_string());
         }
         self.proxy_runtime.runtime_has_auto = filtered.len() >= 2;
-        let mut preferred = self.preferred_node.clone();
+        let mut preferred = self.selection_state.preferred_node.clone();
         if let Some(tag) = preferred.as_deref() {
             if !self.metrics_state.nodes.iter().any(|node| node.tag == tag) {
                 preferred = None;
-                self.preferred_node = None;
-                self.pending_selection = None;
+                self.selection_state.preferred_node = None;
+                self.selection_state.pending_selection = None;
                 self.notify(self.text().msg_preferred_missing);
             }
         }
@@ -2041,8 +2036,8 @@ impl App {
             return;
         }
         if self.proxy_runtime.proxy.is_none() {
-            self.preferred_node = Some(node.tag.clone());
-            self.pending_selection = Some(PendingSelection::Node(node.tag.clone()));
+            self.selection_state.preferred_node = Some(node.tag.clone());
+            self.selection_state.pending_selection = Some(PendingSelection::Node(node.tag.clone()));
             self.notify(format!(
                 "{}: {}",
                 self.text().msg_node_selected_pending,
@@ -2050,12 +2045,14 @@ impl App {
             ));
             return;
         }
-        self.selection_generation.fetch_add(1, Ordering::Relaxed);
+        self.selection_state
+            .selection_generation
+            .fetch_add(1, Ordering::Relaxed);
         if !self.proxy_runtime.proxy_node_tags.is_empty()
             && !self.proxy_runtime.proxy_node_tags.contains(&node.tag)
         {
-            self.preferred_node = Some(node.tag.clone());
-            self.pending_selection = None;
+            self.selection_state.preferred_node = Some(node.tag.clone());
+            self.selection_state.pending_selection = None;
             let restarting = self.auto_restart_after_change();
             self.notify(if restarting {
                 self.text().msg_node_switching
@@ -2074,14 +2071,17 @@ impl App {
         };
         let tag = node.tag.clone();
         let name = node.name.clone();
-        self.pending_selection = None;
+        self.selection_state.pending_selection = None;
         self.invalidate_health_tasks();
         self.request_metrics_refresh();
         self.notify(format!("{}: {name}", self.text().msg_node_selected));
         let tx = self.events_tx.clone();
         let selected_label = self.text().msg_node_selected;
-        let generation = self.selection_generation.load(Ordering::Relaxed);
-        let token = self.selection_generation.clone();
+        let generation = self
+            .selection_state
+            .selection_generation
+            .load(Ordering::Relaxed);
+        let token = self.selection_state.selection_generation.clone();
         self.spawn_guarded(BackgroundTask::Selection, async move {
             if token.load(Ordering::Relaxed) != generation {
                 return;
@@ -2102,7 +2102,7 @@ impl App {
     }
 
     fn apply_pending_selection(&mut self, port: u16, secret: String) {
-        let Some(pending) = self.pending_selection.take() else {
+        let Some(pending) = self.selection_state.pending_selection.take() else {
             return;
         };
         let (target, label) = match pending {
@@ -2134,8 +2134,11 @@ impl App {
         };
         self.request_metrics_refresh();
         let tx = self.events_tx.clone();
-        let generation = self.selection_generation.load(Ordering::Relaxed);
-        let token = self.selection_generation.clone();
+        let generation = self
+            .selection_state
+            .selection_generation
+            .load(Ordering::Relaxed);
+        let token = self.selection_state.selection_generation.clone();
         self.spawn_guarded(BackgroundTask::Selection, async move {
             let client = ClashClient::new(port, secret);
             for attempt in 0..20 {
@@ -2311,12 +2314,14 @@ impl App {
             return;
         }
         if self.proxy_runtime.proxy.is_none() {
-            self.preferred_node = None;
-            self.pending_selection = Some(PendingSelection::Auto);
+            self.selection_state.preferred_node = None;
+            self.selection_state.pending_selection = Some(PendingSelection::Auto);
             self.notify(self.text().msg_auto_pending);
             return;
         }
-        self.selection_generation.fetch_add(1, Ordering::Relaxed);
+        self.selection_state
+            .selection_generation
+            .fetch_add(1, Ordering::Relaxed);
         let Some(target) = self.auto_selection_target() else {
             self.ui_state.last_error = Some(self.text().no_matching_nodes.to_string());
             return;
@@ -2326,12 +2331,12 @@ impl App {
         // the topology instead of sending a selector request for a missing
         // "auto" child.
         if target == tags::AUTO && !self.proxy_runtime.runtime_has_auto {
-            self.preferred_node = None;
-            self.pending_selection = Some(PendingSelection::Auto);
+            self.selection_state.preferred_node = None;
+            self.selection_state.pending_selection = Some(PendingSelection::Auto);
             if self.auto_restart_after_change() {
                 self.notify(self.text().msg_auto_restarting);
             } else {
-                self.pending_selection = None;
+                self.selection_state.pending_selection = None;
             }
             return;
         }
@@ -2343,15 +2348,18 @@ impl App {
         else {
             return;
         };
-        self.preferred_node = None;
-        self.pending_selection = None;
+        self.selection_state.preferred_node = None;
+        self.selection_state.pending_selection = None;
         self.invalidate_health_tasks();
         self.request_metrics_refresh();
         self.set_switch_reason("manual");
         let tx = self.events_tx.clone();
         let auto_label = self.text().msg_auto_enabled;
-        let generation = self.selection_generation.load(Ordering::Relaxed);
-        let token = self.selection_generation.clone();
+        let generation = self
+            .selection_state
+            .selection_generation
+            .load(Ordering::Relaxed);
+        let token = self.selection_state.selection_generation.clone();
         self.spawn_guarded(BackgroundTask::Selection, async move {
             if token.load(Ordering::Relaxed) != generation {
                 return;
@@ -2552,7 +2560,7 @@ impl App {
                     selected.to_string()
                 }
             });
-        let fallback = self.preferred_node.clone();
+        let fallback = self.selection_state.preferred_node.clone();
         match active.or(fallback) {
             Some(tag) if tag == tags::AUTO => Some(self.text().common_auto.to_string()),
             Some(tag) => Some(self.node_display_name(&tag)),
@@ -2570,7 +2578,7 @@ impl App {
     pub fn selection_mode_auto(&self) -> bool {
         match self.metrics_state.metrics.selection.selected.as_deref() {
             Some(selected) => selected == tags::AUTO,
-            None => self.preferred_node.is_none(),
+            None => self.selection_state.preferred_node.is_none(),
         }
     }
 

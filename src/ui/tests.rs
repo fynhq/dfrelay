@@ -1112,7 +1112,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
         );
 
         app.metrics_state.metrics.selection.selected = None;
-        app.preferred_node = Some("n1".to_string());
+        app.selection_state.preferred_node = Some("n1".to_string());
         let rendered = lines(&app);
         assert!(
             rendered[mode].contains(manual),
@@ -1120,7 +1120,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
             rendered[mode]
         );
 
-        app.preferred_node = None;
+        app.selection_state.preferred_node = None;
         let rendered = lines(&app);
         assert!(
             rendered[mode].contains(auto),
@@ -1966,7 +1966,7 @@ async fn nodes_mark_a_single_active_node() {
     // both rows carried a dot in this state.
     app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     app.metrics_state.metrics.selection.auto_now = Some("n2".to_string());
-    app.preferred_node = Some("n1".to_string());
+    app.selection_state.preferred_node = Some("n1".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
     let marks: Vec<String> = rows
         .iter()
@@ -1978,7 +1978,7 @@ async fn nodes_mark_a_single_active_node() {
 
     // Auto mode marks the urltest result only.
     app.metrics_state.metrics.selection.selected = Some("auto".to_string());
-    app.preferred_node = None;
+    app.selection_state.preferred_node = None;
     let rows = rendered_rows(&app.view(), 100, 30);
     let marks: Vec<String> = rows
         .iter()
@@ -1990,7 +1990,7 @@ async fn nodes_mark_a_single_active_node() {
 
     // Without metrics the pending preferred node is marked.
     app.metrics_state.metrics = crate::singbox::clash::MetricsSnapshot::default();
-    app.preferred_node = Some("n2".to_string());
+    app.selection_state.preferred_node = Some("n2".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
     let marks: Vec<String> = rows
         .iter()

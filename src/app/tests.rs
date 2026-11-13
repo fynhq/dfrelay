@@ -1,5 +1,6 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::health::probe_failure_outcome;
+use super::selection_state::PendingSelection;
 use super::subscriptions::PendingRefreshApply;
 use super::*;
 use crate::singbox::binary::InboxCandidate;
@@ -1175,11 +1176,11 @@ async fn node_selection_while_stopped_applies_on_start() {
 
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(
-        app.preferred_node.as_deref(),
+        app.selection_state.preferred_node.as_deref(),
         Some(app.metrics_state.nodes[1].tag.as_str())
     );
     assert_eq!(
-        app.pending_selection,
+        app.selection_state.pending_selection,
         Some(PendingSelection::Node(
             app.metrics_state.nodes[1].tag.clone()
         ))
@@ -1192,18 +1193,21 @@ async fn node_selection_while_stopped_applies_on_start() {
         .contains("日本 02"));
 
     app.handle_key(key(KeyCode::Char('a'))).await;
-    assert!(app.preferred_node.is_none());
-    assert_eq!(app.pending_selection, Some(PendingSelection::Auto));
+    assert!(app.selection_state.preferred_node.is_none());
+    assert_eq!(
+        app.selection_state.pending_selection,
+        Some(PendingSelection::Auto)
+    );
 }
 
 #[tokio::test]
 async fn current_node_falls_back_to_name_when_stopped() {
     let (mut app, _dir) = test_app().await;
     app.metrics_state.nodes = vec![node("香港 01")];
-    app.preferred_node = Some(app.metrics_state.nodes[0].tag.clone());
+    app.selection_state.preferred_node = Some(app.metrics_state.nodes[0].tag.clone());
     assert_eq!(app.current_node().as_deref(), Some("香港 01"));
 
-    app.preferred_node = None;
+    app.selection_state.preferred_node = None;
     assert_eq!(app.current_node().as_deref(), Some(app.text().common_auto));
 }
 
@@ -1230,7 +1234,7 @@ async fn selection_mode_follows_selector_state_and_pending_node() {
     // Stopped without a pending node: automatic selection.
     assert!(app.selection_mode_auto());
 
-    app.preferred_node = Some("n1".to_string());
+    app.selection_state.preferred_node = Some("n1".to_string());
     assert!(!app.selection_mode_auto());
 
     // While running the selector state is authoritative.
@@ -1273,11 +1277,11 @@ async fn missing_preferred_node_is_cleared() {
     app.proxy_runtime
         .proxy_node_names
         .insert("n-missing".to_string(), "旧节点".to_string());
-    app.preferred_node = Some("n-missing".to_string());
-    app.pending_selection = Some(PendingSelection::Node("n-missing".to_string()));
+    app.selection_state.preferred_node = Some("n-missing".to_string());
+    app.selection_state.pending_selection = Some(PendingSelection::Node("n-missing".to_string()));
     app.sync_preferred_node();
-    assert!(app.preferred_node.is_none());
-    assert!(app.pending_selection.is_none());
+    assert!(app.selection_state.preferred_node.is_none());
+    assert!(app.selection_state.pending_selection.is_none());
     assert_eq!(
         app.ui_state.message.as_deref(),
         Some(app.text().msg_preferred_missing)
