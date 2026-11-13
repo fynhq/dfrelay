@@ -49,7 +49,7 @@ fn node(name: &str) -> Node {
 #[tokio::test]
 async fn hjkl_navigates_pages_and_lists() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("one"), node("two"), node("three")];
+    app.metrics_state.nodes = vec![node("one"), node("two"), node("three")];
     app.ui_state.page = Page::Nodes;
 
     app.handle_key(key(KeyCode::Char('j'))).await;
@@ -74,7 +74,7 @@ async fn hjkl_navigates_pages_and_lists() {
 #[tokio::test]
 async fn home_and_end_jump_like_g_and_big_g() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("one"), node("two"), node("three")];
+    app.metrics_state.nodes = vec![node("one"), node("two"), node("three")];
     app.ui_state.page = Page::Nodes;
     app.handle_key(key(KeyCode::End)).await;
     assert_eq!(app.ui_state.selected, 2);
@@ -99,7 +99,7 @@ async fn home_and_end_jump_like_g_and_big_g() {
 #[tokio::test]
 async fn confirmation_keys_only_cancel() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("one"), node("two")];
+    app.metrics_state.nodes = vec![node("one"), node("two")];
     app.ui_state.page = Page::Nodes;
     app.ui_state.selected = 0;
 
@@ -394,7 +394,7 @@ async fn background_panic_clears_related_in_flight_state() {
 #[tokio::test]
 async fn restart_in_progress_blocks_keys_except_detach() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("one"), node("two")];
+    app.metrics_state.nodes = vec![node("one"), node("two")];
     app.ui_state.page = Page::Nodes;
     app.ui_state.selected = 0;
     app.proxy_runtime.restart_in_progress = true;
@@ -431,7 +431,8 @@ async fn connections_enter_copies_the_selected_target() {
     })
     .await;
     app.ui_state.page = Page::Connections;
-    app.metrics
+    app.metrics_state
+        .metrics
         .connections
         .push(crate::singbox::clash::ConnectionInfo {
             id: "id1".to_string(),
@@ -547,12 +548,12 @@ async fn logs_source_cycles_and_filters_lines() {
 #[tokio::test]
 async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("Alpha"), node("Beta"), node("Gamma"), node("Delta")];
-    for item in &mut app.nodes {
+    app.metrics_state.nodes = vec![node("Alpha"), node("Beta"), node("Gamma"), node("Delta")];
+    for item in &mut app.metrics_state.nodes {
         item.tag = format!("tag-{}", item.name);
     }
     app.config.keywords_include = vec!["Alpha".to_string(), "Beta".to_string()];
-    for item in &app.nodes {
+    for item in &app.metrics_state.nodes {
         let delay = match item.name.as_str() {
             "Alpha" => 100,
             "Beta" => 20,
@@ -560,38 +561,44 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
             _ => 0,
         };
         if delay > 0 {
-            app.node_delays.insert(item.tag.clone(), delay);
+            app.metrics_state
+                .node_delays
+                .insert(item.tag.clone(), delay);
         }
     }
     app.ui_state.page = Page::Nodes;
     app.ui_state.selected = app
+        .metrics_state
         .nodes
         .iter()
         .position(|item| item.name == "Delta")
         .unwrap();
     app.sort_nodes_preserving_selection();
     assert_eq!(
-        app.nodes
+        app.metrics_state
+            .nodes
             .iter()
             .map(|item| item.name.as_str())
             .collect::<Vec<_>>(),
         vec!["Beta", "Alpha", "Delta", "Gamma"]
     );
-    assert_eq!(app.nodes[app.ui_state.selected].name, "Delta");
+    assert_eq!(app.metrics_state.nodes[app.ui_state.selected].name, "Delta");
 
     app.handle_key(key(KeyCode::Char('n'))).await;
     assert_eq!(
-        app.nodes
+        app.metrics_state
+            .nodes
             .iter()
             .map(|item| item.name.as_str())
             .collect::<Vec<_>>(),
         vec!["Alpha", "Beta", "Delta", "Gamma"]
     );
-    assert_eq!(app.nodes[app.ui_state.selected].name, "Delta");
+    assert_eq!(app.metrics_state.nodes[app.ui_state.selected].name, "Delta");
 
     app.handle_key(key(KeyCode::Char('n'))).await;
     assert_eq!(
-        app.nodes
+        app.metrics_state
+            .nodes
             .iter()
             .map(|item| item.name.as_str())
             .collect::<Vec<_>>(),
@@ -687,7 +694,7 @@ async fn stale_subscription_refresh_results_are_ignored() {
     })
     .await;
     assert_eq!(app.subscription_state.subscriptions.len(), 1);
-    assert_eq!(app.nodes[0].name, "fresh");
+    assert_eq!(app.metrics_state.nodes[0].name, "fresh");
 }
 
 #[tokio::test]
@@ -1153,18 +1160,20 @@ async fn subscription_delete_confirmation_is_persistent_and_cancellable() {
 #[tokio::test]
 async fn node_selection_while_stopped_applies_on_start() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("香港 01"), node("日本 02")];
+    app.metrics_state.nodes = vec![node("香港 01"), node("日本 02")];
     app.ui_state.page = Page::Nodes;
     app.ui_state.selected = 1;
 
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(
         app.preferred_node.as_deref(),
-        Some(app.nodes[1].tag.as_str())
+        Some(app.metrics_state.nodes[1].tag.as_str())
     );
     assert_eq!(
         app.pending_selection,
-        Some(PendingSelection::Node(app.nodes[1].tag.clone()))
+        Some(PendingSelection::Node(
+            app.metrics_state.nodes[1].tag.clone()
+        ))
     );
     assert!(app
         .ui_state
@@ -1181,8 +1190,8 @@ async fn node_selection_while_stopped_applies_on_start() {
 #[tokio::test]
 async fn current_node_falls_back_to_name_when_stopped() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("香港 01")];
-    app.preferred_node = Some(app.nodes[0].tag.clone());
+    app.metrics_state.nodes = vec![node("香港 01")];
+    app.preferred_node = Some(app.metrics_state.nodes[0].tag.clone());
     assert_eq!(app.current_node().as_deref(), Some("香港 01"));
 
     app.preferred_node = None;
@@ -1192,17 +1201,17 @@ async fn current_node_falls_back_to_name_when_stopped() {
 #[tokio::test]
 async fn current_node_labels_removed_and_unknown_tags() {
     let (mut app, _dir) = test_app().await;
-    app.nodes.clear();
+    app.metrics_state.nodes.clear();
     app.proxy_runtime
         .proxy_node_names
         .insert("n-old".to_string(), "香港 01".to_string());
-    app.metrics.selection.selected = Some("n-old".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n-old".to_string());
     assert_eq!(
         app.current_node(),
         Some(format!("香港 01{}", app.text().node_removed_suffix))
     );
 
-    app.metrics.selection.selected = Some("n-missing".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n-missing".to_string());
     assert_eq!(app.current_node().as_deref(), Some(app.text().node_unknown));
 }
 
@@ -1216,17 +1225,17 @@ async fn selection_mode_follows_selector_state_and_pending_node() {
     assert!(!app.selection_mode_auto());
 
     // While running the selector state is authoritative.
-    app.metrics.selection.selected = Some("auto".to_string());
+    app.metrics_state.metrics.selection.selected = Some("auto".to_string());
     assert!(app.selection_mode_auto());
 
-    app.metrics.selection.selected = Some("n2".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n2".to_string());
     assert!(!app.selection_mode_auto());
 }
 
 #[tokio::test]
 async fn keyword_form_saves_each_field_separately() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("香港 01"), node("日本 02")];
+    app.metrics_state.nodes = vec![node("香港 01"), node("日本 02")];
     app.config.keywords_exclude = vec!["过期".to_string()];
     let mut form = KeywordForm::from_config(&app.config, KeywordField::Include);
     form.value = LineInput::new("香港, HK");
@@ -1251,7 +1260,7 @@ async fn keyword_form_saves_each_field_separately() {
 #[tokio::test]
 async fn missing_preferred_node_is_cleared() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("香港 01")];
+    app.metrics_state.nodes = vec![node("香港 01")];
     app.proxy_runtime
         .proxy_node_names
         .insert("n-missing".to_string(), "旧节点".to_string());
@@ -1275,7 +1284,7 @@ async fn missing_preferred_node_is_cleared() {
 #[tokio::test]
 async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.note_subscription_apply();
     let pending = app
@@ -1285,7 +1294,7 @@ async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
         .expect("pending diff");
     assert_eq!((pending.added, pending.removed), (1, 0));
 
-    app.nodes = vec![tagged_node("A", "n1")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.note_subscription_apply();
     assert!(app.subscription_state.pending_refresh_apply.is_none());
 }
@@ -1293,7 +1302,7 @@ async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
 #[tokio::test]
 async fn unchanged_subscription_refresh_skips_the_restart() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![tagged_node("A", "n1")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.subscription_state.pending_restart_subscription = Some("s-1".to_string());
     app.restart_after_pending_subscription();
@@ -1307,7 +1316,7 @@ async fn unchanged_subscription_refresh_skips_the_restart() {
 #[tokio::test]
 async fn reconcile_clears_the_pending_apply_after_a_matching_start() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![tagged_node("A", "n1")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.subscription_state.pending_refresh_apply = Some(PendingRefreshApply {
         added: 1,
@@ -1322,7 +1331,7 @@ async fn reconcile_clears_the_pending_apply_after_a_matching_start() {
 #[tokio::test]
 async fn pending_apply_is_dropped_when_the_proxy_is_not_running() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![tagged_node("A", "n1")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
     app.note_subscription_apply();
     assert!(app.subscription_state.pending_refresh_apply.is_some());
@@ -1512,8 +1521,8 @@ async fn dashboard_scroll_clamps_to_viewport() {
 #[tokio::test]
 async fn view_roundtrips_through_json() {
     let (mut app, _dir) = test_app().await;
-    app.node_delays.insert("n1".to_string(), 42);
-    app.delay_testing.insert("n2".to_string());
+    app.metrics_state.node_delays.insert("n1".to_string(), 42);
+    app.metrics_state.delay_testing.insert("n2".to_string());
     let encoded = serde_json::to_string(&app.view()).unwrap();
     let decoded: View = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded.page, app.ui_state.page);
@@ -1534,7 +1543,7 @@ async fn view_does_not_expose_secrets_or_unused_config_fields() {
         url: "https://example.com/path?token=secret".to_string(),
         enabled: true,
     }];
-    app.nodes = vec![node("node")];
+    app.metrics_state.nodes = vec![node("node")];
 
     let encoded = serde_json::to_string(&app.view()).unwrap();
     assert!(!encoded.contains("s3cret"), "{encoded}");
@@ -1551,9 +1560,9 @@ async fn metrics_node_delays_feed_the_nodes_view() {
     let mut metrics = MetricsSnapshot::default();
     metrics.node_delays.insert("n1".to_string(), 42);
     app.handle_event(AppEvent::Metrics(metrics)).await;
-    assert_eq!(app.node_delays.get("n1"), Some(&42));
+    assert_eq!(app.metrics_state.node_delays.get("n1"), Some(&42));
     assert!(
-        app.metrics.node_delays.is_empty(),
+        app.metrics_state.metrics.node_delays.is_empty(),
         "the metrics snapshot must not keep a second delay map"
     );
     assert_eq!(app.view().node_delays.get("n1"), Some(&42));
@@ -1618,7 +1627,7 @@ async fn connection_ids_beyond_the_cap_do_not_rearm_fast_probes() {
 async fn nodes_view_payload_stays_bounded_at_the_node_cap() {
     let (mut app, _dir) = test_app().await;
     let base = node("node");
-    app.nodes = (0..crate::subscription::MAX_TOTAL_NODES)
+    app.metrics_state.nodes = (0..crate::subscription::MAX_TOTAL_NODES)
         .map(|index| {
             let mut item = base.clone();
             item.tag = format!("n-{index:016x}");
@@ -1627,8 +1636,8 @@ async fn nodes_view_payload_stays_bounded_at_the_node_cap() {
         })
         .collect();
     app.ui_state.page = Page::Nodes;
-    for item in &app.nodes {
-        app.node_delays.insert(item.tag.clone(), 42);
+    for item in &app.metrics_state.nodes {
+        app.metrics_state.node_delays.insert(item.tag.clone(), 42);
     }
 
     let view = app.view();
@@ -1673,8 +1682,8 @@ async fn selection_storm_warns_once_per_window() {
 async fn observe_selection_change_counts_only_transitions() {
     let (mut app, _dir) = test_app().await;
     app.health.last_logged_selection = Some((true, Some("n-old".to_string())));
-    app.metrics.selection.selected = Some(crate::singbox::tags::AUTO.to_string());
-    app.metrics.selection.auto_now = Some("n-new".to_string());
+    app.metrics_state.metrics.selection.selected = Some(crate::singbox::tags::AUTO.to_string());
+    app.metrics_state.metrics.selection.auto_now = Some("n-new".to_string());
 
     app.observe_selection_change(Instant::now());
     assert_eq!(app.stats.selection_changes_total, 1);
@@ -1746,9 +1755,9 @@ fn failover_keeps_auto_mode_and_picks_the_best_quality_manual_node() {
 async fn health_probe_failures_are_counted_per_selected_node() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Running;
-    app.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
-    app.metrics.selection.selected = Some("n1".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
 
     let generation = app.health.generation;
     for _ in 0..HEALTH_FAILURE_THRESHOLD {
@@ -1770,7 +1779,7 @@ async fn health_probe_failures_are_counted_per_selected_node() {
     .await;
     assert_eq!(app.health.failures, 0);
     assert!(app.health.failure_tag.is_none());
-    assert_eq!(app.node_delays.get("n1"), Some(&35));
+    assert_eq!(app.metrics_state.node_delays.get("n1"), Some(&35));
 
     app.handle_event(AppEvent::HealthProbe {
         generation,
@@ -1779,7 +1788,7 @@ async fn health_probe_failures_are_counted_per_selected_node() {
     })
     .await;
     assert_eq!(app.health.failures, 1);
-    app.metrics.selection.selected = Some("n2".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n2".to_string());
     app.handle_event(AppEvent::HealthProbe {
         generation,
         tag: "n1".to_string(),
@@ -1822,9 +1831,9 @@ async fn only_new_proxy_connections_keep_health_probing_active() {
 async fn stale_health_probe_events_are_ignored() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Running;
-    app.nodes = vec![tagged_node("A", "n1")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
-    app.metrics.selection.selected = Some("n1".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     let generation = app.health.generation;
     app.invalidate_health_tasks();
 
@@ -1841,21 +1850,21 @@ async fn stale_health_probe_events_are_ignored() {
 async fn recovery_candidates_respect_auto_filter_and_latency_order() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Running;
-    app.nodes = vec![
+    app.metrics_state.nodes = vec![
         tagged_node("香港 A", "n1"),
         tagged_node("日本 B", "n2"),
         tagged_node("香港 C", "n3"),
     ];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string(), "n3".to_string()];
     app.config.keywords_include = vec!["香港".to_string()];
-    app.node_delays.insert("n2".to_string(), 10);
-    app.node_delays.insert("n3".to_string(), 20);
+    app.metrics_state.node_delays.insert("n2".to_string(), 10);
+    app.metrics_state.node_delays.insert("n3".to_string(), 20);
 
-    app.metrics.selection.selected = Some("auto".to_string());
+    app.metrics_state.metrics.selection.selected = Some("auto".to_string());
     assert_eq!(app.recovery_candidates("n1"), vec!["n3".to_string()]);
     assert_eq!(app.recovery_candidates("n3"), vec!["n1".to_string()]);
 
-    app.metrics.selection.selected = Some("n1".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     assert_eq!(
         app.recovery_candidates("n1"),
         vec!["n2".to_string(), "n3".to_string()]
@@ -1910,9 +1919,9 @@ async fn no_node_pause_backs_off_progressively() {
 async fn healthy_probe_clears_no_node_error_and_backoff() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Running;
-    app.nodes = vec![tagged_node("A", "n1")];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
-    app.metrics.selection.selected = Some("n1".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     app.health.no_node_level = 2;
     app.health.pause_until = Some(Instant::now() - Duration::from_secs(1));
     let no_nodes = app.text().msg_health_no_nodes.to_string();
@@ -2064,8 +2073,9 @@ async fn failed_subscription_refresh_schedules_retry() {
 #[tokio::test]
 async fn view_scopes_heavy_lists_to_the_active_page() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("one"), node("two")];
-    app.metrics
+    app.metrics_state.nodes = vec![node("one"), node("two")];
+    app.metrics_state
+        .metrics
         .connections
         .push(crate::singbox::clash::ConnectionInfo {
             id: "c1".to_string(),
@@ -2097,8 +2107,8 @@ async fn view_scopes_heavy_lists_to_the_active_page() {
 #[tokio::test]
 async fn auto_candidates_react_to_node_and_keyword_changes() {
     let (mut app, _dir) = test_app().await;
-    app.nodes = vec![node("香港 01"), node("日本 02")];
-    for (index, item) in app.nodes.iter_mut().enumerate() {
+    app.metrics_state.nodes = vec![node("香港 01"), node("日本 02")];
+    for (index, item) in app.metrics_state.nodes.iter_mut().enumerate() {
         item.tag = format!("n-{index}");
     }
     assert_eq!(app.auto_candidate_tags().len(), 2);
@@ -2107,6 +2117,6 @@ async fn auto_candidates_react_to_node_and_keyword_changes() {
     assert_eq!(app.auto_candidate_tags(), vec!["n-1".to_string()]);
 
     app.config.keywords_include.clear();
-    app.nodes.push(node("美国 03"));
+    app.metrics_state.nodes.push(node("美国 03"));
     assert_eq!(app.auto_candidate_tags().len(), 3);
 }

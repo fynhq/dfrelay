@@ -34,9 +34,10 @@ pub(super) struct HealthState {
 
 impl App {
     pub(super) fn health_target(&self) -> Option<String> {
-        let selected = self.metrics.selection.selected.as_deref()?;
+        let selected = self.metrics_state.metrics.selection.selected.as_deref()?;
         let tag = if selected == tags::AUTO {
-            self.metrics
+            self.metrics_state
+                .metrics
                 .selection
                 .auto_now
                 .as_deref()
@@ -172,7 +173,7 @@ impl App {
         self.health.connection_ids.clear();
         self.health.last_metrics_at = None;
         self.health.recovery_refresh_pending = false;
-        self.idle_since = None;
+        self.metrics_state.idle_since = None;
         self.health.last_logged_selection = None;
         self.health.pending_switch_reason = None;
     }
@@ -184,10 +185,11 @@ impl App {
             .iter()
             .map(String::as_str)
             .collect();
-        let auto_mode = self.metrics.selection.selected.as_deref() == Some(tags::AUTO);
+        let auto_mode =
+            self.metrics_state.metrics.selection.selected.as_deref() == Some(tags::AUTO);
         let auto_nodes = if auto_mode {
             crate::selection::filter_nodes(
-                &self.nodes,
+                &self.metrics_state.nodes,
                 &self.config.keywords_include,
                 &self.config.keywords_exclude,
             )
@@ -200,7 +202,8 @@ impl App {
                 .filter(|node| runtime.contains(node.tag.as_str()))
                 .collect()
         } else {
-            self.nodes
+            self.metrics_state
+                .nodes
                 .iter()
                 .filter(|node| runtime.contains(node.tag.as_str()))
                 .collect()
@@ -210,14 +213,14 @@ impl App {
             .filter(|node| node.tag != trigger)
             .collect();
         ordered.sort_by(|left, right| {
-            let left_score = self
-                .health
-                .quality
-                .score(&left.tag, self.node_delays.get(&left.tag).copied());
-            let right_score = self
-                .health
-                .quality
-                .score(&right.tag, self.node_delays.get(&right.tag).copied());
+            let left_score = self.health.quality.score(
+                &left.tag,
+                self.metrics_state.node_delays.get(&left.tag).copied(),
+            );
+            let right_score = self.health.quality.score(
+                &right.tag,
+                self.metrics_state.node_delays.get(&right.tag).copied(),
+            );
             left_score
                 .total_cmp(&right_score)
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
@@ -328,9 +331,9 @@ impl App {
     }
 
     fn selection_state(&self) -> Option<(bool, Option<String>)> {
-        let selected = self.metrics.selection.selected.as_ref()?;
+        let selected = self.metrics_state.metrics.selection.selected.as_ref()?;
         if selected == tags::AUTO {
-            Some((true, self.metrics.selection.auto_now.clone()))
+            Some((true, self.metrics_state.metrics.selection.auto_now.clone()))
         } else {
             Some((false, Some(selected.clone())))
         }
@@ -391,7 +394,13 @@ impl App {
             return;
         }
         self.stats.last_storm_warn = Some(now);
-        let current = self.metrics.selection.selected.as_deref().unwrap_or("-");
+        let current = self
+            .metrics_state
+            .metrics
+            .selection
+            .selected
+            .as_deref()
+            .unwrap_or("-");
         self.logger.app(
             LogLevel::Warn,
             format!(
@@ -443,7 +452,7 @@ impl App {
     pub(super) fn finish_recovery_refresh(&mut self) {
         self.reset_health_failures();
         let auto_nodes = crate::selection::filter_nodes(
-            &self.nodes,
+            &self.metrics_state.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
         );

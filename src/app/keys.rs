@@ -257,11 +257,14 @@ impl App {
     }
 
     pub(super) fn copy_connection_target(&mut self) {
-        let selected = self
-            .ui_state
-            .selected
-            .min(self.metrics.connections.len().saturating_sub(1));
-        let Some(connection) = self.metrics.connections.get(selected) else {
+        let selected = self.ui_state.selected.min(
+            self.metrics_state
+                .metrics
+                .connections
+                .len()
+                .saturating_sub(1),
+        );
+        let Some(connection) = self.metrics_state.metrics.connections.get(selected) else {
             return;
         };
         let Some(target) = connection.target() else {
@@ -283,7 +286,9 @@ impl App {
         self.clients.retain(|_, client| !client.viewer);
         // `ClientDetached` for those ids arrives after the map entries are
         // gone, so it cannot clear the flag; do it here.
-        self.viewer_active.store(false, Ordering::Relaxed);
+        self.metrics_state
+            .viewer_active
+            .store(false, Ordering::Relaxed);
     }
 
     pub(super) fn switch_page(&mut self, page: Page) {
@@ -344,8 +349,8 @@ impl App {
 
     pub(super) fn max_selection_for(&self, page: Page) -> usize {
         match page {
-            Page::Nodes => self.nodes.len(),
-            Page::Connections => self.metrics.connections.len(),
+            Page::Nodes => self.metrics_state.nodes.len(),
+            Page::Connections => self.metrics_state.metrics.connections.len(),
             Page::Subscriptions => self.subscription_state.subscriptions.len(),
             Page::Logs => self.log_count(),
             Page::Settings => settings_items(self.config.allow_lan).len(),
@@ -378,22 +383,28 @@ impl App {
     pub(super) fn sort_nodes_preserving_selection(&mut self) {
         self.refresh_auto_tags_cache();
         let selected_tag = self
+            .metrics_state
             .nodes
             .get(self.ui_state.selected)
             .map(|node| node.tag.clone());
         let auto_tags: HashSet<String> = self.auto_candidate_tags().into_iter().collect();
         sort_nodes(
-            &mut self.nodes,
+            &mut self.metrics_state.nodes,
             self.ui_state.node_sort,
             &auto_tags,
-            &self.node_delays,
+            &self.metrics_state.node_delays,
         );
         self.ui_state.selected = selected_tag
-            .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
+            .and_then(|tag| {
+                self.metrics_state
+                    .nodes
+                    .iter()
+                    .position(|node| node.tag == tag)
+            })
             .unwrap_or_else(|| {
                 self.ui_state
                     .selected
-                    .min(self.nodes.len().saturating_sub(1))
+                    .min(self.metrics_state.nodes.len().saturating_sub(1))
             });
         // Sorting changes the node order, and the cache signature includes it.
         self.refresh_auto_tags_cache();
@@ -461,8 +472,8 @@ impl App {
             Page::Nodes => self.maybe_test_node_delays(true),
             Page::Subscriptions | Page::Dashboard => self.refresh_subscriptions(),
             _ => {
-                self.local_ips = netinfo::local_addresses(false);
-                self.last_local_ips = Instant::now();
+                self.metrics_state.local_ips = netinfo::local_addresses(false);
+                self.metrics_state.last_local_ips = Instant::now();
             }
         }
         self.refresh_proxy_ips();
@@ -526,7 +537,7 @@ impl App {
         self.subscription_state
             .subscriptions
             .retain(|runtime| runtime.config.id != id);
-        self.nodes = merge_nodes(&self.subscription_state.subscriptions);
+        self.metrics_state.nodes = merge_nodes(&self.subscription_state.subscriptions);
         self.ui_state.last_node_sort = None;
         self.prune_node_state();
         self.sync_preferred_node();
@@ -780,7 +791,7 @@ impl App {
             } else {
                 self.subscription_state.subscriptions.push(placeholder);
             }
-            self.nodes = merge_nodes(&self.subscription_state.subscriptions);
+            self.metrics_state.nodes = merge_nodes(&self.subscription_state.subscriptions);
             self.ui_state.last_node_sort = None;
             self.sync_preferred_node();
             self.save_subscription_cache();
@@ -795,7 +806,7 @@ impl App {
     /// the new configuration is invalid, but an intentional removal of all
     /// subscriptions should stop the proxy rather than leave stale routing.
     pub(super) fn apply_nodes_change_to_proxy(&mut self) {
-        if self.nodes.is_empty() {
+        if self.metrics_state.nodes.is_empty() {
             if self.proxy_runtime.proxy.is_some() {
                 self.stop_proxy();
             }
@@ -965,7 +976,7 @@ impl App {
         }
         self.close_overlay();
         let filtered = self.auto_candidate_tags().len();
-        let total = self.nodes.len();
+        let total = self.metrics_state.nodes.len();
         let mut message =
             if self.config.keywords_include.is_empty() && self.config.keywords_exclude.is_empty() {
                 format!(

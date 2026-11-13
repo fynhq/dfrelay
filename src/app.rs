@@ -32,6 +32,7 @@ use crate::view::{BinaryStatus, ConfigView, DaemonStatus, View};
 
 mod health;
 mod keys;
+mod metrics_state;
 mod proxy;
 mod quality;
 mod subscriptions;
@@ -39,6 +40,7 @@ mod ui_state;
 mod updates;
 
 use health::HealthState;
+use metrics_state::MetricsState;
 use proxy::ProxyRuntime;
 use quality::QualityBook;
 use subscriptions::SubscriptionState;
@@ -277,17 +279,8 @@ pub struct App {
     pub logger: Logger,
     pub(crate) ui_state: UiState,
     pub(crate) proxy_runtime: ProxyRuntime,
-    pub nodes: Vec<Node>,
-    auto_tags_cache: Option<(u64, Vec<String>)>,
+    pub(crate) metrics_state: MetricsState,
     subscription_state: SubscriptionState,
-    pub metrics: MetricsSnapshot,
-    pub node_delays: HashMap<String, u64>,
-    pub delay_testing: HashSet<String>,
-    pub up_speed: f64,
-    pub down_speed: f64,
-    last_totals: Option<(u64, u64, Instant)>,
-    pub local_ips: Vec<String>,
-    pub proxy_ips: Vec<String>,
     pub binary_version: Option<String>,
     pub binary_verified: Option<bool>,
     pub binary_installed: bool,
@@ -301,19 +294,8 @@ pub struct App {
     managed: bool,
     service: Option<ServiceIdentity>,
     pub should_quit: bool,
-    pub last_local_ips: Instant,
-    pub last_proxy_ips: Instant,
-    proxy_ips_in_flight: bool,
-    proxy_ip_backoff_secs: u64,
-    proxy_ip_failures: u32,
-    delay_sweep_running: bool,
-    last_delay_sweep: Option<Instant>,
     health: HealthState,
     stats: RuntimeStats,
-    idle_since: Option<Instant>,
-    viewer_active: Arc<AtomicBool>,
-    metrics_wake: Arc<Notify>,
-    proxies_refresh: Arc<AtomicBool>,
     pub preferred_node: Option<String>,
     selection_generation: Arc<AtomicU64>,
     pending_selection: Option<PendingSelection>,
@@ -468,22 +450,17 @@ impl App {
                 ..UiState::default()
             },
             proxy_runtime: ProxyRuntime::default(),
-            nodes: cached_nodes,
-            auto_tags_cache: None,
+            metrics_state: MetricsState {
+                nodes: cached_nodes,
+                local_ips: netinfo::local_addresses(false),
+                ..MetricsState::default()
+            },
             subscription_state: SubscriptionState {
                 subscriptions: cached_subscriptions,
                 last_subscription_refresh: startup_cache_fresh.then(Instant::now),
                 subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
                 ..SubscriptionState::default()
             },
-            metrics: MetricsSnapshot::default(),
-            node_delays: HashMap::new(),
-            delay_testing: HashSet::new(),
-            up_speed: 0.0,
-            down_speed: 0.0,
-            last_totals: None,
-            local_ips: netinfo::local_addresses(false),
-            proxy_ips: Vec::new(),
             binary_version,
             binary_verified,
             binary_installed,
@@ -497,19 +474,8 @@ impl App {
             managed: false,
             service: None,
             should_quit: false,
-            last_local_ips: Instant::now(),
-            last_proxy_ips: Instant::now(),
-            proxy_ips_in_flight: false,
-            proxy_ip_backoff_secs: 5,
-            proxy_ip_failures: 0,
-            delay_sweep_running: false,
-            last_delay_sweep: None,
             health: HealthState::default(),
             stats: RuntimeStats::default(),
-            idle_since: None,
-            viewer_active: Arc::new(AtomicBool::new(false)),
-            metrics_wake: Arc::new(Notify::new()),
-            proxies_refresh: Arc::new(AtomicBool::new(false)),
             preferred_node: None,
             selection_generation: Arc::new(AtomicU64::new(0)),
             pending_selection: None,
@@ -548,16 +514,16 @@ impl App {
         } else {
             Vec::new()
         };
-        let connection_count = self.metrics.connections.len();
+        let connection_count = self.metrics_state.metrics.connections.len();
         let metrics = MetricsSnapshot {
-            upload_total: self.metrics.upload_total,
-            download_total: self.metrics.download_total,
+            upload_total: self.metrics_state.metrics.upload_total,
+            download_total: self.metrics_state.metrics.download_total,
             connections: if self.ui_state.page == Page::Connections {
-                self.metrics.connections.clone()
+                self.metrics_state.metrics.connections.clone()
             } else {
                 Vec::new()
             },
-            selection: self.metrics.selection.clone(),
+            selection: self.metrics_state.metrics.selection.clone(),
             // Nodes carry their own delay map; avoid shipping a second copy.
             node_delays: HashMap::new(),
         };
@@ -595,7 +561,8 @@ impl App {
                     .last_metrics_at
                     .is_none_or(|at| at.elapsed() >= Duration::from_secs(5)),
             nodes: if show_nodes {
-                self.nodes
+                self.metrics_state
+                    .nodes
                     .iter()
                     .map(|node| crate::view::NodeView {
                         tag: node.tag.clone(),
@@ -607,7 +574,7 @@ impl App {
             } else {
                 Vec::new()
             },
-            node_count: self.nodes.len(),
+            node_count: self.metrics_state.nodes.len(),
             auto_tags: filtered.iter().cloned().collect(),
             auto_candidates: filtered.len(),
             subscriptions: self
@@ -629,12 +596,12 @@ impl App {
             preferred_node: self.preferred_node.clone(),
             metrics,
             connection_count,
-            node_delays: self.node_delays.clone(),
-            delay_testing: self.delay_testing.clone(),
-            up_speed: self.up_speed,
-            down_speed: self.down_speed,
-            local_ips: self.local_ips.clone(),
-            proxy_ips: self.proxy_ips.clone(),
+            node_delays: self.metrics_state.node_delays.clone(),
+            delay_testing: self.metrics_state.delay_testing.clone(),
+            up_speed: self.metrics_state.up_speed,
+            down_speed: self.metrics_state.down_speed,
+            local_ips: self.metrics_state.local_ips.clone(),
+            proxy_ips: self.metrics_state.proxy_ips.clone(),
             binary_version: self.binary_version.clone().map(sanitize_owned),
             binary_verified: self.binary_verified,
             binary_status,
@@ -782,7 +749,10 @@ impl App {
                     });
                 let selected_before = self.ui_state.selected;
                 let selected_tag = if self.ui_state.page == Page::Nodes {
-                    self.nodes.get(selected_before).map(|node| node.tag.clone())
+                    self.metrics_state
+                        .nodes
+                        .get(selected_before)
+                        .map(|node| node.tag.clone())
                 } else {
                     None
                 };
@@ -795,7 +765,7 @@ impl App {
                         LogLevel::Warn,
                         format!(
                             "node cap reached: {node_count} parsed, {} merged (limit {})",
-                            self.nodes.len(),
+                            self.metrics_state.nodes.len(),
                             subscription::MAX_TOTAL_NODES
                         ),
                     );
@@ -811,7 +781,12 @@ impl App {
                     self.subscription_refresh_succeeded();
                 }
                 self.ui_state.selected = selected_tag
-                    .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
+                    .and_then(|tag| {
+                        self.metrics_state
+                            .nodes
+                            .iter()
+                            .position(|node| node.tag == tag)
+                    })
                     .unwrap_or_else(|| {
                         selected_before
                             .min(self.max_selection_for(self.ui_state.page).saturating_sub(1))
@@ -824,7 +799,7 @@ impl App {
                     "{}: {node_count}",
                     self.text().msg_subscriptions_refreshed
                 ));
-                let unique_count = self.nodes.len();
+                let unique_count = self.metrics_state.nodes.len();
                 let count_detail = if unique_count == node_count {
                     format!("subscriptions refreshed: {node_count} nodes")
                 } else {
@@ -964,13 +939,13 @@ impl App {
                     self.proxy_runtime.restart_at = None;
                     self.proxy_runtime.stable_reset_at =
                         Some(Instant::now() + Duration::from_secs(60));
-                    self.last_totals = None;
-                    self.up_speed = 0.0;
-                    self.down_speed = 0.0;
+                    self.metrics_state.last_totals = None;
+                    self.metrics_state.up_speed = 0.0;
+                    self.metrics_state.down_speed = 0.0;
                     self.ui_state.last_error = None;
                     self.reset_health_state();
-                    self.proxy_ip_backoff_secs = 5;
-                    self.proxy_ip_failures = 0;
+                    self.metrics_state.proxy_ip_backoff_secs = 5;
+                    self.metrics_state.proxy_ip_failures = 0;
                     self.start_metrics(clash.port, clash.secret.clone());
                     self.apply_pending_selection(clash.port, clash.secret);
                     self.reconcile_subscription_apply_after_start();
@@ -1030,15 +1005,17 @@ impl App {
             }
             AppEvent::Metrics(mut metrics) => {
                 let now = Instant::now();
-                if let Some((up, down, at)) = self.last_totals {
+                if let Some((up, down, at)) = self.metrics_state.last_totals {
                     let seconds = now.duration_since(at).as_secs_f64();
                     if seconds >= 0.2 {
-                        self.up_speed = metrics.upload_total.saturating_sub(up) as f64 / seconds;
-                        self.down_speed =
+                        self.metrics_state.up_speed =
+                            metrics.upload_total.saturating_sub(up) as f64 / seconds;
+                        self.metrics_state.down_speed =
                             metrics.download_total.saturating_sub(down) as f64 / seconds;
                     }
                 }
-                self.last_totals = Some((metrics.upload_total, metrics.download_total, now));
+                self.metrics_state.last_totals =
+                    Some((metrics.upload_total, metrics.download_total, now));
                 self.health.last_metrics_at = Some(now);
                 // Check and store the same bounded window. Scanning the full
                 // list while keeping only the first ids would mark every
@@ -1054,7 +1031,10 @@ impl App {
                     .any(|id| !self.health.connection_ids.contains(&id));
                 self.health.connection_ids.clear();
                 self.health.connection_ids.extend(connection_ids);
-                if new_connection && !self.proxy_ips_in_flight && !self.health.probe_in_flight {
+                if new_connection
+                    && !self.metrics_state.proxy_ips_in_flight
+                    && !self.health.probe_in_flight
+                {
                     self.health.last_activity = Some(now);
                     self.health.fast_probe_pending = true;
                 }
@@ -1062,13 +1042,13 @@ impl App {
                 // the metrics snapshot doubles the per-node bookkeeping and is
                 // resent every second.
                 for (tag, delay) in metrics.node_delays.drain() {
-                    self.node_delays.insert(tag, delay);
+                    self.metrics_state.node_delays.insert(tag, delay);
                 }
-                self.metrics = metrics;
-                if self.metrics.connections.is_empty() {
-                    self.idle_since.get_or_insert(now);
+                self.metrics_state.metrics = metrics;
+                if self.metrics_state.metrics.connections.is_empty() {
+                    self.metrics_state.idle_since.get_or_insert(now);
                 } else {
-                    self.idle_since = None;
+                    self.metrics_state.idle_since = None;
                 }
                 self.observe_selection_change(now);
                 self.sort_nodes_if_visible();
@@ -1111,7 +1091,7 @@ impl App {
                             );
                         }
                         self.health.quality.record_success(&tag, delay);
-                        self.node_delays.insert(tag, delay);
+                        self.metrics_state.node_delays.insert(tag, delay);
                         self.sort_nodes_if_visible();
                     }
                     HealthOutcome::Failed => {
@@ -1172,7 +1152,7 @@ impl App {
                     return;
                 }
                 let Some(target) = choose_recovery_target(
-                    self.metrics.selection.selected.as_deref(),
+                    self.metrics_state.metrics.selection.selected.as_deref(),
                     &healthy,
                     &self.health.quality,
                 ) else {
@@ -1192,6 +1172,7 @@ impl App {
                     }
                     RecoveryTarget::Node(tag) => {
                         let name = self
+                            .metrics_state
                             .nodes
                             .iter()
                             .find(|node| node.tag == *tag)
@@ -1240,46 +1221,50 @@ impl App {
                 });
             }
             AppEvent::ProxyIps { ips, errors } => {
-                self.proxy_ips_in_flight = false;
+                self.metrics_state.proxy_ips_in_flight = false;
                 if self.proxy_runtime.proxy.is_none() {
                     return;
                 }
                 if ips.is_empty() {
-                    self.proxy_ips.clear();
-                    self.proxy_ip_backoff_secs = (self.proxy_ip_backoff_secs * 2).min(60);
+                    self.metrics_state.proxy_ips.clear();
+                    self.metrics_state.proxy_ip_backoff_secs =
+                        (self.metrics_state.proxy_ip_backoff_secs * 2).min(60);
                     let in_grace = self
                         .proxy_runtime
                         .started_at
                         .is_some_and(|at| at.elapsed() < PROXY_IP_STARTUP_GRACE);
                     if !in_grace {
-                        self.proxy_ip_failures = self.proxy_ip_failures.saturating_add(1);
+                        self.metrics_state.proxy_ip_failures =
+                            self.metrics_state.proxy_ip_failures.saturating_add(1);
                     }
                     self.logger.app(
-                        proxy_ip_failure_level(self.proxy_ip_failures, in_grace),
+                        proxy_ip_failure_level(self.metrics_state.proxy_ip_failures, in_grace),
                         format!("proxy IP lookup failed: {}", errors.join("; ")),
                     );
                 } else {
-                    self.proxy_ips = ips;
-                    self.proxy_ip_backoff_secs = 5;
-                    self.proxy_ip_failures = 0;
+                    self.metrics_state.proxy_ips = ips;
+                    self.metrics_state.proxy_ip_backoff_secs = 5;
+                    self.metrics_state.proxy_ip_failures = 0;
                 }
             }
             AppEvent::NodeDelay { tag, delay } => {
-                self.delay_testing.remove(&tag);
+                self.metrics_state.delay_testing.remove(&tag);
                 if self.proxy_runtime.proxy.is_none() {
                     return;
                 }
                 if let Some(delay) = delay.filter(|delay| *delay > 0) {
                     self.health.quality.record_success(&tag, delay);
-                    self.node_delays.insert(tag, delay);
+                    self.metrics_state.node_delays.insert(tag, delay);
                     self.sort_nodes_if_visible();
                 } else {
                     self.health.quality.record_failure(&tag);
                 }
             }
             AppEvent::NodeSelected(tag) => {
-                if self.nodes.iter().any(|node| node.tag == tag) {
-                    if self.metrics.selection.selected.as_deref() != Some(tag.as_str()) {
+                if self.metrics_state.nodes.iter().any(|node| node.tag == tag) {
+                    if self.metrics_state.metrics.selection.selected.as_deref()
+                        != Some(tag.as_str())
+                    {
                         self.set_switch_reason("manual");
                     }
                     self.preferred_node = Some(tag);
@@ -1287,9 +1272,9 @@ impl App {
             }
             AppEvent::SelectionApplied => self.request_metrics_refresh(),
             AppEvent::NodeDelaySweepDone => {
-                self.delay_sweep_running = false;
-                self.delay_testing.clear();
-                self.last_delay_sweep = Some(Instant::now());
+                self.metrics_state.delay_sweep_running = false;
+                self.metrics_state.delay_testing.clear();
+                self.metrics_state.last_delay_sweep = Some(Instant::now());
             }
             AppEvent::DashboardViewport(max_scroll) => {
                 self.ui_state.dashboard_max_scroll = max_scroll;
@@ -1374,8 +1359,10 @@ impl App {
                     self.clients.insert(id, ClientHandle { viewer, tx });
                     let _ = accept.send(true);
                     if viewer {
-                        self.viewer_active.store(true, Ordering::Relaxed);
-                        self.metrics_wake.notify_one();
+                        self.metrics_state
+                            .viewer_active
+                            .store(true, Ordering::Relaxed);
+                        self.metrics_state.metrics_wake.notify_one();
                         if self.ui_state.page == Page::Logs && self.ui_state.log_follow {
                             self.ui_state.selected = self.log_count().saturating_sub(1);
                         }
@@ -1387,7 +1374,9 @@ impl App {
             AppEvent::ClientDetached(id) => {
                 if let Some(client) = self.clients.remove(&id) {
                     if client.viewer {
-                        self.viewer_active.store(false, Ordering::Relaxed);
+                        self.metrics_state
+                            .viewer_active
+                            .store(false, Ordering::Relaxed);
                     }
                 }
             }
@@ -1457,7 +1446,7 @@ impl App {
             self.ack(client_id, false, "proxy state is changing");
             return;
         }
-        if self.nodes.is_empty() {
+        if self.metrics_state.nodes.is_empty() {
             self.pending_start = Some(client_id);
             if self.subscription_state.refreshing_subscriptions {
                 return;
@@ -1479,7 +1468,7 @@ impl App {
         if self.pending_start.is_none() {
             return;
         }
-        if self.nodes.is_empty() {
+        if self.metrics_state.nodes.is_empty() {
             if self.subscription_state.refreshing_subscriptions {
                 return;
             }
@@ -1501,12 +1490,14 @@ impl App {
     }
 
     fn has_viewer(&self) -> bool {
-        self.viewer_active.load(Ordering::Relaxed)
+        self.metrics_state.viewer_active.load(Ordering::Relaxed)
     }
 
     fn request_metrics_refresh(&self) {
-        self.proxies_refresh.store(true, Ordering::Relaxed);
-        self.metrics_wake.notify_one();
+        self.metrics_state
+            .proxies_refresh
+            .store(true, Ordering::Relaxed);
+        self.metrics_state.metrics_wake.notify_one();
     }
 
     fn broadcast_view(&self) {
@@ -1565,8 +1556,8 @@ impl App {
                 self.proxy_runtime.status = ProxyStatus::Stopped;
                 self.proxy_runtime.restart_after_stop = false;
             }
-            BackgroundTask::ProxyIps => self.proxy_ips_in_flight = false,
-            BackgroundTask::DelaySweep => self.delay_sweep_running = false,
+            BackgroundTask::ProxyIps => self.metrics_state.proxy_ips_in_flight = false,
+            BackgroundTask::DelaySweep => self.metrics_state.delay_sweep_running = false,
             BackgroundTask::HealthProbe => self.health.probe_in_flight = false,
             BackgroundTask::Recovery => self.health.recovery_in_flight = false,
             BackgroundTask::BinaryDownload => self.setup.downloading = false,
@@ -1584,7 +1575,7 @@ impl App {
                 self.proxy_runtime.metrics_task = None;
             }
             BackgroundTask::DelayTest => {
-                self.delay_testing.clear();
+                self.metrics_state.delay_testing.clear();
             }
             BackgroundTask::Selection | BackgroundTask::Ipc => {}
             BackgroundTask::Other => {
@@ -1611,15 +1602,24 @@ impl App {
     }
 
     fn prune_node_state(&mut self) {
-        let tags: HashSet<String> = self.nodes.iter().map(|node| node.tag.clone()).collect();
-        self.node_delays.retain(|tag, _| tags.contains(tag));
-        self.delay_testing.retain(|tag| tags.contains(tag));
+        let tags: HashSet<String> = self
+            .metrics_state
+            .nodes
+            .iter()
+            .map(|node| node.tag.clone())
+            .collect();
+        self.metrics_state
+            .node_delays
+            .retain(|tag, _| tags.contains(tag));
+        self.metrics_state
+            .delay_testing
+            .retain(|tag| tags.contains(tag));
         self.health.quality.prune(&tags);
     }
 
     fn sync_preferred_node(&mut self) {
         if let Some(tag) = self.preferred_node.clone() {
-            if !self.nodes.iter().any(|node| node.tag == tag) {
+            if !self.metrics_state.nodes.iter().any(|node| node.tag == tag) {
                 let name = self
                     .proxy_runtime
                     .proxy_node_names
@@ -1717,7 +1717,7 @@ impl App {
         if self.setup_busy() {
             return false;
         }
-        if self.nodes.is_empty() {
+        if self.metrics_state.nodes.is_empty() {
             self.ui_state.last_error = Some(self.text().no_nodes.to_string());
             self.notify(self.text().no_nodes);
             return false;
@@ -1746,7 +1746,7 @@ impl App {
         self.notify(self.text().msg_restarting);
         let paths = self.paths.clone();
         let config = self.config.clone();
-        let nodes = self.nodes.clone();
+        let nodes = self.metrics_state.nodes.clone();
         let preferred = self.preferred_node.clone();
         let tx = self.events_tx.clone();
         self.spawn_guarded(BackgroundTask::Preflight, async move {
@@ -1796,7 +1796,7 @@ impl App {
             self.ui_state.last_error = Some(self.text().msg_singbox_missing.to_string());
             return Err(self.text().msg_singbox_missing.to_string());
         }
-        if self.nodes.is_empty() {
+        if self.metrics_state.nodes.is_empty() {
             self.ui_state.last_error = Some(self.text().no_nodes.to_string());
             self.switch_page(Page::Subscriptions);
             return Err(self.text().no_nodes.to_string());
@@ -1809,16 +1809,21 @@ impl App {
         self.proxy_runtime.runtime_has_auto = filtered.len() >= 2;
         let mut preferred = self.preferred_node.clone();
         if let Some(tag) = preferred.as_deref() {
-            if !self.nodes.iter().any(|node| node.tag == tag) {
+            if !self.metrics_state.nodes.iter().any(|node| node.tag == tag) {
                 preferred = None;
                 self.preferred_node = None;
                 self.pending_selection = None;
                 self.notify(self.text().msg_preferred_missing);
             }
         }
-        self.proxy_runtime.proxy_node_tags =
-            self.nodes.iter().map(|node| node.tag.clone()).collect();
+        self.proxy_runtime.proxy_node_tags = self
+            .metrics_state
+            .nodes
+            .iter()
+            .map(|node| node.tag.clone())
+            .collect();
         self.proxy_runtime.proxy_node_names = self
+            .metrics_state
             .nodes
             .iter()
             .map(|node| (node.tag.clone(), node.name.clone()))
@@ -1826,7 +1831,7 @@ impl App {
         self.proxy_runtime.status = ProxyStatus::Starting;
         let paths = self.paths.clone();
         let config = self.config.clone();
-        let nodes = self.nodes.clone();
+        let nodes = self.metrics_state.nodes.clone();
         let logger = self.logger.clone();
         let tx = self.events_tx.clone();
         self.spawn_guarded(BackgroundTask::ProxyStart, async move {
@@ -1896,9 +1901,9 @@ impl App {
             format!("{}: {}", self.text().msg_clash_api, client.base_url()),
         );
         let clash_api_label = self.text().msg_clash_api;
-        let viewer_active = self.viewer_active.clone();
-        let metrics_wake = self.metrics_wake.clone();
-        let proxies_refresh = self.proxies_refresh.clone();
+        let viewer_active = self.metrics_state.viewer_active.clone();
+        let metrics_wake = self.metrics_state.metrics_wake.clone();
+        let proxies_refresh = self.metrics_state.proxies_refresh.clone();
         self.proxy_runtime.metrics_task = Some(self.spawn_guarded_handle(
             BackgroundTask::Metrics,
             async move {
@@ -1972,11 +1977,11 @@ impl App {
     }
 
     fn refresh_proxy_ips(&mut self) {
-        if self.proxy_runtime.proxy.is_none() || self.proxy_ips_in_flight {
+        if self.proxy_runtime.proxy.is_none() || self.metrics_state.proxy_ips_in_flight {
             return;
         }
-        self.proxy_ips_in_flight = true;
-        self.last_proxy_ips = Instant::now();
+        self.metrics_state.proxy_ips_in_flight = true;
+        self.metrics_state.last_proxy_ips = Instant::now();
         let tx = self.events_tx.clone();
         let v4_url = self.config.proxy_ip_v4_url.clone();
         let v6_url = self.config.proxy_ip_v6_url.clone();
@@ -2021,7 +2026,12 @@ impl App {
     }
 
     async fn select_node(&mut self) {
-        let Some(node) = self.nodes.get(self.ui_state.selected).cloned() else {
+        let Some(node) = self
+            .metrics_state
+            .nodes
+            .get(self.ui_state.selected)
+            .cloned()
+        else {
             return;
         };
         if self.proxy_busy() {
@@ -2111,6 +2121,7 @@ impl App {
             }
             PendingSelection::Node(tag) => {
                 let name = self
+                    .metrics_state
                     .nodes
                     .iter()
                     .find(|node| node.tag == tag)
@@ -2149,7 +2160,7 @@ impl App {
     }
 
     fn test_node_delay(&mut self) {
-        let Some(node) = self.nodes.get(self.ui_state.selected) else {
+        let Some(node) = self.metrics_state.nodes.get(self.ui_state.selected) else {
             return;
         };
         let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
@@ -2158,7 +2169,7 @@ impl App {
         };
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
         let tag = node.tag.clone();
-        self.delay_testing.insert(tag.clone());
+        self.metrics_state.delay_testing.insert(tag.clone());
         let test_url = self.config.test_url.clone();
         let label = self.text().msg_node_delay;
         let tx = self.events_tx.clone();
@@ -2180,11 +2191,12 @@ impl App {
     }
 
     fn maybe_test_node_delays(&mut self, force: bool) {
-        if self.proxy_runtime.proxy.is_none() || self.delay_sweep_running {
+        if self.proxy_runtime.proxy.is_none() || self.metrics_state.delay_sweep_running {
             return;
         }
         if !force
             && self
+                .metrics_state
                 .last_delay_sweep
                 .is_some_and(|at| at.elapsed() < DELAY_SWEEP_COOLDOWN)
         {
@@ -2194,10 +2206,11 @@ impl App {
             return;
         };
         let tags: Vec<String> = self
+            .metrics_state
             .nodes
             .iter()
             .take(MAX_LIST_ROWS)
-            .filter(|node| force || !self.node_delays.contains_key(&node.tag))
+            .filter(|node| force || !self.metrics_state.node_delays.contains_key(&node.tag))
             .map(|node| node.tag.clone())
             .collect();
         if tags.is_empty() {
@@ -2206,9 +2219,9 @@ impl App {
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
         let test_url = self.config.test_url.clone();
         let tx = self.events_tx.clone();
-        self.delay_sweep_running = true;
-        self.last_delay_sweep = Some(Instant::now());
-        self.delay_testing = tags.iter().cloned().collect();
+        self.metrics_state.delay_sweep_running = true;
+        self.metrics_state.last_delay_sweep = Some(Instant::now());
+        self.metrics_state.delay_testing = tags.iter().cloned().collect();
         self.spawn_guarded(BackgroundTask::DelaySweep, async move {
             for chunk in tags.chunks(DELAY_TEST_CONCURRENCY) {
                 let mut tasks = JoinSet::new();
@@ -2236,8 +2249,8 @@ impl App {
     fn auto_tags_signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.nodes.len().hash(&mut hasher);
-        for node in &self.nodes {
+        self.metrics_state.nodes.len().hash(&mut hasher);
+        for node in &self.metrics_state.nodes {
             node.tag.hash(&mut hasher);
             node.name.hash(&mut hasher);
             node.source.hash(&mut hasher);
@@ -2250,6 +2263,7 @@ impl App {
     fn refresh_auto_tags_cache(&mut self) {
         let signature = self.auto_tags_signature();
         if self
+            .metrics_state
             .auto_tags_cache
             .as_ref()
             .is_some_and(|(cached, _)| *cached == signature)
@@ -2257,24 +2271,24 @@ impl App {
             return;
         }
         let tags = crate::selection::filter_node_tags(
-            &self.nodes,
+            &self.metrics_state.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
         );
-        self.auto_tags_cache = Some((signature, tags));
+        self.metrics_state.auto_tags_cache = Some((signature, tags));
     }
 
     /// Tags of the nodes eligible for automatic selection under the current
     /// keyword filters. Centralised so every caller uses the same predicate.
     fn auto_candidate_tags(&self) -> Vec<String> {
         let signature = self.auto_tags_signature();
-        if let Some((cached, tags)) = &self.auto_tags_cache {
+        if let Some((cached, tags)) = &self.metrics_state.auto_tags_cache {
             if *cached == signature {
                 return tags.clone();
             }
         }
         crate::selection::filter_node_tags(
-            &self.nodes,
+            &self.metrics_state.nodes,
             &self.config.keywords_include,
             &self.config.keywords_exclude,
         )
@@ -2355,19 +2369,19 @@ impl App {
     }
 
     fn reset_metrics(&mut self) {
-        self.up_speed = 0.0;
-        self.down_speed = 0.0;
-        self.last_totals = None;
-        self.metrics = MetricsSnapshot::default();
-        self.proxy_ips.clear();
+        self.metrics_state.up_speed = 0.0;
+        self.metrics_state.down_speed = 0.0;
+        self.metrics_state.last_totals = None;
+        self.metrics_state.metrics = MetricsSnapshot::default();
+        self.metrics_state.proxy_ips.clear();
         self.ui_state.last_node_sort = None;
         self.sort_nodes_if_visible();
-        self.proxy_ips_in_flight = false;
-        self.proxy_ip_backoff_secs = 5;
-        self.node_delays.clear();
-        self.delay_testing.clear();
-        self.delay_sweep_running = false;
-        self.last_delay_sweep = None;
+        self.metrics_state.proxy_ips_in_flight = false;
+        self.metrics_state.proxy_ip_backoff_secs = 5;
+        self.metrics_state.node_delays.clear();
+        self.metrics_state.delay_testing.clear();
+        self.metrics_state.delay_sweep_running = false;
+        self.metrics_state.last_delay_sweep = None;
         self.subscription_state.pending_refresh_apply = None;
         self.reset_health_state();
     }
@@ -2475,18 +2489,18 @@ impl App {
         if self.has_viewer() && self.ui_state.page == Page::Logs && self.ui_state.log_follow {
             self.ui_state.selected = self.log_count().saturating_sub(1);
         }
-        if self.last_local_ips.elapsed() >= Duration::from_secs(30) {
-            self.local_ips = netinfo::local_addresses(false);
-            self.last_local_ips = Instant::now();
+        if self.metrics_state.last_local_ips.elapsed() >= Duration::from_secs(30) {
+            self.metrics_state.local_ips = netinfo::local_addresses(false);
+            self.metrics_state.last_local_ips = Instant::now();
             changed = true;
         }
-        if self.proxy_runtime.proxy.is_some() && !self.proxy_ips_in_flight {
-            let interval = if self.proxy_ips.is_empty() {
-                Duration::from_secs(self.proxy_ip_backoff_secs)
+        if self.proxy_runtime.proxy.is_some() && !self.metrics_state.proxy_ips_in_flight {
+            let interval = if self.metrics_state.proxy_ips.is_empty() {
+                Duration::from_secs(self.metrics_state.proxy_ip_backoff_secs)
             } else {
                 Duration::from_secs(300)
             };
-            if self.last_proxy_ips.elapsed() >= interval {
+            if self.metrics_state.last_proxy_ips.elapsed() >= interval {
                 self.refresh_proxy_ips();
             }
         }
@@ -2518,22 +2532,31 @@ impl App {
     }
 
     pub fn current_node(&self) -> Option<String> {
-        let active = self.metrics.selection.selected.as_deref().map(|selected| {
-            if selected == tags::AUTO {
-                self.metrics
-                    .selection
-                    .auto_now
-                    .clone()
-                    .unwrap_or_else(|| tags::AUTO.to_string())
-            } else {
-                selected.to_string()
-            }
-        });
+        let active = self
+            .metrics_state
+            .metrics
+            .selection
+            .selected
+            .as_deref()
+            .map(|selected| {
+                if selected == tags::AUTO {
+                    self.metrics_state
+                        .metrics
+                        .selection
+                        .auto_now
+                        .clone()
+                        .unwrap_or_else(|| tags::AUTO.to_string())
+                } else {
+                    selected.to_string()
+                }
+            });
         let fallback = self.preferred_node.clone();
         match active.or(fallback) {
             Some(tag) if tag == tags::AUTO => Some(self.text().common_auto.to_string()),
             Some(tag) => Some(self.node_display_name(&tag)),
-            None if !self.nodes.is_empty() => Some(self.text().common_auto.to_string()),
+            None if !self.metrics_state.nodes.is_empty() => {
+                Some(self.text().common_auto.to_string())
+            }
             None => None,
         }
     }
@@ -2543,14 +2566,14 @@ impl App {
     /// While running the selector state is authoritative; before startup the
     /// pending preferred node decides the mode.
     pub fn selection_mode_auto(&self) -> bool {
-        match self.metrics.selection.selected.as_deref() {
+        match self.metrics_state.metrics.selection.selected.as_deref() {
             Some(selected) => selected == tags::AUTO,
             None => self.preferred_node.is_none(),
         }
     }
 
     fn node_display_name(&self, tag: &str) -> String {
-        if let Some(node) = self.nodes.iter().find(|node| node.tag == tag) {
+        if let Some(node) = self.metrics_state.nodes.iter().find(|node| node.tag == tag) {
             return sanitize_display(&node.name);
         }
         if let Some(name) = self.proxy_runtime.proxy_node_names.get(tag) {

@@ -105,7 +105,12 @@ impl App {
             .iter()
             .map(String::as_str)
             .collect();
-        let next: HashSet<&str> = self.nodes.iter().map(|node| node.tag.as_str()).collect();
+        let next: HashSet<&str> = self
+            .metrics_state
+            .nodes
+            .iter()
+            .map(|node| node.tag.as_str())
+            .collect();
         (
             next.difference(&live).count(),
             live.difference(&next).count(),
@@ -192,6 +197,7 @@ impl App {
             return;
         }
         let idle = self
+            .metrics_state
             .idle_since
             .is_some_and(|at| at.elapsed() >= REFRESH_IDLE_GRACE);
         if !idle {
@@ -279,7 +285,7 @@ impl App {
 
     /// Rebuild the merged node list after `self.subscription_state.subscriptions` changed.
     pub(super) fn refresh_merged_nodes(&mut self) {
-        self.nodes = merge_nodes(&self.subscription_state.subscriptions);
+        self.metrics_state.nodes = merge_nodes(&self.subscription_state.subscriptions);
         self.prune_node_state();
         self.sync_preferred_node();
     }

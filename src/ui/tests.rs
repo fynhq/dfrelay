@@ -433,7 +433,7 @@ async fn header_uses_fixed_title_and_status_value() {
 async fn local_ip_is_only_rendered_on_dashboard_and_one_per_line() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Dashboard;
-    app.local_ips = vec![
+    app.metrics_state.local_ips = vec![
         "192.0.2.10 (eth0)".to_string(),
         "2001:db8::10 (eth0)".to_string(),
     ];
@@ -489,7 +489,7 @@ fn find_cell_text(row: &[String], needle: &str) -> Option<usize> {
 async fn dashboard_local_ip_values_start_at_the_same_column() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Dashboard;
-    app.local_ips = vec![
+    app.metrics_state.local_ips = vec![
         "192.0.2.10 (eth0)".to_string(),
         "2001:db8::10 (eth0)".to_string(),
     ];
@@ -523,7 +523,7 @@ async fn dashboard_local_ip_values_start_at_the_same_column() {
 async fn dashboard_proxy_ips_go_on_separate_indented_lines() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Dashboard;
-    app.proxy_ips = vec!["v4 203.0.113.9".to_string(), "v6 2001:db8::9".to_string()];
+    app.metrics_state.proxy_ips = vec!["v4 203.0.113.9".to_string(), "v6 2001:db8::9".to_string()];
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
@@ -579,7 +579,7 @@ async fn header_shows_uptime_only_while_running() {
 async fn header_shows_only_status_node_connections_and_network() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Dashboard;
-    app.proxy_ips = vec!["203.0.113.9".to_string()];
+    app.metrics_state.proxy_ips = vec!["203.0.113.9".to_string()];
     let content = rendered(&app, 30);
     let header: String = content.chars().take(100 * 4).collect();
     let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1071,7 +1071,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
     ] {
         let (mut app, _dir) = test_app(lang).await;
         app.ui_state.page = Page::Dashboard;
-        app.nodes = vec![node("n1", "香港 01")];
+        app.metrics_state.nodes = vec![node("n1", "香港 01")];
         let labels = app.text();
 
         let lines = |app: &crate::app::App| -> Vec<String> {
@@ -1086,7 +1086,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
                 .collect()
         };
 
-        app.metrics.selection.selected = Some("auto".to_string());
+        app.metrics_state.metrics.selection.selected = Some("auto".to_string());
         let rendered = lines(&app);
         let mode = rendered
             .iter()
@@ -1103,7 +1103,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
             rendered[mode]
         );
 
-        app.metrics.selection.selected = Some("n1".to_string());
+        app.metrics_state.metrics.selection.selected = Some("n1".to_string());
         let rendered = lines(&app);
         assert!(
             rendered[mode].contains(manual),
@@ -1111,7 +1111,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
             rendered[mode]
         );
 
-        app.metrics.selection.selected = None;
+        app.metrics_state.metrics.selection.selected = None;
         app.preferred_node = Some("n1".to_string());
         let rendered = lines(&app);
         assert!(
@@ -1260,7 +1260,7 @@ fn visible_row_range_follows_the_selection() {
 async fn nodes_beyond_the_old_render_cap_remain_selectable() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.page = Page::Nodes;
-    app.nodes = (0..250)
+    app.metrics_state.nodes = (0..250)
         .map(|index| crate::subscription::model::Node {
             tag: format!("n-{index:04}"),
             name: format!("node-{index:03}"),
@@ -1617,7 +1617,7 @@ async fn header_shows_the_slogan_on_the_right() {
 async fn dashboard_scroll_reveals_overflowing_lines() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Dashboard;
-    app.local_ips = (1..=20)
+    app.metrics_state.local_ips = (1..=20)
         .map(|index| format!("192.0.2.{index} (en0)"))
         .collect();
     let view = app.view();
@@ -1768,17 +1768,17 @@ async fn dashboard_marks_the_last_error_red_and_the_header_stays_clean() {
 async fn dashboard_shows_the_active_node_delay() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Dashboard;
-    app.metrics.selection.selected = Some("n2".to_string());
-    app.node_delays.insert("n2".to_string(), 88);
+    app.metrics_state.metrics.selection.selected = Some("n2".to_string());
+    app.metrics_state.node_delays.insert("n2".to_string(), 88);
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|ch| !ch.is_whitespace())
         .collect();
     assert!(content.contains("88ms"), "{content}");
 
-    app.metrics.selection.selected = Some("auto".to_string());
-    app.metrics.selection.auto_now = Some("n1".to_string());
-    app.node_delays.insert("n1".to_string(), 42);
+    app.metrics_state.metrics.selection.selected = Some("auto".to_string());
+    app.metrics_state.metrics.selection.auto_now = Some("n1".to_string());
+    app.metrics_state.node_delays.insert("n1".to_string(), 42);
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -1893,7 +1893,7 @@ fn connection_target_keeps_only_one_address() {
 async fn connections_have_one_target_column_and_no_summary() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Connections;
-    app.metrics.connections.push(connection());
+    app.metrics_state.metrics.connections.push(connection());
     let raw = rendered(&app, 30);
     assert!(raw.contains("↓ 2.0 K ↑ 1.0 K"), "{raw}");
     let content: String = raw.chars().filter(|ch| !ch.is_whitespace()).collect();
@@ -1909,7 +1909,7 @@ async fn connections_have_one_target_column_and_no_summary() {
 async fn switching_to_logs_does_not_keep_the_connection_summary() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Connections;
-    app.metrics.connections.push(connection());
+    app.metrics_state.metrics.connections.push(connection());
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &app.view())).unwrap();
@@ -1937,9 +1937,9 @@ async fn switching_to_logs_does_not_keep_the_connection_summary() {
 async fn nodes_show_latency_for_every_node() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Nodes;
-    app.nodes = vec![node("n1", "香港 01"), node("n2", "日本 02")];
-    app.node_delays.insert("n1".to_string(), 68);
-    app.node_delays.insert("n2".to_string(), 120);
+    app.metrics_state.nodes = vec![node("n1", "香港 01"), node("n2", "日本 02")];
+    app.metrics_state.node_delays.insert("n1".to_string(), 68);
+    app.metrics_state.node_delays.insert("n2".to_string(), 120);
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -1947,8 +1947,8 @@ async fn nodes_show_latency_for_every_node() {
     assert!(content.contains("68ms"), "{content}");
     assert!(content.contains("120ms"), "{content}");
 
-    app.node_delays.clear();
-    app.delay_testing.insert("n1".to_string());
+    app.metrics_state.node_delays.clear();
+    app.metrics_state.delay_testing.insert("n1".to_string());
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -1960,12 +1960,12 @@ async fn nodes_show_latency_for_every_node() {
 async fn nodes_mark_a_single_active_node() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.page = Page::Nodes;
-    app.nodes = vec![node("n1", "hk-01"), node("n2", "jp-02")];
+    app.metrics_state.nodes = vec![node("n1", "hk-01"), node("n2", "jp-02")];
 
     // Manual selection wins over a different urltest result; previously
     // both rows carried a dot in this state.
-    app.metrics.selection.selected = Some("n1".to_string());
-    app.metrics.selection.auto_now = Some("n2".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
+    app.metrics_state.metrics.selection.auto_now = Some("n2".to_string());
     app.preferred_node = Some("n1".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
     let marks: Vec<String> = rows
@@ -1977,7 +1977,7 @@ async fn nodes_mark_a_single_active_node() {
     assert!(marks[0].contains("hk-01"), "{marks:?}");
 
     // Auto mode marks the urltest result only.
-    app.metrics.selection.selected = Some("auto".to_string());
+    app.metrics_state.metrics.selection.selected = Some("auto".to_string());
     app.preferred_node = None;
     let rows = rendered_rows(&app.view(), 100, 30);
     let marks: Vec<String> = rows
@@ -1989,7 +1989,7 @@ async fn nodes_mark_a_single_active_node() {
     assert!(marks[0].contains("jp-02"), "{marks:?}");
 
     // Without metrics the pending preferred node is marked.
-    app.metrics = crate::singbox::clash::MetricsSnapshot::default();
+    app.metrics_state.metrics = crate::singbox::clash::MetricsSnapshot::default();
     app.preferred_node = Some("n2".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
     let marks: Vec<String> = rows
@@ -2005,8 +2005,8 @@ async fn nodes_mark_a_single_active_node() {
 async fn nodes_dot_keeps_one_cell_and_one_blank_before_the_name() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.page = Page::Nodes;
-    app.nodes = vec![node("n1", "hk-01")];
-    app.metrics.selection.selected = Some("n1".to_string());
+    app.metrics_state.nodes = vec![node("n1", "hk-01")];
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
     // Match the table row (it also carries the source "test"), not the
     // status bar, which shows the current node name as well.
@@ -2035,12 +2035,12 @@ async fn nodes_dot_keeps_one_cell_and_one_blank_before_the_name() {
 async fn nodes_active_row_uses_the_tab_accent_without_bold() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.page = Page::Nodes;
-    app.nodes = vec![
+    app.metrics_state.nodes = vec![
         node("n1", "hk-01"),
         node("n2", "jp-02"),
         node("n3", "sg-03"),
     ];
-    app.metrics.selection.selected = Some("n1".to_string());
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     // Keep the cursor off the active row so its own style is visible.
     app.ui_state.selected = 2;
 
@@ -2189,9 +2189,9 @@ async fn terminal_too_small_uses_the_rendered_minimum() {
 #[tokio::test]
 async fn small_terminal_renders_main_pages_without_panicking() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.nodes = vec![node("n1", "香港 01")];
-    app.node_delays.insert("n1".to_string(), 68);
-    app.metrics.connections.push(connection());
+    app.metrics_state.nodes = vec![node("n1", "香港 01")];
+    app.metrics_state.node_delays.insert("n1".to_string(), 68);
+    app.metrics_state.metrics.connections.push(connection());
     for page in [
         Page::Dashboard,
         Page::Nodes,
