@@ -5,9 +5,31 @@
 
 use super::*;
 
+/// Subscription list and refresh scheduling state.
+#[derive(Debug, Default)]
+pub(crate) struct SubscriptionState {
+    pub(crate) subscriptions: Vec<SubscriptionRuntime>,
+    pub(crate) refreshing_subscriptions: bool,
+    pub(crate) subscription_seq: u64,
+    pub(crate) subscription_refresh_seq: HashMap<String, u64>,
+    pub(crate) last_subscription_refresh: Option<Instant>,
+    pub(crate) subscription_refresh_retry_at: Option<Instant>,
+    pub(crate) subscription_refresh_backoff: Duration,
+    pub(crate) pending_restart_subscription: Option<String>,
+    pub(crate) pending_refresh_apply: Option<PendingRefreshApply>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingRefreshApply {
+    pub(crate) added: usize,
+    pub(crate) removed: usize,
+    pub(crate) since: Instant,
+    pub(crate) wait_logged: bool,
+}
+
 impl App {
     pub(super) fn refresh_subscriptions(&mut self) {
-        if self.refreshing_subscriptions {
+        if self.subscription_state.refreshing_subscriptions {
             return;
         }
         let configs: Vec<SubscriptionConfig> =
@@ -16,12 +38,14 @@ impl App {
             self.last_error = Some(self.text().msg_no_enabled_subscriptions.to_string());
             return;
         }
-        self.refreshing_subscriptions = true;
+        self.subscription_state.refreshing_subscriptions = true;
         let seq = self.next_subscription_seq();
         for config in &configs {
-            self.subscription_refresh_seq.insert(config.id.clone(), seq);
+            self.subscription_state
+                .subscription_refresh_seq
+                .insert(config.id.clone(), seq);
         }
-        let previous = self.subscriptions.clone();
+        let previous = self.subscription_state.subscriptions.clone();
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
         self.spawn_guarded(BackgroundTask::SubscriptionRefresh, async move {
@@ -36,7 +60,7 @@ impl App {
     }
 
     pub(super) fn subscription_refresh_due(&self) -> bool {
-        if self.refreshing_subscriptions
+        if self.subscription_state.refreshing_subscriptions
             || self.config.subscription_refresh_hours == 0
             || self.config.enabled_subscriptions().next().is_none()
         {
@@ -44,6 +68,7 @@ impl App {
         }
         let now = Instant::now();
         if self
+            .subscription_state
             .subscription_refresh_retry_at
             .is_some_and(|at| at > now)
         {
@@ -51,21 +76,23 @@ impl App {
         }
         let interval =
             Duration::from_secs(self.config.subscription_refresh_hours.saturating_mul(3600));
-        self.last_subscription_refresh
+        self.subscription_state
+            .last_subscription_refresh
             .is_none_or(|last| last.elapsed() >= interval)
     }
 
     pub(super) fn subscription_refresh_succeeded(&mut self) {
-        self.last_subscription_refresh = Some(Instant::now());
-        self.subscription_refresh_retry_at = None;
-        self.subscription_refresh_backoff = SUBSCRIPTION_REFRESH_MIN_BACKOFF;
+        self.subscription_state.last_subscription_refresh = Some(Instant::now());
+        self.subscription_state.subscription_refresh_retry_at = None;
+        self.subscription_state.subscription_refresh_backoff = SUBSCRIPTION_REFRESH_MIN_BACKOFF;
     }
 
     pub(super) fn schedule_subscription_retry(&mut self) {
-        self.subscription_refresh_retry_at =
-            Some(Instant::now() + self.subscription_refresh_backoff);
-        self.subscription_refresh_backoff =
-            (self.subscription_refresh_backoff * 2).min(SUBSCRIPTION_REFRESH_MAX_BACKOFF);
+        self.subscription_state.subscription_refresh_retry_at =
+            Some(Instant::now() + self.subscription_state.subscription_refresh_backoff);
+        self.subscription_state.subscription_refresh_backoff =
+            (self.subscription_state.subscription_refresh_backoff * 2)
+                .min(SUBSCRIPTION_REFRESH_MAX_BACKOFF);
     }
 
     pub(super) fn subscription_tag_diff(&self) -> (usize, usize) {
@@ -89,24 +116,29 @@ impl App {
     /// The restart itself waits until the proxy is idle when configured.
     pub(super) fn note_subscription_apply(&mut self) {
         if self.proxy_runtime.proxy_node_tags.is_empty() {
-            self.pending_refresh_apply = None;
+            self.subscription_state.pending_refresh_apply = None;
             return;
         }
         let (added, removed) = self.subscription_tag_diff();
         if added == 0 && removed == 0 {
-            if self.pending_refresh_apply.take().is_some() {
+            if self
+                .subscription_state
+                .pending_refresh_apply
+                .take()
+                .is_some()
+            {
                 self.logger
                     .app(LogLevel::Info, "subscription apply pending cleared");
             }
             return;
         }
-        match self.pending_refresh_apply.as_mut() {
+        match self.subscription_state.pending_refresh_apply.as_mut() {
             Some(pending) => {
                 pending.added = added;
                 pending.removed = removed;
             }
             None => {
-                self.pending_refresh_apply = Some(PendingRefreshApply {
+                self.subscription_state.pending_refresh_apply = Some(PendingRefreshApply {
                     added,
                     removed,
                     since: Instant::now(),
@@ -121,7 +153,7 @@ impl App {
     }
 
     pub(super) fn maybe_apply_subscription_changes(&mut self) {
-        let Some(pending) = self.pending_refresh_apply.as_ref() else {
+        let Some(pending) = self.subscription_state.pending_refresh_apply.as_ref() else {
             return;
         };
         let (added, removed, since, wait_logged) = (
@@ -131,18 +163,21 @@ impl App {
             pending.wait_logged,
         );
         if self.proxy_runtime.proxy.is_none() || self.proxy_runtime.status != ProxyStatus::Running {
-            self.pending_refresh_apply = None;
+            self.subscription_state.pending_refresh_apply = None;
             self.logger.app(
                 LogLevel::Info,
                 "subscription apply pending cleared: proxy not running",
             );
             return;
         }
-        if self.refreshing_subscriptions
+        if self.subscription_state.refreshing_subscriptions
             || self.proxy_runtime.restart_in_progress
             || self.proxy_runtime.preflight_in_flight
             || self.health.recovery_in_flight
-            || self.pending_restart_subscription.is_some()
+            || self
+                .subscription_state
+                .pending_restart_subscription
+                .is_some()
             || self.setup.downloading
             || self.setup.rollback_in_flight
             || self.install_in_flight
@@ -161,7 +196,7 @@ impl App {
             .is_some_and(|at| at.elapsed() >= REFRESH_IDLE_GRACE);
         if !idle {
             if !wait_logged && since.elapsed() >= REFRESH_IDLE_WAIT_LOG {
-                if let Some(pending) = self.pending_refresh_apply.as_mut() {
+                if let Some(pending) = self.subscription_state.pending_refresh_apply.as_mut() {
                     pending.wait_logged = true;
                 }
                 self.logger.app(
@@ -175,14 +210,14 @@ impl App {
             return;
         }
         if self.auto_restart_after_change() {
-            self.pending_refresh_apply = None;
+            self.subscription_state.pending_refresh_apply = None;
             self.logger.app(
                 LogLevel::Info,
                 format!("subscription changes applying while idle: +{added} -{removed}"),
             );
             self.notify(self.text().msg_subscription_applied_idle);
         } else {
-            self.pending_refresh_apply = None;
+            self.subscription_state.pending_refresh_apply = None;
             self.logger.app(
                 LogLevel::Warn,
                 format!("subscription idle apply skipped: +{added} -{removed}"),
@@ -193,7 +228,12 @@ impl App {
     pub(super) fn reconcile_subscription_apply_after_start(&mut self) {
         let (added, removed) = self.subscription_tag_diff();
         if added == 0 && removed == 0 {
-            if self.pending_refresh_apply.take().is_some() {
+            if self
+                .subscription_state
+                .pending_refresh_apply
+                .take()
+                .is_some()
+            {
                 self.logger.app(
                     LogLevel::Info,
                     "subscription apply pending resolved by restart",
@@ -201,7 +241,7 @@ impl App {
             }
             return;
         }
-        self.pending_refresh_apply = Some(PendingRefreshApply {
+        self.subscription_state.pending_refresh_apply = Some(PendingRefreshApply {
             added,
             removed,
             since: Instant::now(),
@@ -214,7 +254,7 @@ impl App {
     }
 
     pub(super) fn restart_after_pending_subscription(&mut self) {
-        let Some(id) = self.pending_restart_subscription.take() else {
+        let Some(id) = self.subscription_state.pending_restart_subscription.take() else {
             return;
         };
         let (added, removed) = self.subscription_tag_diff();
@@ -237,9 +277,9 @@ impl App {
         }
     }
 
-    /// Rebuild the merged node list after `self.subscriptions` changed.
+    /// Rebuild the merged node list after `self.subscription_state.subscriptions` changed.
     pub(super) fn refresh_merged_nodes(&mut self) {
-        self.nodes = merge_nodes(&self.subscriptions);
+        self.nodes = merge_nodes(&self.subscription_state.subscriptions);
         self.prune_node_state();
         self.sync_preferred_node();
     }
@@ -253,9 +293,10 @@ impl App {
     }
 
     pub(super) fn save_subscription_cache(&self) {
-        if let Err(err) =
-            subscription::cache::save(&self.paths.subscription_cache(), &self.subscriptions)
-        {
+        if let Err(err) = subscription::cache::save(
+            &self.paths.subscription_cache(),
+            &self.subscription_state.subscriptions,
+        ) {
             self.logger.app(
                 LogLevel::Warn,
                 format!("write subscription cache failed: {err}"),
@@ -264,12 +305,14 @@ impl App {
     }
 
     pub(super) fn next_subscription_seq(&mut self) -> u64 {
-        self.subscription_seq = self.subscription_seq.wrapping_add(1);
-        self.subscription_seq
+        self.subscription_state.subscription_seq =
+            self.subscription_state.subscription_seq.wrapping_add(1);
+        self.subscription_state.subscription_seq
     }
 
     pub(super) fn refresh_last_error_from_subscriptions(&mut self) {
         let errors: Vec<String> = self
+            .subscription_state
             .subscriptions
             .iter()
             .filter_map(|runtime| {
@@ -291,12 +334,15 @@ impl App {
         // refresh of a newly edited URL must not erase the currently working
         // node set and trigger a restart that cannot start.
         let previous = self
+            .subscription_state
             .subscriptions
             .iter()
             .find(|runtime| runtime.config.id == config.id)
             .cloned();
         let seq = self.next_subscription_seq();
-        self.subscription_refresh_seq.insert(config.id.clone(), seq);
+        self.subscription_state
+            .subscription_refresh_seq
+            .insert(config.id.clone(), seq);
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
         self.spawn_guarded(BackgroundTask::Other, async move {

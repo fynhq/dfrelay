@@ -430,7 +430,7 @@ impl App {
             self.notify(message);
             return;
         }
-        if self.refreshing_subscriptions {
+        if self.subscription_state.refreshing_subscriptions {
             self.health.recovery_refresh_pending = true;
             return;
         }

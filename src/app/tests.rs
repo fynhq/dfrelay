@@ -1,5 +1,6 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::health::probe_failure_outcome;
+use super::subscriptions::PendingRefreshApply;
 use super::*;
 use crate::singbox::binary::InboxCandidate;
 use crate::state::{KeywordField, SettingsField, SettingsItem};
@@ -117,7 +118,9 @@ async fn confirmation_keys_only_cancel() {
         enabled: false,
     };
     app.config.subscriptions.push(config.clone());
-    app.subscriptions.push(empty_runtime(config));
+    app.subscription_state
+        .subscriptions
+        .push(empty_runtime(config));
     app.selected = 0;
     app.handle_key(key(KeyCode::Char('d'))).await;
     assert!(app.subscription_delete.is_some());
@@ -324,15 +327,22 @@ async fn subscription_refresh_clears_pending_auto_restart() {
         enabled: true,
     };
     app.config.subscriptions.push(config.clone());
-    app.subscriptions.push(empty_runtime(config.clone()));
-    app.subscription_refresh_seq.insert(config.id.clone(), 7);
-    app.pending_restart_subscription = Some(config.id.clone());
+    app.subscription_state
+        .subscriptions
+        .push(empty_runtime(config.clone()));
+    app.subscription_state
+        .subscription_refresh_seq
+        .insert(config.id.clone(), 7);
+    app.subscription_state.pending_restart_subscription = Some(config.id.clone());
     app.handle_event(AppEvent::SubscriptionUpdated {
         seq: 7,
         runtime: empty_runtime(config),
     })
     .await;
-    assert!(app.pending_restart_subscription.is_none());
+    assert!(app
+        .subscription_state
+        .pending_restart_subscription
+        .is_none());
 }
 
 #[tokio::test]
@@ -349,23 +359,26 @@ async fn unregistered_control_requests_are_ignored() {
 #[tokio::test]
 async fn background_panic_clears_related_in_flight_state() {
     let (mut app, _dir) = test_app().await;
-    app.refreshing_subscriptions = true;
+    app.subscription_state.refreshing_subscriptions = true;
     app.health.recovery_refresh_pending = true;
     app.handle_event(AppEvent::BackgroundPanic {
         task: BackgroundTask::SubscriptionRefresh,
         message: "boom".into(),
     })
     .await;
-    assert!(!app.refreshing_subscriptions);
+    assert!(!app.subscription_state.refreshing_subscriptions);
     assert!(!app.health.recovery_refresh_pending);
 
-    app.pending_restart_subscription = Some("sub".into());
+    app.subscription_state.pending_restart_subscription = Some("sub".into());
     app.handle_event(AppEvent::BackgroundPanic {
         task: BackgroundTask::Other,
         message: "boom".into(),
     })
     .await;
-    assert!(app.pending_restart_subscription.is_none());
+    assert!(app
+        .subscription_state
+        .pending_restart_subscription
+        .is_none());
 }
 
 #[tokio::test]
@@ -636,9 +649,10 @@ async fn stale_subscription_refresh_results_are_ignored() {
         enabled: true,
     };
     app.config.subscriptions = vec![config.clone()];
-    app.subscription_seq = 2;
-    app.subscription_refresh_seq
-        .insert(config.id.clone(), app.subscription_seq);
+    app.subscription_state.subscription_seq = 2;
+    app.subscription_state
+        .subscription_refresh_seq
+        .insert(config.id.clone(), app.subscription_state.subscription_seq);
 
     let mut stale = empty_runtime(config.clone());
     stale.nodes = vec![node("stale")];
@@ -647,16 +661,16 @@ async fn stale_subscription_refresh_results_are_ignored() {
         runtime: stale,
     })
     .await;
-    assert!(app.subscriptions.is_empty());
+    assert!(app.subscription_state.subscriptions.is_empty());
 
     let mut fresh = empty_runtime(config);
     fresh.nodes = vec![node("fresh")];
     app.handle_event(AppEvent::SubscriptionUpdated {
-        seq: app.subscription_seq,
+        seq: app.subscription_state.subscription_seq,
         runtime: fresh,
     })
     .await;
-    assert_eq!(app.subscriptions.len(), 1);
+    assert_eq!(app.subscription_state.subscriptions.len(), 1);
     assert_eq!(app.nodes[0].name, "fresh");
 }
 
@@ -689,7 +703,7 @@ async fn subscription_errors_are_not_cleared_by_another_success() {
     app.config.subscriptions = vec![config_a.clone(), config_b.clone()];
     let mut failed = empty_runtime(config_a);
     failed.error = Some("HTTP 500".to_string());
-    app.subscriptions = vec![failed, empty_runtime(config_b.clone())];
+    app.subscription_state.subscriptions = vec![failed, empty_runtime(config_b.clone())];
     app.refresh_last_error_from_subscriptions();
     assert!(app
         .last_error
@@ -697,7 +711,8 @@ async fn subscription_errors_are_not_cleared_by_another_success() {
         .is_some_and(|error| error.contains("a: HTTP 500")));
 
     let seq = app.next_subscription_seq();
-    app.subscription_refresh_seq
+    app.subscription_state
+        .subscription_refresh_seq
         .insert(config_b.id.clone(), seq);
     app.handle_event(AppEvent::SubscriptionUpdated {
         seq,
@@ -1029,13 +1044,13 @@ async fn subscription_form_validates_and_saves_disabled_entry() {
     assert!(app.subscription_form().is_none());
     assert_eq!(app.config.subscriptions.len(), 1);
     assert!(!app.config.subscriptions[0].enabled);
-    assert_eq!(app.subscriptions.len(), 1);
+    assert_eq!(app.subscription_state.subscriptions.len(), 1);
     assert!(app.config.subscriptions[0].name.contains("example.com"));
 
     let id = app.config.subscriptions[0].id.clone();
     app.delete_subscription(&id);
     assert!(app.config.subscriptions.is_empty());
-    assert!(app.subscriptions.is_empty());
+    assert!(app.subscription_state.subscriptions.is_empty());
 }
 
 #[tokio::test]
@@ -1065,7 +1080,9 @@ async fn subscription_delete_confirmation_is_persistent_and_cancellable() {
         enabled: false,
     };
     app.config.subscriptions.push(config.clone());
-    app.subscriptions.push(empty_runtime(config));
+    app.subscription_state
+        .subscriptions
+        .push(empty_runtime(config));
     app.page = Page::Subscriptions;
     app.selected = 0;
 
@@ -1226,12 +1243,16 @@ async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
     app.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
     app.note_subscription_apply();
-    let pending = app.pending_refresh_apply.as_ref().expect("pending diff");
+    let pending = app
+        .subscription_state
+        .pending_refresh_apply
+        .as_ref()
+        .expect("pending diff");
     assert_eq!((pending.added, pending.removed), (1, 0));
 
     app.nodes = vec![tagged_node("A", "n1")];
     app.note_subscription_apply();
-    assert!(app.pending_refresh_apply.is_none());
+    assert!(app.subscription_state.pending_refresh_apply.is_none());
 }
 
 #[tokio::test]
@@ -1239,9 +1260,12 @@ async fn unchanged_subscription_refresh_skips_the_restart() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
-    app.pending_restart_subscription = Some("s-1".to_string());
+    app.subscription_state.pending_restart_subscription = Some("s-1".to_string());
     app.restart_after_pending_subscription();
-    assert!(app.pending_restart_subscription.is_none());
+    assert!(app
+        .subscription_state
+        .pending_restart_subscription
+        .is_none());
     assert!(!app.proxy_runtime.restart_in_progress);
 }
 
@@ -1250,14 +1274,14 @@ async fn reconcile_clears_the_pending_apply_after_a_matching_start() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
-    app.pending_refresh_apply = Some(PendingRefreshApply {
+    app.subscription_state.pending_refresh_apply = Some(PendingRefreshApply {
         added: 1,
         removed: 0,
         since: Instant::now(),
         wait_logged: false,
     });
     app.reconcile_subscription_apply_after_start();
-    assert!(app.pending_refresh_apply.is_none());
+    assert!(app.subscription_state.pending_refresh_apply.is_none());
 }
 
 #[tokio::test]
@@ -1266,9 +1290,9 @@ async fn pending_apply_is_dropped_when_the_proxy_is_not_running() {
     app.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
     app.note_subscription_apply();
-    assert!(app.pending_refresh_apply.is_some());
+    assert!(app.subscription_state.pending_refresh_apply.is_some());
     app.maybe_apply_subscription_changes();
-    assert!(app.pending_refresh_apply.is_none());
+    assert!(app.subscription_state.pending_refresh_apply.is_none());
 }
 
 #[tokio::test]
@@ -1936,14 +1960,14 @@ async fn app_with_cached_subscription(last_updated: Option<String>) -> (App, Tem
 async fn fresh_subscription_cache_skips_startup_refresh() {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let (app, _dir) = app_with_cached_subscription(Some(now)).await;
-    assert!(!app.refreshing_subscriptions);
-    assert!(app.last_subscription_refresh.is_some());
+    assert!(!app.subscription_state.refreshing_subscriptions);
+    assert!(app.subscription_state.last_subscription_refresh.is_some());
 
     let old = (chrono::Local::now() - chrono::Duration::hours(2))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
     let (app, _dir) = app_with_cached_subscription(Some(old)).await;
-    assert!(app.refreshing_subscriptions);
+    assert!(app.subscription_state.refreshing_subscriptions);
 }
 
 #[tokio::test]
@@ -1957,9 +1981,11 @@ async fn failed_subscription_refresh_schedules_retry() {
     };
     app.config.subscriptions.push(config.clone());
     let previous = Instant::now() - Duration::from_secs(25 * 3600);
-    app.last_subscription_refresh = Some(previous);
+    app.subscription_state.last_subscription_refresh = Some(previous);
     let seq = app.next_subscription_seq();
-    app.subscription_refresh_seq.insert(config.id.clone(), seq);
+    app.subscription_state
+        .subscription_refresh_seq
+        .insert(config.id.clone(), seq);
     let mut runtime = empty_runtime(config);
     runtime.error = Some("timeout".to_string());
 
@@ -1969,12 +1995,20 @@ async fn failed_subscription_refresh_schedules_retry() {
     })
     .await;
 
-    assert_eq!(app.last_subscription_refresh, Some(previous));
-    assert!(app.subscription_refresh_retry_at.is_some());
+    assert_eq!(
+        app.subscription_state.last_subscription_refresh,
+        Some(previous)
+    );
+    assert!(app
+        .subscription_state
+        .subscription_refresh_retry_at
+        .is_some());
     assert!(!app.subscription_refresh_due());
 
     let seq = app.next_subscription_seq();
-    app.subscription_refresh_seq.insert("s-1".to_string(), seq);
+    app.subscription_state
+        .subscription_refresh_seq
+        .insert("s-1".to_string(), seq);
     let mut runtime = empty_runtime(app.config.subscriptions[0].clone());
     runtime.nodes = vec![node("fresh")];
     app.handle_event(AppEvent::Subscriptions {
@@ -1982,8 +2016,12 @@ async fn failed_subscription_refresh_schedules_retry() {
         runtimes: vec![runtime],
     })
     .await;
-    assert!(app.subscription_refresh_retry_at.is_none());
     assert!(app
+        .subscription_state
+        .subscription_refresh_retry_at
+        .is_none());
+    assert!(app
+        .subscription_state
         .last_subscription_refresh
         .is_some_and(|last| last > previous));
 }

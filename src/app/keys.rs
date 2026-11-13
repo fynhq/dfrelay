@@ -338,7 +338,7 @@ impl App {
         match page {
             Page::Nodes => self.nodes.len(),
             Page::Connections => self.metrics.connections.len(),
-            Page::Subscriptions => self.subscriptions.len(),
+            Page::Subscriptions => self.subscription_state.subscriptions.len(),
             Page::Logs => self.log_count(),
             Page::Settings => settings_items(self.config.allow_lan).len(),
             _ => 0,
@@ -453,7 +453,7 @@ impl App {
     }
 
     pub(super) fn open_edit_subscription_form(&mut self) {
-        let Some(runtime) = self.subscriptions.get(self.selected) else {
+        let Some(runtime) = self.subscription_state.subscriptions.get(self.selected) else {
             self.notify(self.text().subscriptions_empty);
             return;
         };
@@ -464,7 +464,7 @@ impl App {
     }
 
     pub(super) fn request_delete_subscription(&mut self) {
-        let Some(runtime) = self.subscriptions.get(self.selected) else {
+        let Some(runtime) = self.subscription_state.subscriptions.get(self.selected) else {
             return;
         };
         self.subscription_delete = Some(runtime.config.id.clone());
@@ -490,18 +490,28 @@ impl App {
             return;
         }
         self.config = config;
-        self.subscription_refresh_seq.remove(id);
-        if self.pending_restart_subscription.as_deref() == Some(id) {
-            self.pending_restart_subscription = None;
+        self.subscription_state.subscription_refresh_seq.remove(id);
+        if self
+            .subscription_state
+            .pending_restart_subscription
+            .as_deref()
+            == Some(id)
+        {
+            self.subscription_state.pending_restart_subscription = None;
         }
-        self.subscriptions.retain(|runtime| runtime.config.id != id);
-        self.nodes = merge_nodes(&self.subscriptions);
+        self.subscription_state
+            .subscriptions
+            .retain(|runtime| runtime.config.id != id);
+        self.nodes = merge_nodes(&self.subscription_state.subscriptions);
         self.last_node_sort = None;
         self.prune_node_state();
         self.sync_preferred_node();
-        self.selected = self
-            .selected
-            .min(self.subscriptions.len().saturating_sub(1));
+        self.selected = self.selected.min(
+            self.subscription_state
+                .subscriptions
+                .len()
+                .saturating_sub(1),
+        );
         self.save_subscription_cache();
         self.refresh_last_error_from_subscriptions();
         self.notify(self.text().msg_subscription_deleted);
@@ -718,29 +728,35 @@ impl App {
         );
         if config.enabled {
             if !self
+                .subscription_state
                 .subscriptions
                 .iter()
                 .any(|runtime| runtime.config.id == config.id)
             {
-                self.subscriptions.push(empty_runtime(config.clone()));
+                self.subscription_state
+                    .subscriptions
+                    .push(empty_runtime(config.clone()));
             }
             if restart_needed {
-                self.pending_restart_subscription = Some(config.id.clone());
+                self.subscription_state.pending_restart_subscription = Some(config.id.clone());
             }
             self.refresh_subscription(config);
         } else {
-            self.subscription_refresh_seq.remove(&config.id);
+            self.subscription_state
+                .subscription_refresh_seq
+                .remove(&config.id);
             let placeholder = empty_runtime(config);
             if let Some(existing) = self
+                .subscription_state
                 .subscriptions
                 .iter_mut()
                 .find(|runtime| runtime.config.id == placeholder.config.id)
             {
                 *existing = placeholder;
             } else {
-                self.subscriptions.push(placeholder);
+                self.subscription_state.subscriptions.push(placeholder);
             }
-            self.nodes = merge_nodes(&self.subscriptions);
+            self.nodes = merge_nodes(&self.subscription_state.subscriptions);
             self.last_node_sort = None;
             self.sync_preferred_node();
             self.save_subscription_cache();

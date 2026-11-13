@@ -40,6 +40,7 @@ mod updates;
 use health::HealthState;
 use proxy::ProxyRuntime;
 use quality::QualityBook;
+use subscriptions::SubscriptionState;
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const RESTART_DELAYS: [u64; MAX_RESTART_ATTEMPTS as usize] = [1, 2, 5, 10, 30];
@@ -147,14 +148,6 @@ pub enum HealthOutcome {
 enum RecoveryTarget {
     Auto,
     Node(String),
-}
-
-#[derive(Debug, Clone)]
-struct PendingRefreshApply {
-    added: usize,
-    removed: usize,
-    since: Instant,
-    wait_logged: bool,
 }
 
 fn health_outcome(result: &Result<u64, ClashError>) -> HealthOutcome {
@@ -295,7 +288,7 @@ pub struct App {
     auto_tags_cache: Option<(u64, Vec<String>)>,
     last_node_sort: Option<Instant>,
     node_sort: NodeSort,
-    pub subscriptions: Vec<SubscriptionRuntime>,
+    subscription_state: SubscriptionState,
     pub selected: usize,
     page_selection: [usize; 7],
     pub metrics: MetricsSnapshot,
@@ -316,7 +309,6 @@ pub struct App {
     last_update_check: Option<Instant>,
     pub setup: SetupState,
     install_in_flight: bool,
-    pending_restart_subscription: Option<String>,
     pub overlay: Option<Overlay>,
     log_detail_max_scroll: usize,
     pub subscription_delete: Option<String>,
@@ -344,16 +336,9 @@ pub struct App {
     health: HealthState,
     stats: RuntimeStats,
     idle_since: Option<Instant>,
-    pending_refresh_apply: Option<PendingRefreshApply>,
     viewer_active: Arc<AtomicBool>,
     metrics_wake: Arc<Notify>,
     proxies_refresh: Arc<AtomicBool>,
-    pub refreshing_subscriptions: bool,
-    subscription_seq: u64,
-    subscription_refresh_seq: HashMap<String, u64>,
-    pub last_subscription_refresh: Option<Instant>,
-    subscription_refresh_retry_at: Option<Instant>,
-    subscription_refresh_backoff: Duration,
     pub preferred_node: Option<String>,
     selection_generation: Arc<AtomicU64>,
     pending_selection: Option<PendingSelection>,
@@ -513,7 +498,12 @@ impl App {
             auto_tags_cache: None,
             last_node_sort: None,
             node_sort: NodeSort::default(),
-            subscriptions: cached_subscriptions,
+            subscription_state: SubscriptionState {
+                subscriptions: cached_subscriptions,
+                last_subscription_refresh: startup_cache_fresh.then(Instant::now),
+                subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
+                ..SubscriptionState::default()
+            },
             selected: 0,
             page_selection: [0; 7],
             metrics: MetricsSnapshot::default(),
@@ -534,7 +524,6 @@ impl App {
             last_update_check: None,
             setup,
             install_in_flight: false,
-            pending_restart_subscription: None,
             overlay,
             log_detail_max_scroll: 0,
             subscription_delete: None,
@@ -562,16 +551,9 @@ impl App {
             health: HealthState::default(),
             stats: RuntimeStats::default(),
             idle_since: None,
-            pending_refresh_apply: None,
             viewer_active: Arc::new(AtomicBool::new(false)),
             metrics_wake: Arc::new(Notify::new()),
             proxies_refresh: Arc::new(AtomicBool::new(false)),
-            refreshing_subscriptions: false,
-            subscription_seq: 0,
-            subscription_refresh_seq: HashMap::new(),
-            last_subscription_refresh: startup_cache_fresh.then(Instant::now),
-            subscription_refresh_retry_at: None,
-            subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
             preferred_node: None,
             selection_generation: Arc::new(AtomicU64::new(0)),
             pending_selection: None,
@@ -669,6 +651,7 @@ impl App {
             auto_tags: filtered.iter().cloned().collect(),
             auto_candidates: filtered.len(),
             subscriptions: self
+                .subscription_state
                 .subscriptions
                 .iter()
                 .map(|runtime| crate::view::SubscriptionView {
@@ -801,13 +784,16 @@ impl App {
                 self.finish_restart_after_preflight(result);
             }
             AppEvent::Subscriptions { seq, runtimes } => {
-                self.refreshing_subscriptions = false;
+                self.subscription_state.refreshing_subscriptions = false;
                 let recovery_refresh = self.health.recovery_refresh_pending;
                 self.health.recovery_refresh_pending = false;
                 let mut accepted: HashMap<String, SubscriptionRuntime> = runtimes
                     .into_iter()
                     .filter(|runtime| {
-                        self.subscription_refresh_seq.get(&runtime.config.id) == Some(&seq)
+                        self.subscription_state
+                            .subscription_refresh_seq
+                            .get(&runtime.config.id)
+                            == Some(&seq)
                     })
                     .map(|runtime| (runtime.config.id.clone(), runtime))
                     .collect();
@@ -816,7 +802,8 @@ impl App {
                     let mut runtime = accepted
                         .remove(&config.id)
                         .or_else(|| {
-                            self.subscriptions
+                            self.subscription_state
+                                .subscriptions
                                 .iter()
                                 .find(|runtime| runtime.config.id == config.id)
                                 .cloned()
@@ -825,12 +812,14 @@ impl App {
                     runtime.config = config.clone();
                     ordered.push(runtime);
                 }
-                self.subscription_refresh_seq.retain(|id, _| {
-                    self.config
-                        .subscriptions
-                        .iter()
-                        .any(|config| &config.id == id)
-                });
+                self.subscription_state
+                    .subscription_refresh_seq
+                    .retain(|id, _| {
+                        self.config
+                            .subscriptions
+                            .iter()
+                            .any(|config| &config.id == id)
+                    });
                 let selected_before = self.selected;
                 let selected_tag = if self.page == Page::Nodes {
                     self.nodes.get(selected_before).map(|node| node.tag.clone())
@@ -839,7 +828,7 @@ impl App {
                 };
                 let node_count: usize = ordered.iter().map(|item| item.nodes.len()).sum();
                 let capped = node_count > subscription::MAX_TOTAL_NODES;
-                self.subscriptions = ordered;
+                self.subscription_state.subscriptions = ordered;
                 self.refresh_merged_nodes();
                 if capped {
                     self.logger.app(
@@ -852,6 +841,7 @@ impl App {
                     );
                 }
                 if self
+                    .subscription_state
                     .subscriptions
                     .iter()
                     .any(|runtime| runtime.config.enabled && runtime.error.is_some())
@@ -880,7 +870,11 @@ impl App {
                     format!("subscriptions refreshed: {node_count} nodes ({unique_count} unique)")
                 };
                 self.logger.app(LogLevel::Info, count_detail);
-                if self.pending_restart_subscription.is_some() {
+                if self
+                    .subscription_state
+                    .pending_restart_subscription
+                    .is_some()
+                {
                     self.restart_after_pending_subscription();
                 } else {
                     self.note_subscription_apply();
@@ -901,19 +895,20 @@ impl App {
                 else {
                     return;
                 };
-                if self.subscription_refresh_seq.get(&id) != Some(&seq) {
+                if self.subscription_state.subscription_refresh_seq.get(&id) != Some(&seq) {
                     return;
                 }
                 let mut runtime = runtime;
                 runtime.config = config;
                 if let Some(existing) = self
+                    .subscription_state
                     .subscriptions
                     .iter_mut()
                     .find(|item| item.config.id == id)
                 {
                     *existing = runtime.clone();
                 } else {
-                    self.subscriptions.push(runtime.clone());
+                    self.subscription_state.subscriptions.push(runtime.clone());
                 }
                 self.refresh_merged_nodes();
                 self.finalize_subscription_change();
@@ -932,7 +927,12 @@ impl App {
                         runtime.nodes.len()
                     ),
                 );
-                if self.pending_restart_subscription.as_deref() == Some(id.as_str()) {
+                if self
+                    .subscription_state
+                    .pending_restart_subscription
+                    .as_deref()
+                    == Some(id.as_str())
+                {
                     self.restart_after_pending_subscription();
                 } else {
                     self.note_subscription_apply();
@@ -1496,7 +1496,7 @@ impl App {
         }
         if self.nodes.is_empty() {
             self.pending_start = Some(client_id);
-            if self.refreshing_subscriptions {
+            if self.subscription_state.refreshing_subscriptions {
                 return;
             }
             if self.config.enabled_subscriptions().next().is_some() {
@@ -1517,7 +1517,7 @@ impl App {
             return;
         }
         if self.nodes.is_empty() {
-            if self.refreshing_subscriptions {
+            if self.subscription_state.refreshing_subscriptions {
                 return;
             }
             self.ack_pending_start(false, "no nodes available");
@@ -1588,7 +1588,7 @@ impl App {
     fn on_background_panic(&mut self, task: BackgroundTask, message: String) {
         match task {
             BackgroundTask::SubscriptionRefresh => {
-                self.refreshing_subscriptions = false;
+                self.subscription_state.refreshing_subscriptions = false;
                 self.health.recovery_refresh_pending = false;
                 self.schedule_subscription_retry();
             }
@@ -1625,7 +1625,7 @@ impl App {
             }
             BackgroundTask::Selection | BackgroundTask::Ipc => {}
             BackgroundTask::Other => {
-                self.pending_restart_subscription = None;
+                self.subscription_state.pending_restart_subscription = None;
             }
         }
         let text = format!("background task failed: {message}");
@@ -1744,7 +1744,11 @@ impl App {
         if self.proxy_runtime.status != ProxyStatus::Running || self.proxy_runtime.proxy.is_none() {
             return false;
         }
-        if self.pending_restart_subscription.is_some() {
+        if self
+            .subscription_state
+            .pending_restart_subscription
+            .is_some()
+        {
             return false;
         }
         if self.setup_busy() {
@@ -2401,7 +2405,7 @@ impl App {
         self.delay_testing.clear();
         self.delay_sweep_running = false;
         self.last_delay_sweep = None;
-        self.pending_refresh_apply = None;
+        self.subscription_state.pending_refresh_apply = None;
         self.reset_health_state();
     }
 
