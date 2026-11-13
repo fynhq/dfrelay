@@ -54,6 +54,7 @@ pub fn load(path: &Path, configs: &[SubscriptionConfig]) -> Vec<SubscriptionRunt
             }
             Some(SubscriptionRuntime {
                 config: config.clone(),
+                source_url_hash: Some(cached.url_hash.clone()),
                 nodes: cached.nodes.clone(),
                 unsupported: cached.unsupported.clone(),
                 last_updated: cached.last_updated.clone(),
@@ -77,7 +78,13 @@ pub fn save(path: &Path, runtimes: &[SubscriptionRuntime]) -> std::io::Result<()
             .iter()
             .map(|runtime| CachedSubscription {
                 id: runtime.config.id.clone(),
-                url_hash: url_hash(&runtime.config.url),
+                // If the URL changed and its refresh failed, keep the old
+                // source hash so the next startup does not treat stale nodes
+                // as belonging to the new URL.
+                url_hash: runtime
+                    .source_url_hash
+                    .clone()
+                    .unwrap_or_else(|| url_hash(&runtime.config.url)),
                 last_updated: runtime.last_updated.clone(),
                 nodes: runtime.nodes.clone(),
                 unsupported: runtime.unsupported.clone(),
@@ -88,7 +95,7 @@ pub fn save(path: &Path, runtimes: &[SubscriptionRuntime]) -> std::io::Result<()
     fsutil::write_private_atomic(path, text.as_bytes())
 }
 
-fn url_hash(url: &str) -> String {
+pub(super) fn url_hash(url: &str) -> String {
     use std::fmt::Write as _;
 
     let digest = Sha256::digest(url.as_bytes());
@@ -128,6 +135,7 @@ mod tests {
         );
         SubscriptionRuntime {
             config,
+            source_url_hash: None,
             nodes: vec![node],
             unsupported: Vec::new(),
             last_updated: Some("2026-10-29 10:00:00".to_string()),
@@ -150,6 +158,26 @@ mod tests {
         assert_eq!(loaded[0].nodes[0].outbound.value()["method"], "aes-128-gcm");
         assert!(loaded[0].stale);
         assert!(loaded[0].last_updated.is_some());
+        assert_eq!(
+            loaded[0].source_url_hash,
+            Some(url_hash("https://example.com/sub?token=secret"))
+        );
+    }
+
+    #[test]
+    fn failed_url_change_keeps_nodes_under_the_old_source_hash() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.json");
+        let old = config("one", "https://example.com/old");
+        let new = config("one", "https://example.com/new");
+        let mut failed = runtime(new.clone());
+        failed.source_url_hash = Some(url_hash(&old.url));
+        failed.error = Some("timeout".to_string());
+        failed.stale = true;
+
+        save(&path, &[failed]).unwrap();
+        assert!(load(&path, &[new]).is_empty());
+        assert_eq!(load(&path, &[old]).len(), 1);
     }
 
     #[cfg(unix)]

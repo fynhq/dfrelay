@@ -2736,6 +2736,7 @@ fn parse_keyword_input(input: &str) -> Vec<String> {
 fn empty_runtime(config: SubscriptionConfig) -> SubscriptionRuntime {
     SubscriptionRuntime {
         config,
+        source_url_hash: None,
         nodes: Vec::new(),
         unsupported: Vec::new(),
         last_updated: None,

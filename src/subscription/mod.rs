@@ -34,6 +34,11 @@ pub(crate) fn node_limit_error(kind: &str, limit: usize) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionRuntime {
     pub config: SubscriptionConfig,
+    /// URL hash the current node set was fetched from. It can differ from
+    /// `config.url` when the user edits a URL and the refresh fails: the old
+    /// nodes stay visible, but must not be cached under the new URL.
+    #[serde(default)]
+    pub source_url_hash: Option<String>,
     pub nodes: Vec<Node>,
     pub unsupported: Vec<UnsupportedNode>,
     pub last_updated: Option<String>,
@@ -60,6 +65,7 @@ pub async fn refresh_one(
                 failed_runtime(config, previous, error)
             }
             Ok(outcome) => SubscriptionRuntime {
+                source_url_hash: Some(cache::url_hash(&config.url)),
                 config,
                 nodes: outcome.nodes,
                 unsupported: outcome.unsupported,
@@ -79,16 +85,25 @@ fn failed_runtime(
     error: String,
 ) -> SubscriptionRuntime {
     match previous.filter(|runtime| !runtime.nodes.is_empty()) {
-        Some(previous) => SubscriptionRuntime {
-            config,
-            nodes: previous.nodes.clone(),
-            unsupported: previous.unsupported.clone(),
-            last_updated: previous.last_updated.clone(),
-            error: Some(error),
-            stale: true,
-        },
+        Some(previous) => {
+            // Keep the source hash of the nodes, not the possibly edited URL.
+            let source_url_hash = previous
+                .source_url_hash
+                .clone()
+                .or_else(|| Some(cache::url_hash(&previous.config.url)));
+            SubscriptionRuntime {
+                config,
+                source_url_hash,
+                nodes: previous.nodes.clone(),
+                unsupported: previous.unsupported.clone(),
+                last_updated: previous.last_updated.clone(),
+                error: Some(error),
+                stale: true,
+            }
+        }
         None => SubscriptionRuntime {
             config,
+            source_url_hash: None,
             nodes: Vec::new(),
             unsupported: Vec::new(),
             last_updated: None,
@@ -220,6 +235,7 @@ mod tests {
                 url: "https://example.com/sub".into(),
                 enabled: true,
             },
+            source_url_hash: Some(cache::url_hash("https://example.com/sub")),
             nodes,
             unsupported: Vec::new(),
             last_updated: None,
@@ -253,6 +269,25 @@ mod tests {
             "https://airport.example.com/***"
         );
         assert_eq!(redact_url("not a url"), "***");
+    }
+
+    #[test]
+    fn failed_refresh_after_url_edit_keeps_the_old_source_hash() {
+        let old_url = "https://example.com/old";
+        let mut previous = runtime(vec![node("A", "same")]);
+        previous.config.url = old_url.to_string();
+        previous.source_url_hash = Some(cache::url_hash(old_url));
+
+        let mut new_config = previous.config.clone();
+        new_config.url = "https://example.com/new".to_string();
+        let failed = failed_runtime(new_config.clone(), Some(&previous), "timeout".to_string());
+
+        assert_eq!(failed.nodes.len(), 1);
+        assert_eq!(failed.source_url_hash, Some(cache::url_hash(old_url)));
+        assert_ne!(
+            failed.source_url_hash,
+            Some(cache::url_hash(&new_config.url))
+        );
     }
 
     #[test]

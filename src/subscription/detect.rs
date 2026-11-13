@@ -106,6 +106,11 @@ fn count_yaml_aliases(text: &str) -> usize {
     count
 }
 
+fn looks_like_clash(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_start().starts_with("proxies:"))
+}
+
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
     let needle = needle.as_bytes();
     haystack
@@ -162,22 +167,32 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
     // through to the base64/URI parsers. If nothing else matches, surface the
     // aliasing rejection instead of a generic "unrecognized" error.
     let alias_error = ensure_alias_budget(trimmed).err();
+    let mut yaml_error = None;
     if alias_error.is_none() {
-        if let Ok(document) = serde_yaml_ng::from_str::<YamlValue>(trimmed) {
-            let proxies_key = YamlValue::String("proxies".to_string());
-            let has_proxies = document
-                .as_mapping()
-                .is_some_and(|mapping| mapping.contains_key(&proxies_key));
-            if has_proxies {
-                let (nodes, unsupported) = parse_clash_document(&document, source)?;
-                return Ok(ParseOutcome {
-                    nodes,
-                    unsupported: unsupported
-                        .into_iter()
-                        .map(|(name, reason)| UnsupportedNode { name, reason })
-                        .collect(),
-                });
+        match serde_yaml_ng::from_str::<YamlValue>(trimmed) {
+            Ok(document) => {
+                let proxies_key = YamlValue::String("proxies".to_string());
+                let has_proxies = document
+                    .as_mapping()
+                    .is_some_and(|mapping| mapping.contains_key(&proxies_key));
+                if has_proxies {
+                    let (nodes, unsupported) = parse_clash_document(&document, source)?;
+                    return Ok(ParseOutcome {
+                        nodes,
+                        unsupported: unsupported
+                            .into_iter()
+                            .map(|(name, reason)| UnsupportedNode { name, reason })
+                            .collect(),
+                    });
+                }
             }
+            Err(err) => yaml_error = Some(err.to_string()),
+        }
+    }
+
+    if let Some(err) = yaml_error {
+        if looks_like_clash(trimmed) {
+            return Err(format!("invalid Clash YAML: {err}"));
         }
     }
 
@@ -480,6 +495,12 @@ mod tests {
     #[test]
     fn rejects_unknown_content() {
         assert!(detect_and_parse("hello world", "test").is_err());
+    }
+
+    #[test]
+    fn reports_yaml_errors_for_clash_like_bodies() {
+        let err = detect_and_parse("proxies:\n  - name: [broken\n", "test").unwrap_err();
+        assert!(err.contains("invalid Clash YAML"), "{err}");
     }
 
     #[test]
