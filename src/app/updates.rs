@@ -8,8 +8,8 @@ use super::*;
 impl App {
     pub(super) fn refresh_previous_binary_state(&mut self) {
         let available = self.paths.previous_binary().is_file();
-        self.previous_binary_available = available;
-        self.previous_binary_version = if available {
+        self.binary_state.previous_binary_available = available;
+        self.binary_state.previous_binary_version = if available {
             self.binary_manager
                 .previous_metadata()
                 .map(|metadata| metadata.version)
@@ -19,17 +19,18 @@ impl App {
     }
 
     pub(super) fn maybe_check_binary_update(&mut self) {
-        if self.update_check_in_flight || !self.binary_installed {
+        if self.binary_state.update_check_in_flight || !self.binary_state.binary_installed {
             return;
         }
         if self
+            .binary_state
             .last_update_check
             .is_some_and(|at| at.elapsed() < UPDATE_CHECK_INTERVAL)
         {
             return;
         }
-        self.update_check_in_flight = true;
-        self.last_update_check = Some(Instant::now());
+        self.binary_state.update_check_in_flight = true;
+        self.binary_state.last_update_check = Some(Instant::now());
         let manager = self.binary_manager.clone();
         let config = self.config.clone();
         let tx = self.events_tx.clone();
@@ -64,8 +65,8 @@ impl App {
             self.notify(self.text().msg_rollback_unavailable);
             return;
         }
-        self.setup.rollback_in_flight = true;
-        self.setup.message = None;
+        self.binary_state.setup.rollback_in_flight = true;
+        self.binary_state.setup.message = None;
         let manager = self.binary_manager.clone();
         let logger = self.logger.clone();
         let tx = self.events_tx.clone();
@@ -79,15 +80,15 @@ impl App {
     }
 
     pub(super) fn start_download(&mut self) {
-        if self.setup.downloading || self.install_in_flight {
+        if self.binary_state.setup.downloading || self.binary_state.install_in_flight {
             return;
         }
-        if self.setup.rollback_in_flight {
+        if self.binary_state.setup.rollback_in_flight {
             self.notify(self.text().setup_busy);
             return;
         }
-        self.setup.downloading = true;
-        self.setup.message = None;
+        self.binary_state.setup.downloading = true;
+        self.binary_state.setup.message = None;
         let config = self.config.clone();
         let logger = self.logger.clone();
         let manager = self.binary_manager.clone();
@@ -102,28 +103,30 @@ impl App {
     }
 
     pub(super) async fn install_selected(&mut self) {
-        if self.setup.downloading || self.install_in_flight {
+        if self.binary_state.setup.downloading || self.binary_state.install_in_flight {
             return;
         }
-        if self.setup.rollback_in_flight {
+        if self.binary_state.setup.rollback_in_flight {
             self.notify(self.text().setup_busy);
             return;
         }
         let Some(selected) = self.setup_overlay_selected() else {
             return;
         };
-        let Some(candidate) = self.setup.candidates.get(selected).cloned() else {
+        let Some(candidate) = self.binary_state.setup.candidates.get(selected).cloned() else {
             return;
         };
-        if !candidate.has_checksum && self.setup.pending_install.as_ref() != Some(&candidate.path) {
-            self.setup.pending_install = Some(candidate.path.clone());
-            self.setup.message = None;
+        if !candidate.has_checksum
+            && self.binary_state.setup.pending_install.as_ref() != Some(&candidate.path)
+        {
+            self.binary_state.setup.pending_install = Some(candidate.path.clone());
+            self.binary_state.setup.message = None;
             return;
         }
-        self.setup.pending_install = None;
-        self.install_in_flight = true;
-        self.setup.installing = true;
-        self.setup.message = None;
+        self.binary_state.setup.pending_install = None;
+        self.binary_state.install_in_flight = true;
+        self.binary_state.setup.installing = true;
+        self.binary_state.setup.message = None;
         let manager = self.binary_manager.clone();
         let logger = self.logger.clone();
         let tx = self.events_tx.clone();

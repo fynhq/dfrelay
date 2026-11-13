@@ -210,29 +210,35 @@ async fn binary_status_tracks_install_and_upgrade() {
     let (mut app, _dir) = test_app().await;
     assert_eq!(app.view().binary_status, BinaryStatus::NotInstalled);
 
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
     assert_eq!(app.view().binary_status, BinaryStatus::Installed);
 
-    app.latest_binary_version = Some("1.15.0".to_string());
+    app.binary_state.latest_binary_version = Some("1.15.0".to_string());
     assert_eq!(app.view().binary_status, BinaryStatus::UpgradeAvailable);
 
-    app.latest_binary_version = Some("1.14.4".to_string());
+    app.binary_state.latest_binary_version = Some("1.14.4".to_string());
     assert_eq!(app.view().binary_status, BinaryStatus::Installed);
 
-    app.latest_binary_version = Some("1.14.4-alpha.13".to_string());
+    app.binary_state.latest_binary_version = Some("1.14.4-alpha.13".to_string());
     assert_eq!(app.view().binary_status, BinaryStatus::Installed);
 
     app.handle_event(AppEvent::UpdateCheckDone(Ok("1.16.0".to_string())))
         .await;
-    assert!(!app.update_check_in_flight);
-    assert_eq!(app.latest_binary_version.as_deref(), Some("1.16.0"));
+    assert!(!app.binary_state.update_check_in_flight);
+    assert_eq!(
+        app.binary_state.latest_binary_version.as_deref(),
+        Some("1.16.0")
+    );
     assert_eq!(app.view().binary_status, BinaryStatus::UpgradeAvailable);
 
     app.handle_event(AppEvent::UpdateCheckDone(Err("offline".to_string())))
         .await;
-    assert!(!app.update_check_in_flight);
-    assert_eq!(app.latest_binary_version.as_deref(), Some("1.16.0"));
+    assert!(!app.binary_state.update_check_in_flight);
+    assert_eq!(
+        app.binary_state.latest_binary_version.as_deref(),
+        Some("1.16.0")
+    );
 }
 
 #[tokio::test]
@@ -262,31 +268,34 @@ async fn rollback_confirmation_is_consumed_by_other_keys() {
 async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.setup.candidates = vec![InboxCandidate {
+    app.binary_state.setup.candidates = vec![InboxCandidate {
         path: PathBuf::from("/inbox/raw-sing-box"),
         label: "raw-sing-box".to_string(),
         has_checksum: false,
     }];
     let expected = PathBuf::from("/inbox/raw-sing-box");
     app.handle_key(key(KeyCode::Enter)).await;
-    assert_eq!(app.setup.pending_install.as_ref(), Some(&expected));
-    assert!(app.setup.message.is_none());
+    assert_eq!(
+        app.binary_state.setup.pending_install.as_ref(),
+        Some(&expected)
+    );
+    assert!(app.binary_state.setup.message.is_none());
     assert!(!app.should_quit);
 
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert!(app.setup.pending_install.is_none());
+    assert!(app.binary_state.setup.pending_install.is_none());
     assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
 
     app.handle_key(key(KeyCode::Enter)).await;
-    assert!(app.setup.pending_install.is_some());
+    assert!(app.binary_state.setup.pending_install.is_some());
     app.handle_key(key(KeyCode::Char('q'))).await;
-    assert!(app.setup.pending_install.is_none());
+    assert!(app.binary_state.setup.pending_install.is_none());
     assert!(!app.should_quit);
 
     app.handle_key(key(KeyCode::Enter)).await;
-    assert!(app.setup.pending_install.is_some());
+    assert!(app.binary_state.setup.pending_install.is_some());
     app.handle_key(key(KeyCode::Esc)).await;
-    assert!(app.setup.pending_install.is_none());
+    assert!(app.binary_state.setup.pending_install.is_none());
     assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
 }
 
@@ -294,21 +303,21 @@ async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
 async fn ctrl_c_clears_unverified_install_confirmation() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.setup.pending_install = Some(PathBuf::from("/inbox/raw-sing-box"));
+    app.binary_state.setup.pending_install = Some(PathBuf::from("/inbox/raw-sing-box"));
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
         .await;
-    assert!(app.setup.pending_install.is_none());
+    assert!(app.binary_state.setup.pending_install.is_none());
     assert!(!app.should_quit);
 }
 
 #[tokio::test]
 async fn rollback_done_updates_the_current_version() {
     let (mut app, _dir) = test_app().await;
-    app.binary_installed = true;
-    app.binary_version = Some("1.15.0".to_string());
-    app.previous_binary_available = true;
-    app.previous_binary_version = Some("1.14.4".to_string());
-    app.setup.rollback_in_flight = true;
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.15.0".to_string());
+    app.binary_state.previous_binary_available = true;
+    app.binary_state.previous_binary_version = Some("1.14.4".to_string());
+    app.binary_state.setup.rollback_in_flight = true;
     let metadata = BinaryMetadata {
         version: "1.14.4".to_string(),
         source: "test".to_string(),
@@ -317,8 +326,8 @@ async fn rollback_done_updates_the_current_version() {
         verified: true,
     };
     app.handle_event(AppEvent::RollbackDone(Ok(metadata))).await;
-    assert_eq!(app.binary_version.as_deref(), Some("1.14.4"));
-    assert!(!app.setup.rollback_in_flight);
+    assert_eq!(app.binary_state.binary_version.as_deref(), Some("1.14.4"));
+    assert!(!app.binary_state.setup.rollback_in_flight);
     assert!(app
         .ui_state
         .message

@@ -15,8 +15,8 @@ impl App {
             self.ui_state.restart_confirm = false;
             self.ui_state.rollback_confirm = false;
             self.ui_state.subscription_delete = None;
-            self.setup.pending_install = None;
-            self.setup.message = None;
+            self.binary_state.setup.pending_install = None;
+            self.binary_state.setup.message = None;
             self.detach_clients();
             return;
         }
@@ -49,12 +49,12 @@ impl App {
                 }
             }
         }
-        if self.setup.pending_install.is_some() {
+        if self.binary_state.setup.pending_install.is_some() {
             if key.code == KeyCode::Enter {
                 self.install_selected().await;
             } else {
-                self.setup.pending_install = None;
-                self.setup.message = None;
+                self.binary_state.setup.pending_install = None;
+                self.binary_state.setup.message = None;
             }
             return;
         }
@@ -243,9 +243,9 @@ impl App {
     pub(super) fn open_setup_overlay(&mut self) {
         self.close_overlay();
         self.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-        self.setup.pending_install = None;
-        self.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
-        self.setup.message = None;
+        self.binary_state.setup.pending_install = None;
+        self.binary_state.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
+        self.binary_state.setup.message = None;
         self.refresh_previous_binary_state();
         self.maybe_check_binary_update();
     }
@@ -575,7 +575,7 @@ impl App {
     }
 
     pub(super) fn move_setup_selection(&mut self, delta: i32) {
-        let count = self.setup.candidates.len();
+        let count = self.binary_state.setup.candidates.len();
         if let Some(Overlay::Setup { selected }) = self.ui_state.overlay.as_mut() {
             if count == 0 {
                 *selected = 0;
@@ -587,18 +587,18 @@ impl App {
     }
 
     pub(super) fn jump_setup_selection(&mut self, bottom: bool) {
-        let count = self.setup.candidates.len();
+        let count = self.binary_state.setup.candidates.len();
         if let Some(Overlay::Setup { selected }) = self.ui_state.overlay.as_mut() {
             *selected = if bottom { count.saturating_sub(1) } else { 0 };
         }
     }
 
     pub(super) fn rescan_inbox(&mut self) {
-        self.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
+        self.binary_state.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
         if let Some(Overlay::Setup { selected }) = self.ui_state.overlay.as_mut() {
             *selected = 0;
         }
-        self.setup.message = None;
+        self.binary_state.setup.message = None;
     }
 
     pub(super) async fn handle_setup_overlay_key(&mut self, key: KeyEvent) {

@@ -183,9 +183,9 @@ impl App {
                 .subscription_state
                 .pending_restart_subscription
                 .is_some()
-            || self.setup.downloading
-            || self.setup.rollback_in_flight
-            || self.install_in_flight
+            || self.binary_state.setup.downloading
+            || self.binary_state.setup.rollback_in_flight
+            || self.binary_state.install_in_flight
         {
             return;
         }

@@ -30,6 +30,7 @@ use crate::subscription::{self, merge_nodes, FetchOptions, SubscriptionRuntime};
 use crate::text::{sanitize_display, sanitize_owned};
 use crate::view::{BinaryStatus, ConfigView, DaemonStatus, View};
 
+mod binary_state;
 mod health;
 mod keys;
 mod metrics_state;
@@ -39,6 +40,7 @@ mod subscriptions;
 mod ui_state;
 mod updates;
 
+use binary_state::BinaryState;
 use health::HealthState;
 use metrics_state::MetricsState;
 use proxy::ProxyRuntime;
@@ -280,17 +282,8 @@ pub struct App {
     pub(crate) ui_state: UiState,
     pub(crate) proxy_runtime: ProxyRuntime,
     pub(crate) metrics_state: MetricsState,
+    pub(crate) binary_state: BinaryState,
     subscription_state: SubscriptionState,
-    pub binary_version: Option<String>,
-    pub binary_verified: Option<bool>,
-    pub binary_installed: bool,
-    pub latest_binary_version: Option<String>,
-    pub previous_binary_available: bool,
-    pub previous_binary_version: Option<String>,
-    update_check_in_flight: bool,
-    last_update_check: Option<Instant>,
-    pub setup: SetupState,
-    install_in_flight: bool,
     managed: bool,
     service: Option<ServiceIdentity>,
     pub should_quit: bool,
@@ -381,8 +374,8 @@ impl App {
 
     fn close_overlay(&mut self) {
         if matches!(self.ui_state.overlay, Some(Overlay::Setup { .. })) {
-            self.setup.pending_install = None;
-            self.setup.message = None;
+            self.binary_state.setup.pending_install = None;
+            self.binary_state.setup.message = None;
             self.ui_state.rollback_confirm = false;
         }
         self.ui_state.overlay = None;
@@ -461,16 +454,13 @@ impl App {
                 subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
                 ..SubscriptionState::default()
             },
-            binary_version,
-            binary_verified,
-            binary_installed,
-            latest_binary_version: None,
-            previous_binary_available: false,
-            previous_binary_version: None,
-            update_check_in_flight: false,
-            last_update_check: None,
-            setup,
-            install_in_flight: false,
+            binary_state: BinaryState {
+                binary_version,
+                binary_verified,
+                binary_installed,
+                setup,
+                ..BinaryState::default()
+            },
             managed: false,
             service: None,
             should_quit: false,
@@ -529,11 +519,11 @@ impl App {
         };
         let lan_password_set = !self.config.lan_password.is_empty();
         let config = ConfigView::from_config(&self.config);
-        let binary_status = if !self.binary_installed {
+        let binary_status = if !self.binary_state.binary_installed {
             BinaryStatus::NotInstalled
         } else if let (Some(latest), Some(current)) = (
-            self.latest_binary_version.as_deref(),
-            self.binary_version.as_deref(),
+            self.binary_state.latest_binary_version.as_deref(),
+            self.binary_state.binary_version.as_deref(),
         ) {
             if is_newer_version(latest, current) {
                 BinaryStatus::UpgradeAvailable
@@ -602,14 +592,22 @@ impl App {
             down_speed: self.metrics_state.down_speed,
             local_ips: self.metrics_state.local_ips.clone(),
             proxy_ips: self.metrics_state.proxy_ips.clone(),
-            binary_version: self.binary_version.clone().map(sanitize_owned),
-            binary_verified: self.binary_verified,
+            binary_version: self.binary_state.binary_version.clone().map(sanitize_owned),
+            binary_verified: self.binary_state.binary_verified,
             binary_status,
-            latest_binary_version: self.latest_binary_version.clone().map(sanitize_owned),
-            previous_binary_available: self.previous_binary_available,
-            previous_binary_version: self.previous_binary_version.clone().map(sanitize_owned),
+            latest_binary_version: self
+                .binary_state
+                .latest_binary_version
+                .clone()
+                .map(sanitize_owned),
+            previous_binary_available: self.binary_state.previous_binary_available,
+            previous_binary_version: self
+                .binary_state
+                .previous_binary_version
+                .clone()
+                .map(sanitize_owned),
             setup: {
-                let mut setup = self.setup.clone();
+                let mut setup = self.binary_state.setup.clone();
                 setup.message = setup.message.map(sanitize_owned);
                 for candidate in &mut setup.candidates {
                     candidate.label = sanitize_owned(std::mem::take(&mut candidate.label));
@@ -876,54 +874,56 @@ impl App {
                 self.retry_pending_start();
             }
             AppEvent::DownloadDone(result) => {
-                self.setup.downloading = false;
+                self.binary_state.setup.downloading = false;
                 match result {
                     Ok(metadata) => {
-                        self.binary_version = Some(metadata.version.clone());
-                        self.binary_verified = Some(metadata.verified);
-                        self.binary_installed = true;
-                        self.latest_binary_version = Some(metadata.version.clone());
-                        self.last_update_check = Some(Instant::now());
+                        self.binary_state.binary_version = Some(metadata.version.clone());
+                        self.binary_state.binary_verified = Some(metadata.verified);
+                        self.binary_state.binary_installed = true;
+                        self.binary_state.latest_binary_version = Some(metadata.version.clone());
+                        self.binary_state.last_update_check = Some(Instant::now());
                         self.notify(format!(
                             "{} {}",
                             self.text().msg_binary_installed,
                             metadata.version
                         ));
-                        self.setup.message = None;
+                        self.binary_state.setup.message = None;
                         self.refresh_previous_binary_state();
                         self.switch_page(Page::Dashboard);
                         self.auto_restart_after_change();
                     }
                     Err(err) => {
-                        self.setup.message = Some(format!("{}: {err}", self.text().setup_failed));
+                        self.binary_state.setup.message =
+                            Some(format!("{}: {err}", self.text().setup_failed));
                         self.ui_state.last_error = Some(err);
                     }
                 }
             }
             AppEvent::InstallDone(result) => {
-                self.install_in_flight = false;
-                self.setup.installing = false;
+                self.binary_state.install_in_flight = false;
+                self.binary_state.setup.installing = false;
                 match result {
                     Ok(metadata) => {
-                        self.binary_version = Some(metadata.version.clone());
-                        self.binary_verified = Some(metadata.verified);
-                        self.binary_installed = true;
-                        self.latest_binary_version = None;
-                        self.last_update_check = None;
+                        self.binary_state.binary_version = Some(metadata.version.clone());
+                        self.binary_state.binary_verified = Some(metadata.verified);
+                        self.binary_state.binary_installed = true;
+                        self.binary_state.latest_binary_version = None;
+                        self.binary_state.last_update_check = None;
                         self.notify(format!(
                             "{} {}",
                             self.text().msg_binary_installed,
                             metadata.version
                         ));
-                        self.setup.message = None;
-                        self.setup.pending_install = None;
+                        self.binary_state.setup.message = None;
+                        self.binary_state.setup.pending_install = None;
                         self.refresh_previous_binary_state();
                         self.switch_page(Page::Dashboard);
                         self.maybe_check_binary_update();
                         self.auto_restart_after_change();
                     }
                     Err(err) => {
-                        self.setup.message = Some(format!("{}: {err}", self.text().setup_failed));
+                        self.binary_state.setup.message =
+                            Some(format!("{}: {err}", self.text().setup_failed));
                         self.ui_state.last_error = Some(err);
                     }
                 }
@@ -1291,14 +1291,14 @@ impl App {
                 }
             }
             AppEvent::UpdateCheckDone(result) => {
-                self.update_check_in_flight = false;
+                self.binary_state.update_check_in_flight = false;
                 match result {
                     Ok(version) => {
                         self.logger.app(
                             LogLevel::Info,
                             format!("latest sing-box release: {version}"),
                         );
-                        self.latest_binary_version = Some(version);
+                        self.binary_state.latest_binary_version = Some(version);
                     }
                     Err(err) => {
                         self.logger.app(
@@ -1309,14 +1309,14 @@ impl App {
                 }
             }
             AppEvent::RollbackDone(result) => {
-                self.setup.rollback_in_flight = false;
+                self.binary_state.setup.rollback_in_flight = false;
                 self.ui_state.rollback_confirm = false;
                 match result {
                     Ok(metadata) => {
-                        self.binary_version = Some(metadata.version.clone());
-                        self.binary_verified = Some(metadata.verified);
-                        self.binary_installed = true;
-                        self.setup.message = None;
+                        self.binary_state.binary_version = Some(metadata.version.clone());
+                        self.binary_state.binary_verified = Some(metadata.verified);
+                        self.binary_state.binary_installed = true;
+                        self.binary_state.setup.message = None;
                         self.refresh_previous_binary_state();
                         self.notify(format!(
                             "{} {}",
@@ -1330,7 +1330,7 @@ impl App {
                         self.auto_restart_after_change();
                     }
                     Err(err) => {
-                        self.setup.message =
+                        self.binary_state.setup.message =
                             Some(format!("{}: {err}", self.text().setup_switch_failed));
                         self.ui_state.last_error = Some(err);
                     }
@@ -1560,13 +1560,13 @@ impl App {
             BackgroundTask::DelaySweep => self.metrics_state.delay_sweep_running = false,
             BackgroundTask::HealthProbe => self.health.probe_in_flight = false,
             BackgroundTask::Recovery => self.health.recovery_in_flight = false,
-            BackgroundTask::BinaryDownload => self.setup.downloading = false,
+            BackgroundTask::BinaryDownload => self.binary_state.setup.downloading = false,
             BackgroundTask::BinaryInstall => {
-                self.install_in_flight = false;
-                self.setup.installing = false;
+                self.binary_state.install_in_flight = false;
+                self.binary_state.setup.installing = false;
             }
-            BackgroundTask::BinaryRollback => self.setup.rollback_in_flight = false,
-            BackgroundTask::BinaryUpdateCheck => self.update_check_in_flight = false,
+            BackgroundTask::BinaryRollback => self.binary_state.setup.rollback_in_flight = false,
+            BackgroundTask::BinaryUpdateCheck => self.binary_state.update_check_in_flight = false,
             BackgroundTask::Preflight => {
                 self.proxy_runtime.preflight_in_flight = false;
                 self.proxy_runtime.restart_in_progress = false;
@@ -1642,7 +1642,9 @@ impl App {
     }
 
     fn setup_busy(&self) -> bool {
-        self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight
+        self.binary_state.setup.downloading
+            || self.binary_state.setup.rollback_in_flight
+            || self.binary_state.install_in_flight
     }
 
     fn proxy_busy(&self) -> bool {

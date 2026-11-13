@@ -127,8 +127,8 @@ async fn renders_english_when_selected() {
 async fn setup_wrapped_values_stay_aligned_with_the_value_column() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
     app.paths.bin_dir = std::path::PathBuf::from(format!("/tmp/{}", "a".repeat(100)));
     let view = app.view();
     let rows = rendered_rows(&view, 60, 30);
@@ -156,8 +156,8 @@ async fn setup_wrapped_values_stay_aligned_with_the_value_column() {
 async fn setup_page_shows_versions_status_and_neutral_hint() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("当前版本v1.14.4"), "{compact}");
@@ -171,9 +171,9 @@ async fn setup_page_shows_versions_status_and_neutral_hint() {
     assert!(compact.contains("b切换"), "{compact}");
     assert!(!compact.contains("自动下载失败"), "{compact}");
 
-    app.latest_binary_version = Some("1.15.0".to_string());
-    app.previous_binary_available = true;
-    app.previous_binary_version = Some("1.14.0".to_string());
+    app.binary_state.latest_binary_version = Some("1.15.0".to_string());
+    app.binary_state.previous_binary_available = true;
+    app.binary_state.previous_binary_version = Some("1.14.0".to_string());
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("最新版本v1.15.0"), "{compact}");
@@ -187,7 +187,7 @@ async fn setup_page_shows_versions_status_and_neutral_hint() {
     assert!(compact.contains("再按b切换版本"), "{last_line}");
 
     app.ui_state.rollback_confirm = false;
-    app.setup.rollback_in_flight = true;
+    app.binary_state.setup.rollback_in_flight = true;
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("正在切换sing-box"), "{compact}");
@@ -203,8 +203,8 @@ async fn english_settings_and_setup_hints_fit_at_eighty_columns() {
     assert!(compact.contains("Enteraction"), "{compact}");
 
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
     let content = rendered_with_width(&app, 80, 24);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("sing-boxlogINFO"), "{compact}");
@@ -221,11 +221,11 @@ async fn english_settings_and_setup_hints_fit_at_eighty_columns() {
 async fn setup_fits_key_hints_at_eighty_columns() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
-    app.latest_binary_version = Some("1.15.0".to_string());
-    app.previous_binary_available = true;
-    app.previous_binary_version = Some("1.14.0".to_string());
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
+    app.binary_state.latest_binary_version = Some("1.15.0".to_string());
+    app.binary_state.previous_binary_available = true;
+    app.binary_state.previous_binary_version = Some("1.14.0".to_string());
     let content = rendered_with_width(&app, 80, 24);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("sing-box日志"), "{compact}");
@@ -240,16 +240,16 @@ async fn setup_fits_key_hints_at_eighty_columns() {
 async fn setup_shows_binary_verification_state() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
-    app.binary_verified = Some(false);
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
+    app.binary_state.binary_verified = Some(false);
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
     assert!(content.contains("校验未校验"), "{content}");
 
-    app.binary_verified = Some(true);
+    app.binary_state.binary_verified = Some(true);
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -261,8 +261,8 @@ async fn setup_shows_binary_verification_state() {
 async fn setup_hides_current_version_when_not_installed() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = false;
-    app.latest_binary_version = Some("1.15.0".to_string());
+    app.binary_state.binary_installed = false;
+    app.binary_state.latest_binary_version = Some("1.15.0".to_string());
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(!compact.contains("当前版本"), "{compact}");
@@ -276,10 +276,10 @@ async fn setup_hides_current_version_when_not_installed() {
 async fn setup_keeps_two_spaces_between_english_labels_and_values() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
-    app.previous_binary_available = true;
-    app.previous_binary_version = Some("1.14.0".to_string());
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
+    app.binary_state.previous_binary_available = true;
+    app.binary_state.previous_binary_version = Some("1.14.0".to_string());
     let content = rendered(&app, 30);
     assert!(content.contains("Previous version  v1.14.0"), "{content}");
 }
@@ -288,9 +288,9 @@ async fn setup_keeps_two_spaces_between_english_labels_and_values() {
 async fn setup_candidates_use_the_standard_selection_style() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
-    app.setup.candidates = vec![
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
+    app.binary_state.setup.candidates = vec![
         crate::singbox::binary::InboxCandidate {
             path: std::path::PathBuf::from("/inbox/cand-a.tar.gz"),
             label: "cand-a.tar.gz".to_string(),
@@ -343,7 +343,7 @@ async fn setup_candidates_use_the_standard_selection_style() {
 async fn setup_unverified_install_confirmation_is_in_the_footer() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.setup.pending_install = Some(std::path::PathBuf::from("/inbox/raw"));
+    app.binary_state.setup.pending_install = Some(std::path::PathBuf::from("/inbox/raw"));
     let content = rendered(&app, 30);
     let last_line: String = content.chars().skip(100 * 29).collect();
     let compact: String = last_line.chars().filter(|c| !c.is_whitespace()).collect();
@@ -355,7 +355,7 @@ async fn setup_unverified_install_confirmation_is_in_the_footer() {
 async fn setup_shows_installing_status() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.setup.installing = true;
+    app.binary_state.setup.installing = true;
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("正在安装sing-box"), "{compact}");
@@ -370,8 +370,8 @@ async fn setup_title_hints_fit_at_sixty_columns_in_both_languages() {
     ] {
         let (mut app, _dir) = test_app(lang).await;
         app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-        app.binary_installed = true;
-        app.binary_version = Some("1.14.4".to_string());
+        app.binary_state.binary_installed = true;
+        app.binary_state.binary_version = Some("1.14.4".to_string());
         let content = rendered_with_width(&app, 60, 24);
         let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(compact.contains(hints), "{lang:?}: {compact}");
@@ -382,8 +382,8 @@ async fn setup_title_hints_fit_at_sixty_columns_in_both_languages() {
 async fn setup_download_status_is_not_duplicated() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.setup.downloading = true;
-    app.setup.message = None;
+    app.binary_state.setup.downloading = true;
+    app.binary_state.setup.message = None;
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert_eq!(compact.matches("正在下载sing-box").count(), 1, "{compact}");
@@ -404,13 +404,13 @@ async fn settings_shows_singbox_info_status() {
     assert!(compact.contains("sing-box信息"), "{compact}");
     assert!(compact.contains("未安装"), "{compact}");
 
-    app.binary_installed = true;
-    app.binary_version = Some("1.14.4".to_string());
+    app.binary_state.binary_installed = true;
+    app.binary_state.binary_version = Some("1.14.4".to_string());
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("已安装"), "{compact}");
 
-    app.latest_binary_version = Some("1.15.0".to_string());
+    app.binary_state.latest_binary_version = Some("1.15.0".to_string());
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("可升级"), "{compact}");
@@ -1234,7 +1234,7 @@ async fn header_marks_a_stale_clash_api() {
 async fn setup_scrolls_the_selected_candidate_into_view() {
     let (mut app, _dir) = test_app(Lang::En).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.setup.candidates = (0..30)
+    app.binary_state.setup.candidates = (0..30)
         .map(|index| crate::singbox::binary::InboxCandidate {
             path: std::path::PathBuf::from(format!("/inbox/cand-{index}")),
             label: format!("cand-{index:02}"),
@@ -1790,7 +1790,7 @@ async fn dashboard_shows_the_active_node_delay() {
 async fn dashboard_shows_app_version_and_prefixed_singbox_version() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
     app.ui_state.page = Page::Dashboard;
-    app.binary_version = Some("1.14.4".to_string());
+    app.binary_state.binary_version = Some("1.14.4".to_string());
     let content: String = rendered(&app, 40)
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -2371,7 +2371,7 @@ async fn animation_runs_only_while_motion_is_visible() {
     app.ui_state.message_at = None;
 
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.setup.downloading = true;
+    app.binary_state.setup.downloading = true;
     assert!(needs_animation(&app.view()));
     assert_eq!(
         animation_period(&app.view()),
