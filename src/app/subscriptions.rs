@@ -35,7 +35,7 @@ impl App {
         let configs: Vec<SubscriptionConfig> =
             self.config.enabled_subscriptions().cloned().collect();
         if configs.is_empty() {
-            self.last_error = Some(self.text().msg_no_enabled_subscriptions.to_string());
+            self.ui_state.last_error = Some(self.text().msg_no_enabled_subscriptions.to_string());
             return;
         }
         self.subscription_state.refreshing_subscriptions = true;
@@ -286,7 +286,7 @@ impl App {
 
     /// Shared tail for full and single-subscription refresh results.
     pub(super) fn finalize_subscription_change(&mut self) {
-        self.last_node_sort = None;
+        self.ui_state.last_node_sort = None;
         self.sort_nodes_if_visible();
         self.save_subscription_cache();
         self.refresh_last_error_from_subscriptions();
@@ -323,9 +323,9 @@ impl App {
             })
             .collect();
         if !errors.is_empty() {
-            self.last_error = Some(errors.join("; "));
+            self.ui_state.last_error = Some(errors.join("; "));
         } else if self.proxy_runtime.status != ProxyStatus::Failed {
-            self.last_error = None;
+            self.ui_state.last_error = None;
         }
     }
 

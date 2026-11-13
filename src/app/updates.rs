@@ -51,8 +51,8 @@ impl App {
             self.notify(self.text().msg_rollback_unavailable);
             return;
         }
-        self.rollback_confirm = true;
-        self.message = None;
+        self.ui_state.rollback_confirm = true;
+        self.ui_state.message = None;
     }
 
     pub(super) fn perform_rollback(&mut self) {

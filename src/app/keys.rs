@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 impl App {
     pub(super) async fn handle_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.overlay.is_some() {
+            if self.ui_state.overlay.is_some() {
                 self.close_overlay();
                 return;
             }
-            self.restart_confirm = false;
-            self.rollback_confirm = false;
-            self.subscription_delete = None;
+            self.ui_state.restart_confirm = false;
+            self.ui_state.rollback_confirm = false;
+            self.ui_state.subscription_delete = None;
             self.setup.pending_install = None;
             self.setup.message = None;
             self.detach_clients();
@@ -32,19 +32,19 @@ impl App {
         {
             return;
         }
-        if self.rollback_confirm {
+        if self.ui_state.rollback_confirm {
             match key.code {
                 KeyCode::Char('b') => {
-                    self.rollback_confirm = false;
+                    self.ui_state.rollback_confirm = false;
                     self.perform_rollback();
                     return;
                 }
                 KeyCode::Esc => {
-                    self.rollback_confirm = false;
+                    self.ui_state.rollback_confirm = false;
                     return;
                 }
                 _ => {
-                    self.rollback_confirm = false;
+                    self.ui_state.rollback_confirm = false;
                     return;
                 }
             }
@@ -58,84 +58,90 @@ impl App {
             }
             return;
         }
-        if let Some(kind) = self.overlay.as_ref().map(Overlay::kind) {
+        if let Some(kind) = self.ui_state.overlay.as_ref().map(Overlay::kind) {
             self.handle_overlay_key(kind, key).await;
             return;
         }
-        if self.restart_confirm {
+        if self.ui_state.restart_confirm {
             match key.code {
                 KeyCode::Char('R') => {
-                    self.restart_confirm = false;
+                    self.ui_state.restart_confirm = false;
                     self.perform_restart();
                     return;
                 }
                 KeyCode::Esc => {
-                    self.restart_confirm = false;
+                    self.ui_state.restart_confirm = false;
                     return;
                 }
                 _ => {
-                    self.restart_confirm = false;
+                    self.ui_state.restart_confirm = false;
                     return;
                 }
             }
         }
-        if let Some(id) = self.subscription_delete.clone() {
+        if let Some(id) = self.ui_state.subscription_delete.clone() {
             match key.code {
                 KeyCode::Char('d') => {
-                    self.subscription_delete = None;
+                    self.ui_state.subscription_delete = None;
                     self.delete_subscription(&id);
                     return;
                 }
                 KeyCode::Esc => {
-                    self.subscription_delete = None;
+                    self.ui_state.subscription_delete = None;
                     return;
                 }
                 _ => {
-                    self.subscription_delete = None;
+                    self.ui_state.subscription_delete = None;
                     return;
                 }
             }
         }
-        if self.page == Page::Dashboard {
+        if self.ui_state.page == Page::Dashboard {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    self.dashboard_scroll = self
+                    self.ui_state.dashboard_scroll = self
+                        .ui_state
                         .dashboard_scroll
                         .saturating_add(1)
-                        .min(self.dashboard_max_scroll);
+                        .min(self.ui_state.dashboard_max_scroll);
                     return;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    self.dashboard_scroll = self.dashboard_scroll.saturating_sub(1);
+                    self.ui_state.dashboard_scroll =
+                        self.ui_state.dashboard_scroll.saturating_sub(1);
                     return;
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
-                    self.dashboard_scroll = 0;
+                    self.ui_state.dashboard_scroll = 0;
                     return;
                 }
                 KeyCode::Char('G') | KeyCode::End => {
-                    self.dashboard_scroll = self.dashboard_max_scroll;
+                    self.ui_state.dashboard_scroll = self.ui_state.dashboard_max_scroll;
                     return;
                 }
                 _ => {}
             }
         }
-        if self.page == Page::Help {
+        if self.ui_state.page == Page::Help {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    self.help_scroll = self.help_scroll.saturating_add(1).min(self.help_max_scroll);
+                    self.ui_state.help_scroll = self
+                        .ui_state
+                        .help_scroll
+                        .saturating_add(1)
+                        .min(self.ui_state.help_max_scroll);
                     return;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                    self.ui_state.help_scroll = self.ui_state.help_scroll.saturating_sub(1);
                     return;
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
-                    self.help_scroll = 0;
+                    self.ui_state.help_scroll = 0;
                     return;
                 }
                 KeyCode::Char('G') | KeyCode::End => {
-                    self.help_scroll = self.help_max_scroll;
+                    self.ui_state.help_scroll = self.ui_state.help_max_scroll;
                     return;
                 }
                 _ => {}
@@ -144,21 +150,21 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.detach_clients(),
             KeyCode::Esc => {
-                if self.page == Page::Help {
+                if self.ui_state.page == Page::Help {
                     self.return_from_help();
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                let target = if MAIN_PAGES.contains(&self.page) {
-                    self.page.next_main()
+                let target = if MAIN_PAGES.contains(&self.ui_state.page) {
+                    self.ui_state.page.next_main()
                 } else {
                     Page::Dashboard
                 };
                 self.switch_page(target);
             }
             KeyCode::Char('h') | KeyCode::Left => {
-                let target = if MAIN_PAGES.contains(&self.page) {
-                    self.page.previous_main()
+                let target = if MAIN_PAGES.contains(&self.ui_state.page) {
+                    self.ui_state.page.previous_main()
                 } else {
                     Page::Settings
                 };
@@ -169,43 +175,43 @@ impl App {
             KeyCode::Char('s') => self.start_or_stop(),
             KeyCode::Char('R') => self.request_restart(),
             KeyCode::Char('r') => self.refresh_current().await,
-            KeyCode::Char('d') if self.page == Page::Subscriptions => {
+            KeyCode::Char('d') if self.ui_state.page == Page::Subscriptions => {
                 self.request_delete_subscription();
             }
-            KeyCode::Char('n') if self.page == Page::Subscriptions => {
-                self.overlay = Some(Overlay::Edit(EditForm::Subscription(
+            KeyCode::Char('n') if self.ui_state.page == Page::Subscriptions => {
+                self.ui_state.overlay = Some(Overlay::Edit(EditForm::Subscription(
                     SubscriptionForm::new(),
                 )));
-                self.message = None;
+                self.ui_state.message = None;
             }
-            KeyCode::Char('e') if self.page == Page::Subscriptions => {
+            KeyCode::Char('e') if self.ui_state.page == Page::Subscriptions => {
                 self.open_edit_subscription_form();
             }
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => self.jump_selection(false),
             KeyCode::Char('G') | KeyCode::End => self.jump_selection(true),
-            KeyCode::Char('f') if self.page == Page::Logs => self.toggle_log_follow(),
-            KeyCode::Char('d') if self.page == Page::Logs => self.cycle_log_timestamp(),
-            KeyCode::Char('v') if self.page == Page::Logs => self.cycle_log_filter(),
-            KeyCode::Char('x') if self.page == Page::Logs => self.cycle_log_source(),
-            KeyCode::Char('c') if self.page == Page::Logs => {
+            KeyCode::Char('f') if self.ui_state.page == Page::Logs => self.toggle_log_follow(),
+            KeyCode::Char('d') if self.ui_state.page == Page::Logs => self.cycle_log_timestamp(),
+            KeyCode::Char('v') if self.ui_state.page == Page::Logs => self.cycle_log_filter(),
+            KeyCode::Char('x') if self.ui_state.page == Page::Logs => self.cycle_log_source(),
+            KeyCode::Char('c') if self.ui_state.page == Page::Logs => {
                 self.logger.clear_view();
-                self.selected = 0;
-                self.log_follow = true;
+                self.ui_state.selected = 0;
+                self.ui_state.log_follow = true;
             }
-            KeyCode::Char('a') if self.page == Page::Nodes => self.select_node_auto(),
-            KeyCode::Char('n') if self.page == Page::Nodes => self.toggle_node_sort(),
-            KeyCode::Char('t') if self.page == Page::Nodes => self.test_node_delay(),
+            KeyCode::Char('a') if self.ui_state.page == Page::Nodes => self.select_node_auto(),
+            KeyCode::Char('n') if self.ui_state.page == Page::Nodes => self.toggle_node_sort(),
+            KeyCode::Char('t') if self.ui_state.page == Page::Nodes => self.test_node_delay(),
             KeyCode::Enter => self.handle_enter().await,
             _ => {}
         }
     }
 
     pub(super) async fn handle_enter(&mut self) {
-        match self.page {
+        match self.ui_state.page {
             Page::Dashboard => {
-                if self.last_error.is_some() {
+                if self.ui_state.last_error.is_some() {
                     self.switch_page(Page::Logs);
                 }
             }
@@ -219,24 +225,24 @@ impl App {
     }
 
     pub(super) fn toggle_help(&mut self) {
-        if self.page == Page::Help {
+        if self.ui_state.page == Page::Help {
             self.return_from_help();
             return;
         }
-        self.help_return = Some(self.page);
-        self.help_scroll = 0;
+        self.ui_state.help_return = Some(self.ui_state.page);
+        self.ui_state.help_scroll = 0;
         self.switch_page(Page::Help);
     }
 
     pub(super) fn return_from_help(&mut self) {
-        let target = self.help_return.take().unwrap_or(Page::Dashboard);
-        self.help_scroll = 0;
+        let target = self.ui_state.help_return.take().unwrap_or(Page::Dashboard);
+        self.ui_state.help_scroll = 0;
         self.switch_page(target);
     }
 
     pub(super) fn open_setup_overlay(&mut self) {
         self.close_overlay();
-        self.overlay = Some(Overlay::Setup { selected: 0 });
+        self.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
         self.setup.pending_install = None;
         self.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
         self.setup.message = None;
@@ -252,6 +258,7 @@ impl App {
 
     pub(super) fn copy_connection_target(&mut self) {
         let selected = self
+            .ui_state
             .selected
             .min(self.metrics.connections.len().saturating_sub(1));
         let Some(connection) = self.metrics.connections.get(selected) else {
@@ -265,9 +272,9 @@ impl App {
     }
 
     pub(super) fn open_log_detail(&mut self) {
-        if let Some(line) = self.log_lines().get(self.selected).cloned() {
-            self.overlay = Some(Overlay::LogDetail { line, scroll: 0 });
-            self.log_detail_max_scroll = 0;
+        if let Some(line) = self.log_lines().get(self.ui_state.selected).cloned() {
+            self.ui_state.overlay = Some(Overlay::LogDetail { line, scroll: 0 });
+            self.ui_state.log_detail_max_scroll = 0;
         }
     }
 
@@ -280,22 +287,23 @@ impl App {
     }
 
     pub(super) fn switch_page(&mut self, page: Page) {
-        if self.page == page {
+        if self.ui_state.page == page {
             return;
         }
-        self.page_selection[self.page.index()] = self.selected;
-        if self.page == Page::Help && page != Page::Help {
-            self.help_return = None;
+        self.ui_state.page_selection[self.ui_state.page.index()] = self.ui_state.selected;
+        if self.ui_state.page == Page::Help && page != Page::Help {
+            self.ui_state.help_return = None;
         }
         self.close_overlay();
-        self.page = page;
-        self.subscription_delete = None;
-        self.rollback_confirm = false;
+        self.ui_state.page = page;
+        self.ui_state.subscription_delete = None;
+        self.ui_state.rollback_confirm = false;
         let max = self.max_selection_for(page);
-        if page == Page::Logs && self.log_follow {
-            self.selected = max.saturating_sub(1);
+        if page == Page::Logs && self.ui_state.log_follow {
+            self.ui_state.selected = max.saturating_sub(1);
         } else {
-            self.selected = self.page_selection[page.index()].min(max.saturating_sub(1));
+            self.ui_state.selected =
+                self.ui_state.page_selection[page.index()].min(max.saturating_sub(1));
         }
         if page == Page::Nodes {
             self.sort_nodes_preserving_selection();
@@ -307,31 +315,31 @@ impl App {
     }
 
     pub(super) fn move_selection(&mut self, delta: i32) {
-        if self.page == Page::Logs {
-            self.log_follow = false;
+        if self.ui_state.page == Page::Logs {
+            self.ui_state.log_follow = false;
         }
         let max = self.max_selection();
         if max == 0 {
-            self.selected = 0;
+            self.ui_state.selected = 0;
             return;
         }
-        let next = self.selected as i32 + delta;
-        self.selected = next.clamp(0, max as i32 - 1) as usize;
-        if self.page == Page::Logs && self.selected == max - 1 {
-            self.log_follow = true;
+        let next = self.ui_state.selected as i32 + delta;
+        self.ui_state.selected = next.clamp(0, max as i32 - 1) as usize;
+        if self.ui_state.page == Page::Logs && self.ui_state.selected == max - 1 {
+            self.ui_state.log_follow = true;
         }
     }
 
     pub(super) fn jump_selection(&mut self, bottom: bool) {
-        if self.page == Page::Logs {
-            self.log_follow = bottom;
+        if self.ui_state.page == Page::Logs {
+            self.ui_state.log_follow = bottom;
         }
         let max = self.max_selection();
-        self.selected = if bottom { max.saturating_sub(1) } else { 0 };
+        self.ui_state.selected = if bottom { max.saturating_sub(1) } else { 0 };
     }
 
     pub(super) fn max_selection(&self) -> usize {
-        self.max_selection_for(self.page)
+        self.max_selection_for(self.ui_state.page)
     }
 
     pub(super) fn max_selection_for(&self, page: Page) -> usize {
@@ -346,7 +354,7 @@ impl App {
     }
 
     pub(super) fn toggle_node_sort(&mut self) {
-        self.node_sort = match self.node_sort {
+        self.ui_state.node_sort = match self.ui_state.node_sort {
             NodeSort::AutoLatency => NodeSort::Name,
             NodeSort::Name => NodeSort::AutoLatency,
         };
@@ -354,10 +362,11 @@ impl App {
     }
 
     pub(super) fn sort_nodes_if_visible(&mut self) {
-        if !(self.has_viewer() && self.page == Page::Nodes) {
+        if !(self.has_viewer() && self.ui_state.page == Page::Nodes) {
             return;
         }
         if self
+            .ui_state
             .last_node_sort
             .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
         {
@@ -368,38 +377,45 @@ impl App {
 
     pub(super) fn sort_nodes_preserving_selection(&mut self) {
         self.refresh_auto_tags_cache();
-        let selected_tag = self.nodes.get(self.selected).map(|node| node.tag.clone());
+        let selected_tag = self
+            .nodes
+            .get(self.ui_state.selected)
+            .map(|node| node.tag.clone());
         let auto_tags: HashSet<String> = self.auto_candidate_tags().into_iter().collect();
         sort_nodes(
             &mut self.nodes,
-            self.node_sort,
+            self.ui_state.node_sort,
             &auto_tags,
             &self.node_delays,
         );
-        self.selected = selected_tag
+        self.ui_state.selected = selected_tag
             .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
-            .unwrap_or_else(|| self.selected.min(self.nodes.len().saturating_sub(1)));
+            .unwrap_or_else(|| {
+                self.ui_state
+                    .selected
+                    .min(self.nodes.len().saturating_sub(1))
+            });
         // Sorting changes the node order, and the cache signature includes it.
         self.refresh_auto_tags_cache();
-        self.last_node_sort = Some(Instant::now());
+        self.ui_state.last_node_sort = Some(Instant::now());
     }
 
     pub fn log_lines(&self) -> Vec<LogLine> {
         self.logger
-            .recent_filtered(500, self.log_filter, self.log_source)
+            .recent_filtered(500, self.ui_state.log_filter, self.ui_state.log_source)
     }
 
     pub(super) fn log_count(&self) -> usize {
         self.logger
-            .count_recent(500, self.log_filter, self.log_source)
+            .count_recent(500, self.ui_state.log_filter, self.ui_state.log_source)
     }
 
     pub(super) fn toggle_log_follow(&mut self) {
-        self.log_follow = !self.log_follow;
-        if self.log_follow {
-            self.selected = self.max_selection().saturating_sub(1);
+        self.ui_state.log_follow = !self.ui_state.log_follow;
+        if self.ui_state.log_follow {
+            self.ui_state.selected = self.max_selection().saturating_sub(1);
         }
-        let state = if self.log_follow {
+        let state = if self.ui_state.log_follow {
             self.text().common_on
         } else {
             self.text().common_off
@@ -408,40 +424,40 @@ impl App {
     }
 
     pub(super) fn cycle_log_timestamp(&mut self) {
-        self.log_timestamp = self.log_timestamp.next();
+        self.ui_state.log_timestamp = self.ui_state.log_timestamp.next();
     }
 
     pub(super) fn cycle_log_filter(&mut self) {
-        self.log_filter = self.log_filter.next_filter();
+        self.ui_state.log_filter = self.ui_state.log_filter.next_filter();
         self.reset_log_selection();
         self.notify(format!(
             "{}: {}",
             self.text().logs_level,
-            self.log_filter.label()
+            self.ui_state.log_filter.label()
         ));
     }
 
     pub(super) fn cycle_log_source(&mut self) {
-        self.log_source = self.log_source.next();
+        self.ui_state.log_source = self.ui_state.log_source.next();
         self.reset_log_selection();
         self.notify(format!(
             "{}: {}",
             self.text().logs_source,
-            self.log_source.label()
+            self.ui_state.log_source.label()
         ));
     }
 
     pub(super) fn reset_log_selection(&mut self) {
         let max = self.max_selection();
-        if self.log_follow {
-            self.selected = max.saturating_sub(1);
+        if self.ui_state.log_follow {
+            self.ui_state.selected = max.saturating_sub(1);
         } else {
-            self.selected = self.selected.min(max.saturating_sub(1));
+            self.ui_state.selected = self.ui_state.selected.min(max.saturating_sub(1));
         }
     }
 
     pub(super) async fn refresh_current(&mut self) {
-        match self.page {
+        match self.ui_state.page {
             Page::Nodes => self.maybe_test_node_delays(true),
             Page::Subscriptions | Page::Dashboard => self.refresh_subscriptions(),
             _ => {
@@ -453,23 +469,31 @@ impl App {
     }
 
     pub(super) fn open_edit_subscription_form(&mut self) {
-        let Some(runtime) = self.subscription_state.subscriptions.get(self.selected) else {
+        let Some(runtime) = self
+            .subscription_state
+            .subscriptions
+            .get(self.ui_state.selected)
+        else {
             self.notify(self.text().subscriptions_empty);
             return;
         };
-        self.overlay = Some(Overlay::Edit(EditForm::Subscription(
+        self.ui_state.overlay = Some(Overlay::Edit(EditForm::Subscription(
             SubscriptionForm::edit(&runtime.config),
         )));
-        self.message = None;
+        self.ui_state.message = None;
     }
 
     pub(super) fn request_delete_subscription(&mut self) {
-        let Some(runtime) = self.subscription_state.subscriptions.get(self.selected) else {
+        let Some(runtime) = self
+            .subscription_state
+            .subscriptions
+            .get(self.ui_state.selected)
+        else {
             return;
         };
-        self.subscription_delete = Some(runtime.config.id.clone());
-        self.message = None;
-        self.message_at = None;
+        self.ui_state.subscription_delete = Some(runtime.config.id.clone());
+        self.ui_state.message = None;
+        self.ui_state.message_at = None;
     }
 
     pub(super) fn delete_subscription(&mut self, id: &str) {
@@ -486,7 +510,7 @@ impl App {
             return;
         }
         if let Err(err) = config.save(&self.paths.config_file) {
-            self.last_error = Some(err.to_string());
+            self.ui_state.last_error = Some(err.to_string());
             return;
         }
         self.config = config;
@@ -503,10 +527,10 @@ impl App {
             .subscriptions
             .retain(|runtime| runtime.config.id != id);
         self.nodes = merge_nodes(&self.subscription_state.subscriptions);
-        self.last_node_sort = None;
+        self.ui_state.last_node_sort = None;
         self.prune_node_state();
         self.sync_preferred_node();
-        self.selected = self.selected.min(
+        self.ui_state.selected = self.ui_state.selected.min(
             self.subscription_state
                 .subscriptions
                 .len()
@@ -533,7 +557,7 @@ impl App {
     }
 
     pub(super) fn setup_overlay_selected(&self) -> Option<usize> {
-        match &self.overlay {
+        match &self.ui_state.overlay {
             Some(Overlay::Setup { selected }) => Some(*selected),
             _ => None,
         }
@@ -541,7 +565,7 @@ impl App {
 
     pub(super) fn move_setup_selection(&mut self, delta: i32) {
         let count = self.setup.candidates.len();
-        if let Some(Overlay::Setup { selected }) = self.overlay.as_mut() {
+        if let Some(Overlay::Setup { selected }) = self.ui_state.overlay.as_mut() {
             if count == 0 {
                 *selected = 0;
                 return;
@@ -553,14 +577,14 @@ impl App {
 
     pub(super) fn jump_setup_selection(&mut self, bottom: bool) {
         let count = self.setup.candidates.len();
-        if let Some(Overlay::Setup { selected }) = self.overlay.as_mut() {
+        if let Some(Overlay::Setup { selected }) = self.ui_state.overlay.as_mut() {
             *selected = if bottom { count.saturating_sub(1) } else { 0 };
         }
     }
 
     pub(super) fn rescan_inbox(&mut self) {
         self.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
-        if let Some(Overlay::Setup { selected }) = self.overlay.as_mut() {
+        if let Some(Overlay::Setup { selected }) = self.ui_state.overlay.as_mut() {
             *selected = 0;
         }
         self.setup.message = None;
@@ -589,15 +613,15 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.scroll_log_detail(-1),
             KeyCode::Char('g') | KeyCode::Home => self.scroll_log_detail_to(0),
             KeyCode::Char('G') | KeyCode::End => {
-                self.scroll_log_detail_to(self.log_detail_max_scroll)
+                self.scroll_log_detail_to(self.ui_state.log_detail_max_scroll)
             }
             _ => {}
         }
     }
 
     pub(super) fn scroll_log_detail(&mut self, delta: i32) {
-        let max = self.log_detail_max_scroll;
-        if let Some(Overlay::LogDetail { scroll, .. }) = self.overlay.as_mut() {
+        let max = self.ui_state.log_detail_max_scroll;
+        if let Some(Overlay::LogDetail { scroll, .. }) = self.ui_state.overlay.as_mut() {
             *scroll = if delta >= 0 {
                 scroll.saturating_add(delta as usize).min(max)
             } else {
@@ -607,8 +631,8 @@ impl App {
     }
 
     pub(super) fn scroll_log_detail_to(&mut self, offset: usize) {
-        if let Some(Overlay::LogDetail { scroll, .. }) = self.overlay.as_mut() {
-            *scroll = offset.min(self.log_detail_max_scroll);
+        if let Some(Overlay::LogDetail { scroll, .. }) = self.ui_state.overlay.as_mut() {
+            *scroll = offset.min(self.ui_state.log_detail_max_scroll);
         }
     }
 
@@ -757,7 +781,7 @@ impl App {
                 self.subscription_state.subscriptions.push(placeholder);
             }
             self.nodes = merge_nodes(&self.subscription_state.subscriptions);
-            self.last_node_sort = None;
+            self.ui_state.last_node_sort = None;
             self.sync_preferred_node();
             self.save_subscription_cache();
             self.refresh_last_error_from_subscriptions();
@@ -781,16 +805,16 @@ impl App {
     }
 
     pub(super) fn open_keyword_form(&mut self, field: KeywordField) {
-        self.overlay = Some(Overlay::Edit(EditForm::Keyword(KeywordForm::from_config(
+        self.ui_state.overlay = Some(Overlay::Edit(EditForm::Keyword(KeywordForm::from_config(
             &self.config,
             field,
         ))));
-        self.message = None;
+        self.ui_state.message = None;
     }
 
     pub(super) fn activate_setting(&mut self) {
         let items = settings_items(self.config.allow_lan);
-        let Some(item) = items.get(self.selected).copied() else {
+        let Some(item) = items.get(self.ui_state.selected).copied() else {
             return;
         };
         if item.read_only() {
@@ -827,10 +851,10 @@ impl App {
     }
 
     pub(super) fn open_settings_form(&mut self) {
-        self.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
+        self.ui_state.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
             &self.config,
         ))));
-        self.message = None;
+        self.ui_state.message = None;
     }
 
     pub(super) fn handle_settings_form_key(&mut self, key: KeyEvent) {
@@ -891,7 +915,7 @@ impl App {
         let mut config = self.config.clone();
         config.app_log_level = config.app_log_level.next_filter();
         if let Err(err) = config.save(&self.paths.config_file) {
-            self.last_error = Some(err.to_string());
+            self.ui_state.last_error = Some(err.to_string());
             return;
         }
         self.config = config;

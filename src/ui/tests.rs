@@ -24,7 +24,7 @@ async fn test_app(lang: Lang) -> (App, TempDir) {
     config.language = lang;
     let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
     let mut app = App::new(config, paths, logger).await;
-    app.overlay = None;
+    app.ui_state.overlay = None;
     (app, dir)
 }
 
@@ -126,7 +126,7 @@ async fn renders_english_when_selected() {
 #[tokio::test]
 async fn setup_wrapped_values_stay_aligned_with_the_value_column() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = true;
     app.binary_version = Some("1.14.4".to_string());
     app.paths.bin_dir = std::path::PathBuf::from(format!("/tmp/{}", "a".repeat(100)));
@@ -155,7 +155,7 @@ async fn setup_wrapped_values_stay_aligned_with_the_value_column() {
 #[tokio::test]
 async fn setup_page_shows_versions_status_and_neutral_hint() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = true;
     app.binary_version = Some("1.14.4".to_string());
     let content = rendered(&app, 30);
@@ -180,13 +180,13 @@ async fn setup_page_shows_versions_status_and_neutral_hint() {
     assert!(compact.contains("上一版本v1.14.0"), "{compact}");
     assert!(compact.contains("状态可升级"), "{compact}");
 
-    app.rollback_confirm = true;
+    app.ui_state.rollback_confirm = true;
     let content = rendered(&app, 30);
     let last_line: String = content.chars().skip(100 * 29).collect();
     let compact: String = last_line.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("再按b切换版本"), "{last_line}");
 
-    app.rollback_confirm = false;
+    app.ui_state.rollback_confirm = false;
     app.setup.rollback_in_flight = true;
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
@@ -196,13 +196,13 @@ async fn setup_page_shows_versions_status_and_neutral_hint() {
 #[tokio::test]
 async fn english_settings_and_setup_hints_fit_at_eighty_columns() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     let content = rendered_with_width(&app, 80, 24);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("j/kselect"), "{compact}");
     assert!(compact.contains("Enteraction"), "{compact}");
 
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = true;
     app.binary_version = Some("1.14.4".to_string());
     let content = rendered_with_width(&app, 80, 24);
@@ -220,7 +220,7 @@ async fn english_settings_and_setup_hints_fit_at_eighty_columns() {
 #[tokio::test]
 async fn setup_fits_key_hints_at_eighty_columns() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = true;
     app.binary_version = Some("1.14.4".to_string());
     app.latest_binary_version = Some("1.15.0".to_string());
@@ -239,7 +239,7 @@ async fn setup_fits_key_hints_at_eighty_columns() {
 #[tokio::test]
 async fn setup_shows_binary_verification_state() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = true;
     app.binary_version = Some("1.14.4".to_string());
     app.binary_verified = Some(false);
@@ -260,7 +260,7 @@ async fn setup_shows_binary_verification_state() {
 #[tokio::test]
 async fn setup_hides_current_version_when_not_installed() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = false;
     app.latest_binary_version = Some("1.15.0".to_string());
     let content = rendered(&app, 30);
@@ -275,7 +275,7 @@ async fn setup_hides_current_version_when_not_installed() {
 #[tokio::test]
 async fn setup_keeps_two_spaces_between_english_labels_and_values() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = true;
     app.binary_version = Some("1.14.4".to_string());
     app.previous_binary_available = true;
@@ -287,7 +287,7 @@ async fn setup_keeps_two_spaces_between_english_labels_and_values() {
 #[tokio::test]
 async fn setup_candidates_use_the_standard_selection_style() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_installed = true;
     app.binary_version = Some("1.14.4".to_string());
     app.setup.candidates = vec![
@@ -342,7 +342,7 @@ async fn setup_candidates_use_the_standard_selection_style() {
 #[tokio::test]
 async fn setup_unverified_install_confirmation_is_in_the_footer() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.pending_install = Some(std::path::PathBuf::from("/inbox/raw"));
     let content = rendered(&app, 30);
     let last_line: String = content.chars().skip(100 * 29).collect();
@@ -354,7 +354,7 @@ async fn setup_unverified_install_confirmation_is_in_the_footer() {
 #[tokio::test]
 async fn setup_shows_installing_status() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.installing = true;
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
@@ -369,7 +369,7 @@ async fn setup_title_hints_fit_at_sixty_columns_in_both_languages() {
         (Lang::En, "j/kselectEnterinstallbprev"),
     ] {
         let (mut app, _dir) = test_app(lang).await;
-        app.overlay = Some(Overlay::Setup { selected: 0 });
+        app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
         app.binary_installed = true;
         app.binary_version = Some("1.14.4".to_string());
         let content = rendered_with_width(&app, 60, 24);
@@ -381,7 +381,7 @@ async fn setup_title_hints_fit_at_sixty_columns_in_both_languages() {
 #[tokio::test]
 async fn setup_download_status_is_not_duplicated() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.downloading = true;
     app.setup.message = None;
     let content = rendered(&app, 30);
@@ -394,8 +394,8 @@ async fn setup_download_status_is_not_duplicated() {
 #[tokio::test]
 async fn settings_shows_singbox_info_status() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
-    app.selected = settings_items(app.config.allow_lan)
+    app.ui_state.page = Page::Settings;
+    app.ui_state.selected = settings_items(app.config.allow_lan)
         .iter()
         .position(|item| *item == SettingsItem::BinaryInfo)
         .unwrap();
@@ -432,7 +432,7 @@ async fn header_uses_fixed_title_and_status_value() {
 #[tokio::test]
 async fn local_ip_is_only_rendered_on_dashboard_and_one_per_line() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.local_ips = vec![
         "192.0.2.10 (eth0)".to_string(),
         "2001:db8::10 (eth0)".to_string(),
@@ -488,7 +488,7 @@ fn find_cell_text(row: &[String], needle: &str) -> Option<usize> {
 #[tokio::test]
 async fn dashboard_local_ip_values_start_at_the_same_column() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.local_ips = vec![
         "192.0.2.10 (eth0)".to_string(),
         "2001:db8::10 (eth0)".to_string(),
@@ -522,7 +522,7 @@ async fn dashboard_local_ip_values_start_at_the_same_column() {
 #[tokio::test]
 async fn dashboard_proxy_ips_go_on_separate_indented_lines() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.proxy_ips = vec!["v4 203.0.113.9".to_string(), "v6 2001:db8::9".to_string()];
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -554,7 +554,7 @@ async fn dashboard_proxy_ips_go_on_separate_indented_lines() {
 #[tokio::test]
 async fn header_shows_uptime_only_while_running() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.proxy_runtime.status = ProxyStatus::Running;
     app.proxy_runtime.started_at =
         Some(std::time::Instant::now() - std::time::Duration::from_secs(3723));
@@ -578,7 +578,7 @@ async fn header_shows_uptime_only_while_running() {
 #[tokio::test]
 async fn header_shows_only_status_node_connections_and_network() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.proxy_ips = vec!["203.0.113.9".to_string()];
     let content = rendered(&app, 30);
     let header: String = content.chars().take(100 * 4).collect();
@@ -914,7 +914,7 @@ async fn footer_uses_default_key_color_and_unbold_keys() {
 #[tokio::test]
 async fn footer_keeps_two_blank_columns_at_both_edges() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     app.config.allow_lan = true;
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -974,7 +974,7 @@ async fn light_palette_uses_dark_gray_for_muted_text() {
 #[tokio::test]
 async fn settings_read_only_items_show_ro_marker() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     app.logger.app(LogLevel::Info, "settings path test");
     let content = rendered(&app, 40);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
@@ -996,7 +996,7 @@ async fn settings_read_only_items_show_ro_marker() {
 #[tokio::test]
 async fn settings_ro_marker_is_muted_but_the_value_is_not() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
@@ -1027,7 +1027,7 @@ async fn settings_ro_marker_is_muted_but_the_value_is_not() {
 #[tokio::test]
 async fn settings_keeps_space_between_english_labels_and_values() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     let backend = TestBackend::new(100, 40);
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
@@ -1052,7 +1052,7 @@ async fn settings_keeps_space_between_english_labels_and_values() {
 #[tokio::test]
 async fn dashboard_omits_network_and_connections_rows() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     let view = app.view();
     let text: String = dashboard_lines(&view, 80)
         .iter()
@@ -1070,7 +1070,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
         (Lang::En, "Auto", "Manual"),
     ] {
         let (mut app, _dir) = test_app(lang).await;
-        app.page = Page::Dashboard;
+        app.ui_state.page = Page::Dashboard;
         app.nodes = vec![node("n1", "香港 01")];
         let labels = app.text();
 
@@ -1133,7 +1133,7 @@ async fn dashboard_shows_selection_mode_above_current_node() {
 #[tokio::test]
 async fn english_subscriptions_use_the_full_label() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Subscriptions;
+    app.ui_state.page = Page::Subscriptions;
     let content: String = rendered(&app, 30)
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -1145,7 +1145,7 @@ async fn english_subscriptions_use_the_full_label() {
 #[tokio::test]
 async fn logs_timestamp_cycles_time_date_and_hidden() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Logs;
+    app.ui_state.page = Page::Logs;
     app.logger.app(LogLevel::Info, "date toggle test");
     let timestamp = app
         .log_lines()
@@ -1159,10 +1159,10 @@ async fn logs_timestamp_cycles_time_date_and_hidden() {
     let content = rendered(&app, 30);
     assert!(content.contains(time), "{content}");
     assert!(!content.contains(&timestamp), "{content}");
-    app.log_timestamp = LogTimestamp::DateTime;
+    app.ui_state.log_timestamp = LogTimestamp::DateTime;
     let content = rendered(&app, 30);
     assert!(content.contains(&timestamp), "{content}");
-    app.log_timestamp = LogTimestamp::Hidden;
+    app.ui_state.log_timestamp = LogTimestamp::Hidden;
     let content = rendered(&app, 30);
     assert!(!content.contains(time), "{content}");
     assert!(!content.contains(&timestamp), "{content}");
@@ -1175,24 +1175,24 @@ async fn logs_timestamp_cycles_time_date_and_hidden() {
 #[tokio::test]
 async fn logs_source_filter_scopes_lines_and_title() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Logs;
+    app.ui_state.page = Page::Logs;
     app.logger.app(LogLevel::Info, "app only line");
     app.logger.singbox(LogLevel::Info, "sing-box only line");
 
-    app.log_source = LogSource::App;
+    app.ui_state.log_source = LogSource::App;
     let content = rendered(&app, 30);
     assert!(content.contains("[app] [INFO]"), "{content}");
     assert!(content.contains("app only line"), "{content}");
     assert!(!content.contains("sing-box only line"), "{content}");
 
-    app.log_source = LogSource::Singbox;
+    app.ui_state.log_source = LogSource::Singbox;
     let content = rendered(&app, 30);
     assert!(content.contains("[sing-box] [INFO]"), "{content}");
     assert!(content.contains("sing-box only line"), "{content}");
     assert!(!content.contains("app only line"), "{content}");
 
     app.logger.clear_view();
-    app.log_source = LogSource::App;
+    app.ui_state.log_source = LogSource::App;
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains(app.text().logs_empty_source), "{compact}");
@@ -1233,7 +1233,7 @@ async fn header_marks_a_stale_clash_api() {
 #[tokio::test]
 async fn setup_scrolls_the_selected_candidate_into_view() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.candidates = (0..30)
         .map(|index| crate::singbox::binary::InboxCandidate {
             path: std::path::PathBuf::from(format!("/inbox/cand-{index}")),
@@ -1241,7 +1241,7 @@ async fn setup_scrolls_the_selected_candidate_into_view() {
             has_checksum: true,
         })
         .collect();
-    app.overlay = Some(Overlay::Setup { selected: 29 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 29 });
     let content = rendered(&app, 30);
     assert!(content.contains("cand-29"), "{content}");
 }
@@ -1259,7 +1259,7 @@ fn visible_row_range_follows_the_selection() {
 #[tokio::test]
 async fn nodes_beyond_the_old_render_cap_remain_selectable() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.nodes = (0..250)
         .map(|index| crate::subscription::model::Node {
             tag: format!("n-{index:04}"),
@@ -1271,7 +1271,7 @@ async fn nodes_beyond_the_old_render_cap_remain_selectable() {
             outbound: crate::subscription::model::Outbound::from_value(&serde_json::json!({})),
         })
         .collect();
-    app.selected = 249;
+    app.ui_state.selected = 249;
     let content = rendered(&app, 30);
     assert!(content.contains("node-249"), "{content}");
 }
@@ -1279,7 +1279,7 @@ async fn nodes_beyond_the_old_render_cap_remain_selectable() {
 #[tokio::test]
 async fn logs_title_does_not_show_the_log_file_path() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Logs;
+    app.ui_state.page = Page::Logs;
     app.logger.app(LogLevel::Info, "logs title test");
     let content = rendered(&app, 24);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1290,8 +1290,8 @@ async fn logs_title_does_not_show_the_log_file_path() {
 #[tokio::test]
 async fn renders_settings_form_overlay() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
-    app.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
+    app.ui_state.page = Page::Settings;
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
         &app.config,
     ))));
     let content = rendered(&app, 30);
@@ -1308,8 +1308,8 @@ async fn renders_settings_form_overlay() {
 #[tokio::test]
 async fn overlays_hide_the_page_background_but_keep_the_header() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Settings;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.page = Page::Settings;
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     let content = rendered(&app, 30);
     assert!(content.contains("DFRelay"));
     assert!(content.contains("sing-box info"));
@@ -1319,8 +1319,8 @@ async fn overlays_hide_the_page_background_but_keep_the_header() {
 #[tokio::test]
 async fn multi_field_edit_forms_mark_the_active_field_and_dim_inactive_labels() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
-    app.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
+    app.ui_state.page = Page::Settings;
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
         &app.config,
     ))));
     let backend = TestBackend::new(100, 30);
@@ -1366,7 +1366,7 @@ async fn multi_field_edit_forms_mark_the_active_field_and_dim_inactive_labels() 
 #[tokio::test]
 async fn settings_lan_toggle_reflects_each_value() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     let content = rendered(&app, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(!compact.contains("跳过局域网"), "{compact}");
@@ -1382,7 +1382,7 @@ async fn settings_lan_toggle_reflects_each_value() {
 #[tokio::test]
 async fn lan_auth_list_hides_password_and_popup_shows_it() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     app.config.allow_lan = true;
     app.config.lan_username = "alice".to_string();
     app.config.lan_password = "s3cret".to_string();
@@ -1392,7 +1392,7 @@ async fn lan_auth_list_hides_password_and_popup_shows_it() {
     assert!(!compact.contains("s3cret"), "{compact}");
     assert!(compact.contains("LAN认证已启用"), "{compact}");
 
-    app.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
         &app.config,
     ))));
     let content = rendered(&app, 40);
@@ -1405,7 +1405,7 @@ async fn lan_auth_list_hides_password_and_popup_shows_it() {
 #[tokio::test]
 async fn settings_lan_warning_is_compact_in_the_footer() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     app.config.allow_lan = true;
     let content = rendered_with_width(&app, 60, 24);
     let last_line: String = content.chars().skip(60 * 23).collect();
@@ -1429,7 +1429,7 @@ async fn restart_progress_replaces_footer_hints() {
 #[tokio::test]
 async fn restart_confirmation_is_shown_in_the_footer() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.restart_confirm = true;
+    app.ui_state.restart_confirm = true;
     let content = rendered(&app, 30);
     let last_line: String = content.chars().skip(100 * 29).collect();
     let compact: String = last_line.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1439,8 +1439,8 @@ async fn restart_confirmation_is_shown_in_the_footer() {
 #[tokio::test]
 async fn delete_confirmation_stays_in_the_footer() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Subscriptions;
-    app.subscription_delete = Some("s-1".to_string());
+    app.ui_state.page = Page::Subscriptions;
+    app.ui_state.subscription_delete = Some("s-1".to_string());
     let content = rendered(&app, 30);
     let last_line: String = content.chars().skip(100 * 29).collect();
     let compact: String = last_line.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1453,8 +1453,8 @@ async fn delete_confirmation_stays_in_the_footer() {
 #[tokio::test]
 async fn overlay_hides_global_footer_hints() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
-    app.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
+    app.ui_state.page = Page::Settings;
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Settings(SettingsForm::new(
         &app.config,
     ))));
     let content = rendered(&app, 30);
@@ -1484,8 +1484,8 @@ async fn toast_replaces_the_header_slogan() {
 #[tokio::test]
 async fn renders_keyword_form_overlay_with_one_field() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
-    app.overlay = Some(Overlay::Edit(EditForm::Keyword(KeywordForm::from_config(
+    app.ui_state.page = Page::Settings;
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Keyword(KeywordForm::from_config(
         &app.config,
         KeywordField::Include,
     ))));
@@ -1500,8 +1500,8 @@ async fn renders_keyword_form_overlay_with_one_field() {
 #[tokio::test]
 async fn renders_subscription_form_overlay() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Subscriptions;
-    app.overlay = Some(Overlay::Edit(EditForm::Subscription(
+    app.ui_state.page = Page::Subscriptions;
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Subscription(
         SubscriptionForm::new(),
     )));
     let content = rendered(&app, 30);
@@ -1511,7 +1511,7 @@ async fn renders_subscription_form_overlay() {
     assert!(compact.contains("[✓]"));
     assert!(!content.contains("[ ]"));
 
-    if let Some(Overlay::Edit(EditForm::Subscription(form))) = &mut app.overlay {
+    if let Some(Overlay::Edit(EditForm::Subscription(form))) = &mut app.ui_state.overlay {
         form.enabled = false;
     }
     let content = rendered(&app, 30);
@@ -1522,11 +1522,11 @@ async fn renders_subscription_form_overlay() {
 #[tokio::test]
 async fn subscription_form_values_start_at_the_same_column() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Subscriptions;
+    app.ui_state.page = Page::Subscriptions;
     let mut form = SubscriptionForm::new();
     form.name = LineInput::new("alpha");
     form.url = LineInput::new("https://example.com/sub");
-    app.overlay = Some(Overlay::Edit(EditForm::Subscription(form)));
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Subscription(form)));
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
     let view = app.view();
@@ -1616,7 +1616,7 @@ async fn header_shows_the_slogan_on_the_right() {
 #[tokio::test]
 async fn dashboard_scroll_reveals_overflowing_lines() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.local_ips = (1..=20)
         .map(|index| format!("192.0.2.{index} (en0)"))
         .collect();
@@ -1624,7 +1624,7 @@ async fn dashboard_scroll_reveals_overflowing_lines() {
     assert!(dashboard_max_scroll(&view, 80, 24) > 0);
     assert_eq!(dashboard_max_scroll(&view, 80, 80), 0);
 
-    app.dashboard_scroll = 10;
+    app.ui_state.dashboard_scroll = 10;
     let content: String = rendered_with_width(&app, 80, 24)
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -1636,8 +1636,8 @@ async fn dashboard_scroll_reveals_overflowing_lines() {
 #[tokio::test]
 async fn dashboard_wraps_long_values_under_the_value_column() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Dashboard;
-    app.last_error = Some(
+    app.ui_state.page = Page::Dashboard;
+    app.ui_state.last_error = Some(
         "a deliberately long error message that must wrap instead of being cropped by the dashboard"
             .to_string(),
     );
@@ -1678,8 +1678,8 @@ async fn dashboard_wraps_long_values_under_the_value_column() {
 #[tokio::test]
 async fn dashboard_marks_the_last_error_red_and_the_header_stays_clean() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Dashboard;
-    app.last_error = Some(
+    app.ui_state.page = Page::Dashboard;
+    app.ui_state.last_error = Some(
         "a deliberately long error message that must wrap instead of being cropped by the dashboard"
             .to_string(),
     );
@@ -1750,7 +1750,7 @@ async fn dashboard_marks_the_last_error_red_and_the_header_stays_clean() {
     }
     assert!(found_error_row, "dashboard did not render the last error");
 
-    app.last_error = None;
+    app.ui_state.last_error = None;
     let view = app.view();
     let lines = dashboard_lines(&view, 80);
     let error_index = lines
@@ -1767,7 +1767,7 @@ async fn dashboard_marks_the_last_error_red_and_the_header_stays_clean() {
 #[tokio::test]
 async fn dashboard_shows_the_active_node_delay() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.metrics.selection.selected = Some("n2".to_string());
     app.node_delays.insert("n2".to_string(), 88);
     let content: String = rendered(&app, 30)
@@ -1789,7 +1789,7 @@ async fn dashboard_shows_the_active_node_delay() {
 #[tokio::test]
 async fn dashboard_shows_app_version_and_prefixed_singbox_version() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.binary_version = Some("1.14.4".to_string());
     let content: String = rendered(&app, 40)
         .chars()
@@ -1892,7 +1892,7 @@ fn connection_target_keeps_only_one_address() {
 #[tokio::test]
 async fn connections_have_one_target_column_and_no_summary() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Connections;
+    app.ui_state.page = Page::Connections;
     app.metrics.connections.push(connection());
     let raw = rendered(&app, 30);
     assert!(raw.contains("↓ 2.0 K ↑ 1.0 K"), "{raw}");
@@ -1908,13 +1908,13 @@ async fn connections_have_one_target_column_and_no_summary() {
 #[tokio::test]
 async fn switching_to_logs_does_not_keep_the_connection_summary() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Connections;
+    app.ui_state.page = Page::Connections;
     app.metrics.connections.push(connection());
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &app.view())).unwrap();
 
-    app.page = Page::Logs;
+    app.ui_state.page = Page::Logs;
     app.logger.app(LogLevel::Info, "log after switching");
     terminal.clear().unwrap();
     terminal.draw(|frame| render(frame, &app.view())).unwrap();
@@ -1936,7 +1936,7 @@ async fn switching_to_logs_does_not_keep_the_connection_summary() {
 #[tokio::test]
 async fn nodes_show_latency_for_every_node() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.nodes = vec![node("n1", "香港 01"), node("n2", "日本 02")];
     app.node_delays.insert("n1".to_string(), 68);
     app.node_delays.insert("n2".to_string(), 120);
@@ -1959,7 +1959,7 @@ async fn nodes_show_latency_for_every_node() {
 #[tokio::test]
 async fn nodes_mark_a_single_active_node() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.nodes = vec![node("n1", "hk-01"), node("n2", "jp-02")];
 
     // Manual selection wins over a different urltest result; previously
@@ -2004,7 +2004,7 @@ async fn nodes_mark_a_single_active_node() {
 #[tokio::test]
 async fn nodes_dot_keeps_one_cell_and_one_blank_before_the_name() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.nodes = vec![node("n1", "hk-01")];
     app.metrics.selection.selected = Some("n1".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
@@ -2034,7 +2034,7 @@ async fn nodes_dot_keeps_one_cell_and_one_blank_before_the_name() {
 #[tokio::test]
 async fn nodes_active_row_uses_the_tab_accent_without_bold() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.nodes = vec![
         node("n1", "hk-01"),
         node("n2", "jp-02"),
@@ -2042,7 +2042,7 @@ async fn nodes_active_row_uses_the_tab_accent_without_bold() {
     ];
     app.metrics.selection.selected = Some("n1".to_string());
     // Keep the cursor off the active row so its own style is visible.
-    app.selected = 2;
+    app.ui_state.selected = 2;
 
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -2129,7 +2129,7 @@ async fn subscriptions_keep_timestamp_when_some_nodes_are_unsupported() {
 #[tokio::test]
 async fn read_only_settings_and_dashboard_labels_are_not_dimmed() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     let backend = TestBackend::new(100, 40);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| render(frame, &app.view())).unwrap();
@@ -2153,7 +2153,7 @@ async fn read_only_settings_and_dashboard_labels_are_not_dimmed() {
         .expect("port label");
     assert_eq!(port_label.fg, Color::Reset);
 
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     terminal.draw(|frame| render(frame, &app.view())).unwrap();
     let cells = terminal.backend().buffer().content.clone();
     let rows: Vec<&[ratatui::buffer::Cell]> = cells.chunks(100).collect();
@@ -2179,7 +2179,7 @@ async fn read_only_settings_and_dashboard_labels_are_not_dimmed() {
 #[tokio::test]
 async fn terminal_too_small_uses_the_rendered_minimum() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     let too_small = rendered_with_width(&app, 59, 15);
     assert!(too_small.contains("60"), "{too_small}");
     let minimum = rendered_with_width(&app, 60, 16);
@@ -2199,11 +2199,11 @@ async fn small_terminal_renders_main_pages_without_panicking() {
         Page::Logs,
         Page::Settings,
     ] {
-        app.page = page;
+        app.ui_state.page = page;
         let content = rendered_with_width(&app, 60, 20);
         assert!(!content.is_empty(), "{page:?}");
     }
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     let content = rendered_with_width(&app, 60, 20);
     assert!(content.contains("DFRelay"), "{content}");
 }
@@ -2222,11 +2222,11 @@ async fn footer_hides_list_navigation_hints() {
 #[tokio::test]
 async fn renders_log_detail_overlay() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Logs;
+    app.ui_state.page = Page::Logs;
     app.logger
         .app(LogLevel::Warn, "a long detail message for the popup");
-    app.selected = 0;
-    app.overlay = app
+    app.ui_state.selected = 0;
+    app.ui_state.overlay = app
         .log_lines()
         .first()
         .cloned()
@@ -2243,7 +2243,7 @@ async fn renders_log_detail_overlay() {
 #[tokio::test]
 async fn log_detail_scrolls_a_long_message() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     let message = format!("start-marker {} tail-marker", "filler ".repeat(400));
     let line = LogLine {
         timestamp: "2026-11-01 12:00:00.000".to_string(),
@@ -2251,7 +2251,7 @@ async fn log_detail_scrolls_a_long_message() {
         component: crate::logging::Component::App,
         message,
     };
-    app.overlay = Some(Overlay::LogDetail { line, scroll: 0 });
+    app.ui_state.overlay = Some(Overlay::LogDetail { line, scroll: 0 });
 
     let view = app.view();
     let max = log_detail_max_scroll(&view, 100, 30, Palette::Dark);
@@ -2262,7 +2262,7 @@ async fn log_detail_scrolls_a_long_message() {
     let top_compact: String = top.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(top_compact.contains("j/k滚动"), "{top_compact}");
 
-    if let Some(Overlay::LogDetail { scroll, .. }) = app.overlay.as_mut() {
+    if let Some(Overlay::LogDetail { scroll, .. }) = app.ui_state.overlay.as_mut() {
         *scroll = max;
     }
     let bottom = rendered(&app, 30);
@@ -2275,10 +2275,10 @@ async fn log_detail_scrolls_a_long_message() {
 #[tokio::test]
 async fn long_edit_form_feedback_does_not_clip_the_hint() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     let mut form = KeywordForm::from_config(&app.config, KeywordField::Include);
     form.error = Some("word ".repeat(200));
-    app.overlay = Some(Overlay::Edit(EditForm::Keyword(form)));
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Keyword(form)));
     let content = rendered_with_width(&app, 100, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("Esc取消"), "{compact}");
@@ -2287,7 +2287,7 @@ async fn long_edit_form_feedback_does_not_clip_the_hint() {
 #[tokio::test]
 async fn help_lists_global_and_page_sections() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Help;
+    app.ui_state.page = Page::Help;
     let content = rendered(&app, 40);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("全局"), "{compact}");
@@ -2310,7 +2310,7 @@ async fn help_lists_global_and_page_sections() {
 #[tokio::test]
 async fn help_max_scroll_follows_the_viewport() {
     let (mut app, _dir) = test_app(Lang::Zh).await;
-    app.page = Page::Help;
+    app.ui_state.page = Page::Help;
     let view = app.view();
     let small = help_max_scroll(&view, 80, 24);
     let large = help_max_scroll(&view, 80, 50);
@@ -2342,12 +2342,12 @@ fn download_bar_ping_pongs_across_the_track() {
 #[tokio::test]
 async fn animation_runs_only_while_motion_is_visible() {
     let (mut app, _dir) = test_app(Lang::En).await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     assert!(!needs_animation(&app.view()));
 
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     assert!(needs_animation(&app.view()));
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
 
     app.proxy_runtime.restart_in_progress = true;
     assert!(needs_animation(&app.view()));
@@ -2367,17 +2367,17 @@ async fn animation_runs_only_while_motion_is_visible() {
 
     app.notify("saved");
     assert!(!needs_animation(&app.view()));
-    app.message = None;
-    app.message_at = None;
+    app.ui_state.message = None;
+    app.ui_state.message_at = None;
 
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.downloading = true;
     assert!(needs_animation(&app.view()));
     assert_eq!(
         animation_period(&app.view()),
         Some(Duration::from_millis(100))
     );
-    app.overlay = None;
+    app.ui_state.overlay = None;
     assert!(!needs_animation(&app.view()));
 }
 

@@ -415,7 +415,7 @@ impl App {
         self.reset_health_failures();
         self.schedule_no_node_pause();
         let message = self.text().msg_health_no_nodes.to_string();
-        self.last_error = Some(message.clone());
+        self.ui_state.last_error = Some(message.clone());
         self.logger
             .app(LogLevel::Warn, "health failover: no healthy nodes");
         if self.config.enabled_subscriptions().next().is_none() {
@@ -451,7 +451,7 @@ impl App {
             .iter()
             .any(|node| !self.proxy_runtime.proxy_node_tags.contains(&node.tag));
         if !has_new {
-            self.last_error = Some(self.text().msg_health_no_nodes.to_string());
+            self.ui_state.last_error = Some(self.text().msg_health_no_nodes.to_string());
             self.logger.app(
                 LogLevel::Warn,
                 "health failover: subscription refresh added no auto candidates",

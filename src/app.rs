@@ -35,12 +35,14 @@ mod keys;
 mod proxy;
 mod quality;
 mod subscriptions;
+mod ui_state;
 mod updates;
 
 use health::HealthState;
 use proxy::ProxyRuntime;
 use quality::QualityBook;
 use subscriptions::SubscriptionState;
+use ui_state::{NodeSort, UiState};
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const RESTART_DELAYS: [u64; MAX_RESTART_ATTEMPTS as usize] = [1, 2, 5, 10, 30];
@@ -87,13 +89,6 @@ fn connection_id_hash(id: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut hasher);
     hasher.finish()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum NodeSort {
-    #[default]
-    AutoLatency,
-    Name,
 }
 
 /// Process-lifetime counters for diagnosing selection churn without adding
@@ -280,17 +275,11 @@ pub struct App {
     pub config: Config,
     pub paths: Paths,
     pub logger: Logger,
-    pub page: Page,
-    pub dashboard_scroll: usize,
-    dashboard_max_scroll: usize,
+    pub(crate) ui_state: UiState,
     pub(crate) proxy_runtime: ProxyRuntime,
     pub nodes: Vec<Node>,
     auto_tags_cache: Option<(u64, Vec<String>)>,
-    last_node_sort: Option<Instant>,
-    node_sort: NodeSort,
     subscription_state: SubscriptionState,
-    pub selected: usize,
-    page_selection: [usize; 7],
     pub metrics: MetricsSnapshot,
     pub node_delays: HashMap<String, u64>,
     pub delay_testing: HashSet<String>,
@@ -309,23 +298,9 @@ pub struct App {
     last_update_check: Option<Instant>,
     pub setup: SetupState,
     install_in_flight: bool,
-    pub overlay: Option<Overlay>,
-    log_detail_max_scroll: usize,
-    pub subscription_delete: Option<String>,
-    pub log_source: LogSource,
-    pub log_filter: LogLevel,
-    pub log_follow: bool,
-    pub log_timestamp: LogTimestamp,
-    pub last_error: Option<String>,
-    pub message: Option<String>,
-    pub message_at: Option<Instant>,
-    pub restart_confirm: bool,
-    pub rollback_confirm: bool,
     managed: bool,
     service: Option<ServiceIdentity>,
     pub should_quit: bool,
-    pub help_scroll: usize,
-    pub help_max_scroll: usize,
     pub last_local_ips: Instant,
     pub last_proxy_ips: Instant,
     proxy_ips_in_flight: bool,
@@ -347,19 +322,18 @@ pub struct App {
     events_tx: UnboundedSender<AppEvent>,
     events_rx: UnboundedReceiver<AppEvent>,
     clients: HashMap<u64, ClientHandle>,
-    help_return: Option<Page>,
 }
 
 impl App {
     fn edit_form(&self) -> Option<&EditForm> {
-        match &self.overlay {
+        match &self.ui_state.overlay {
             Some(Overlay::Edit(form)) => Some(form),
             _ => None,
         }
     }
 
     fn edit_form_mut(&mut self) -> Option<&mut EditForm> {
-        match &mut self.overlay {
+        match &mut self.ui_state.overlay {
             Some(Overlay::Edit(form)) => Some(form),
             _ => None,
         }
@@ -409,7 +383,7 @@ impl App {
 
     #[cfg(test)]
     pub fn log_detail(&self) -> Option<&crate::logging::LogLine> {
-        match &self.overlay {
+        match &self.ui_state.overlay {
             Some(Overlay::LogDetail { line, .. }) => Some(line),
             _ => None,
         }
@@ -417,20 +391,20 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn log_detail_scroll(&self) -> usize {
-        match &self.overlay {
+        match &self.ui_state.overlay {
             Some(Overlay::LogDetail { scroll, .. }) => *scroll,
             _ => 0,
         }
     }
 
     fn close_overlay(&mut self) {
-        if matches!(self.overlay, Some(Overlay::Setup { .. })) {
+        if matches!(self.ui_state.overlay, Some(Overlay::Setup { .. })) {
             self.setup.pending_install = None;
             self.setup.message = None;
-            self.rollback_confirm = false;
+            self.ui_state.rollback_confirm = false;
         }
-        self.overlay = None;
-        self.log_detail_max_scroll = 0;
+        self.ui_state.overlay = None;
+        self.ui_state.log_detail_max_scroll = 0;
     }
 
     fn set_edit_error(&mut self, message: String) {
@@ -465,7 +439,6 @@ impl App {
                 .or_else(|| metadata.as_ref().map(|metadata| metadata.version.clone()));
             binary_verified = metadata.map(|metadata| metadata.verified);
         }
-        let page = Page::Dashboard;
         let overlay = if locator.is_none() {
             Some(Overlay::Setup { selected: 0 })
         } else {
@@ -490,22 +463,19 @@ impl App {
             config,
             paths,
             logger,
-            page,
-            dashboard_scroll: 0,
-            dashboard_max_scroll: 0,
+            ui_state: UiState {
+                overlay,
+                ..UiState::default()
+            },
             proxy_runtime: ProxyRuntime::default(),
             nodes: cached_nodes,
             auto_tags_cache: None,
-            last_node_sort: None,
-            node_sort: NodeSort::default(),
             subscription_state: SubscriptionState {
                 subscriptions: cached_subscriptions,
                 last_subscription_refresh: startup_cache_fresh.then(Instant::now),
                 subscription_refresh_backoff: SUBSCRIPTION_REFRESH_MIN_BACKOFF,
                 ..SubscriptionState::default()
             },
-            selected: 0,
-            page_selection: [0; 7],
             metrics: MetricsSnapshot::default(),
             node_delays: HashMap::new(),
             delay_testing: HashSet::new(),
@@ -524,23 +494,9 @@ impl App {
             last_update_check: None,
             setup,
             install_in_flight: false,
-            overlay,
-            log_detail_max_scroll: 0,
-            subscription_delete: None,
-            log_source: LogSource::All,
-            log_filter: LogLevel::Info,
-            log_follow: true,
-            log_timestamp: LogTimestamp::Time,
-            last_error: None,
-            message: None,
-            message_at: None,
-            restart_confirm: false,
-            rollback_confirm: false,
             managed: false,
             service: None,
             should_quit: false,
-            help_scroll: 0,
-            help_max_scroll: 0,
             last_local_ips: Instant::now(),
             last_proxy_ips: Instant::now(),
             proxy_ips_in_flight: false,
@@ -562,7 +518,6 @@ impl App {
             events_tx,
             events_rx,
             clients: HashMap::new(),
-            help_return: None,
         };
         if has_enabled && !startup_cache_fresh {
             app.refresh_subscriptions();
@@ -578,11 +533,16 @@ impl App {
 
     pub fn view(&self) -> View {
         let toast = self
+            .ui_state
             .message
             .clone()
-            .filter(|_| self.message_at.is_none_or(|at| at.elapsed() < TOAST_TTL))
+            .filter(|_| {
+                self.ui_state
+                    .message_at
+                    .is_none_or(|at| at.elapsed() < TOAST_TTL)
+            })
             .map(crate::text::sanitize_owned);
-        let show_nodes = self.page == Page::Nodes;
+        let show_nodes = self.ui_state.page == Page::Nodes;
         let filtered = if show_nodes {
             self.auto_candidate_tags()
         } else {
@@ -592,7 +552,7 @@ impl App {
         let metrics = MetricsSnapshot {
             upload_total: self.metrics.upload_total,
             download_total: self.metrics.download_total,
-            connections: if self.page == Page::Connections {
+            connections: if self.ui_state.page == Page::Connections {
                 self.metrics.connections.clone()
             } else {
                 Vec::new()
@@ -617,16 +577,16 @@ impl App {
         } else {
             BinaryStatus::Installed
         };
-        let tab_page = match self.page {
-            Page::Help => self.help_return.unwrap_or(Page::Dashboard),
-            _ => self.page,
+        let tab_page = match self.ui_state.page {
+            Page::Help => self.ui_state.help_return.unwrap_or(Page::Dashboard),
+            _ => self.ui_state.page,
         };
         View {
             config,
             lan_password_set,
-            page: self.page,
+            page: self.ui_state.page,
             tab_page,
-            dashboard_scroll: self.dashboard_scroll,
+            dashboard_scroll: self.ui_state.dashboard_scroll,
             status: self.proxy_runtime.status.clone(),
             metrics_stale: self.proxy_runtime.status == ProxyStatus::Running
                 && self.proxy_runtime.proxy.is_some()
@@ -665,7 +625,7 @@ impl App {
                     stale: runtime.stale,
                 })
                 .collect(),
-            selected: self.selected,
+            selected: self.ui_state.selected,
             preferred_node: self.preferred_node.clone(),
             metrics,
             connection_count,
@@ -689,25 +649,25 @@ impl App {
                 }
                 setup
             },
-            overlay: self.overlay.clone(),
-            subscription_delete: self.subscription_delete.is_some(),
-            log_source: self.log_source,
-            log_filter: self.log_filter,
-            log_follow: self.log_follow,
-            log_timestamp: self.log_timestamp,
-            logs: if self.page == Page::Logs {
+            overlay: self.ui_state.overlay.clone(),
+            subscription_delete: self.ui_state.subscription_delete.is_some(),
+            log_source: self.ui_state.log_source,
+            log_filter: self.ui_state.log_filter,
+            log_follow: self.ui_state.log_follow,
+            log_timestamp: self.ui_state.log_timestamp,
+            logs: if self.ui_state.page == Page::Logs {
                 self.log_lines()
             } else {
                 Vec::new()
             },
             log_file: self.logger.current_file(),
-            last_error: self.last_error.clone().map(sanitize_owned),
+            last_error: self.ui_state.last_error.clone().map(sanitize_owned),
             toast,
-            restart_confirm: self.restart_confirm,
-            rollback_confirm: self.rollback_confirm,
+            restart_confirm: self.ui_state.restart_confirm,
+            rollback_confirm: self.ui_state.rollback_confirm,
             restart_in_progress: self.proxy_runtime.restart_in_progress,
             quitting: self.should_quit,
-            help_scroll: self.help_scroll,
+            help_scroll: self.ui_state.help_scroll,
             binary_path: self.paths.binary().display().to_string(),
             config_path: self.paths.config_file.display().to_string(),
             inbox_path: self.paths.inbox_dir.display().to_string(),
@@ -820,8 +780,8 @@ impl App {
                             .iter()
                             .any(|config| &config.id == id)
                     });
-                let selected_before = self.selected;
-                let selected_tag = if self.page == Page::Nodes {
+                let selected_before = self.ui_state.selected;
+                let selected_tag = if self.ui_state.page == Page::Nodes {
                     self.nodes.get(selected_before).map(|node| node.tag.clone())
                 } else {
                     None
@@ -850,13 +810,14 @@ impl App {
                 } else {
                     self.subscription_refresh_succeeded();
                 }
-                self.selected = selected_tag
+                self.ui_state.selected = selected_tag
                     .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
                     .unwrap_or_else(|| {
-                        selected_before.min(self.max_selection_for(self.page).saturating_sub(1))
+                        selected_before
+                            .min(self.max_selection_for(self.ui_state.page).saturating_sub(1))
                     });
-                if self.page == Page::Logs && self.log_follow {
-                    self.selected = self.max_selection_for(Page::Logs).saturating_sub(1);
+                if self.ui_state.page == Page::Logs && self.ui_state.log_follow {
+                    self.ui_state.selected = self.max_selection_for(Page::Logs).saturating_sub(1);
                 }
                 self.finalize_subscription_change();
                 self.notify(format!(
@@ -960,7 +921,7 @@ impl App {
                     }
                     Err(err) => {
                         self.setup.message = Some(format!("{}: {err}", self.text().setup_failed));
-                        self.last_error = Some(err);
+                        self.ui_state.last_error = Some(err);
                     }
                 }
             }
@@ -988,7 +949,7 @@ impl App {
                     }
                     Err(err) => {
                         self.setup.message = Some(format!("{}: {err}", self.text().setup_failed));
-                        self.last_error = Some(err);
+                        self.ui_state.last_error = Some(err);
                     }
                 }
             }
@@ -1006,7 +967,7 @@ impl App {
                     self.last_totals = None;
                     self.up_speed = 0.0;
                     self.down_speed = 0.0;
-                    self.last_error = None;
+                    self.ui_state.last_error = None;
                     self.reset_health_state();
                     self.proxy_ip_backoff_secs = 5;
                     self.proxy_ip_failures = 0;
@@ -1014,7 +975,7 @@ impl App {
                     self.apply_pending_selection(clash.port, clash.secret);
                     self.reconcile_subscription_apply_after_start();
                     self.refresh_proxy_ips();
-                    if self.page == Page::Nodes {
+                    if self.ui_state.page == Page::Nodes {
                         self.maybe_test_node_delays(false);
                     }
                     let message = if self.config.enable_ipv6 && !ipv6 {
@@ -1040,9 +1001,9 @@ impl App {
                     self.proxy_runtime.proxy_node_tags.clear();
                     self.proxy_runtime.proxy_node_names.clear();
                     self.proxy_runtime.stable_reset_at = None;
-                    self.last_error = Some(err);
+                    self.ui_state.last_error = Some(err);
                     self.logger.app(LogLevel::Error, "sing-box start failed");
-                    let detail = self.last_error.clone().unwrap_or_default();
+                    let detail = self.ui_state.last_error.clone().unwrap_or_default();
                     self.ack_pending_start(false, format!("proxy start failed: {detail}"));
                     self.schedule_restart();
                 }
@@ -1056,7 +1017,7 @@ impl App {
                 self.proxy_runtime.restart_attempts = 0;
                 self.proxy_runtime.restart_at = None;
                 self.proxy_runtime.stable_reset_at = None;
-                self.restart_confirm = false;
+                self.ui_state.restart_confirm = false;
                 self.reset_metrics();
                 if self.proxy_runtime.restart_after_stop {
                     self.proxy_runtime.restart_after_stop = false;
@@ -1133,8 +1094,10 @@ impl App {
                         self.health.no_node_level = 0;
                         self.health.failures = 0;
                         self.health.failure_tag = None;
-                        if self.last_error.as_deref() == Some(self.text().msg_health_no_nodes) {
-                            self.last_error = None;
+                        if self.ui_state.last_error.as_deref()
+                            == Some(self.text().msg_health_no_nodes)
+                        {
+                            self.ui_state.last_error = None;
                         }
                         if recovered {
                             self.logger.app(
@@ -1246,7 +1209,7 @@ impl App {
                 self.health.failure_tag = None;
                 self.health.no_node_level = 0;
                 self.health.pause_until = None;
-                self.last_error = None;
+                self.ui_state.last_error = None;
                 self.logger.app(
                     LogLevel::Warn,
                     format!("health failover: {trigger} -> {tag}"),
@@ -1329,16 +1292,16 @@ impl App {
                 self.last_delay_sweep = Some(Instant::now());
             }
             AppEvent::DashboardViewport(max_scroll) => {
-                self.dashboard_max_scroll = max_scroll;
-                self.dashboard_scroll = self.dashboard_scroll.min(max_scroll);
+                self.ui_state.dashboard_max_scroll = max_scroll;
+                self.ui_state.dashboard_scroll = self.ui_state.dashboard_scroll.min(max_scroll);
             }
             AppEvent::HelpViewport(max_scroll) => {
-                self.help_max_scroll = max_scroll;
-                self.help_scroll = self.help_scroll.min(max_scroll);
+                self.ui_state.help_max_scroll = max_scroll;
+                self.ui_state.help_scroll = self.ui_state.help_scroll.min(max_scroll);
             }
             AppEvent::LogDetailViewport(max_scroll) => {
-                self.log_detail_max_scroll = max_scroll;
-                if let Some(Overlay::LogDetail { scroll, .. }) = self.overlay.as_mut() {
+                self.ui_state.log_detail_max_scroll = max_scroll;
+                if let Some(Overlay::LogDetail { scroll, .. }) = self.ui_state.overlay.as_mut() {
                     *scroll = (*scroll).min(max_scroll);
                 }
             }
@@ -1362,7 +1325,7 @@ impl App {
             }
             AppEvent::RollbackDone(result) => {
                 self.setup.rollback_in_flight = false;
-                self.rollback_confirm = false;
+                self.ui_state.rollback_confirm = false;
                 match result {
                     Ok(metadata) => {
                         self.binary_version = Some(metadata.version.clone());
@@ -1384,7 +1347,7 @@ impl App {
                     Err(err) => {
                         self.setup.message =
                             Some(format!("{}: {err}", self.text().setup_switch_failed));
-                        self.last_error = Some(err);
+                        self.ui_state.last_error = Some(err);
                     }
                 }
             }
@@ -1393,7 +1356,7 @@ impl App {
                 self.logger.app(LogLevel::Info, message);
             }
             AppEvent::Error(message) => {
-                self.last_error = Some(message.clone());
+                self.ui_state.last_error = Some(message.clone());
                 self.logger.app(LogLevel::Error, message);
             }
             AppEvent::ClientAttached {
@@ -1413,8 +1376,8 @@ impl App {
                     if viewer {
                         self.viewer_active.store(true, Ordering::Relaxed);
                         self.metrics_wake.notify_one();
-                        if self.page == Page::Logs && self.log_follow {
-                            self.selected = self.log_count().saturating_sub(1);
+                        if self.ui_state.page == Page::Logs && self.ui_state.log_follow {
+                            self.ui_state.selected = self.log_count().saturating_sub(1);
                         }
                         self.sort_nodes_if_visible();
                         self.broadcast_view();
@@ -1629,13 +1592,13 @@ impl App {
             }
         }
         let text = format!("background task failed: {message}");
-        self.last_error = Some(text.clone());
+        self.ui_state.last_error = Some(text.clone());
         self.notify(text);
     }
 
     fn publish_view(&mut self) {
         if self.has_viewer() {
-            if self.page == Page::Nodes {
+            if self.ui_state.page == Page::Nodes {
                 self.refresh_auto_tags_cache();
             }
             self.broadcast_view();
@@ -1643,8 +1606,8 @@ impl App {
     }
 
     pub fn notify(&mut self, message: impl Into<String>) {
-        self.message = Some(message.into());
-        self.message_at = Some(Instant::now());
+        self.ui_state.message = Some(message.into());
+        self.ui_state.message_at = Some(Instant::now());
     }
 
     fn prune_node_state(&mut self) {
@@ -1717,8 +1680,8 @@ impl App {
             self.notify(self.text().msg_proxy_not_running);
             return;
         }
-        self.restart_confirm = true;
-        self.message = None;
+        self.ui_state.restart_confirm = true;
+        self.ui_state.message = None;
     }
 
     fn perform_restart(&mut self) {
@@ -1755,13 +1718,13 @@ impl App {
             return false;
         }
         if self.nodes.is_empty() {
-            self.last_error = Some(self.text().no_nodes.to_string());
+            self.ui_state.last_error = Some(self.text().no_nodes.to_string());
             self.notify(self.text().no_nodes);
             return false;
         }
         let filtered = self.auto_candidate_tags();
         if filtered.is_empty() {
-            self.last_error = Some(self.text().no_matching_nodes.to_string());
+            self.ui_state.last_error = Some(self.text().no_matching_nodes.to_string());
             self.notify(self.text().no_matching_nodes);
             return false;
         }
@@ -1775,9 +1738,9 @@ impl App {
         // Validate the proposed configuration before tearing down the running
         // instance. The check runs on a blocking thread so a slow `sing-box
         // check` cannot stall the daemon event loop.
-        self.restart_confirm = false;
-        self.rollback_confirm = false;
-        self.subscription_delete = None;
+        self.ui_state.restart_confirm = false;
+        self.ui_state.rollback_confirm = false;
+        self.ui_state.subscription_delete = None;
         self.proxy_runtime.preflight_in_flight = true;
         self.proxy_runtime.restart_in_progress = true;
         self.notify(self.text().msg_restarting);
@@ -1815,11 +1778,11 @@ impl App {
             Err(err) => {
                 self.proxy_runtime.restart_in_progress = false;
                 let message = format!("{}: {err}", self.text().msg_preflight_failed);
-                self.last_error = Some(message.clone());
+                self.ui_state.last_error = Some(message.clone());
                 self.logger.app(LogLevel::Warn, message);
                 self.notify(self.text().msg_preflight_failed);
-                self.restart_confirm = false;
-                self.rollback_confirm = false;
+                self.ui_state.restart_confirm = false;
+                self.ui_state.rollback_confirm = false;
             }
         }
     }
@@ -1830,17 +1793,17 @@ impl App {
         }
         if self.binary_manager.locate().is_none() {
             self.open_setup_overlay();
-            self.last_error = Some(self.text().msg_singbox_missing.to_string());
+            self.ui_state.last_error = Some(self.text().msg_singbox_missing.to_string());
             return Err(self.text().msg_singbox_missing.to_string());
         }
         if self.nodes.is_empty() {
-            self.last_error = Some(self.text().no_nodes.to_string());
+            self.ui_state.last_error = Some(self.text().no_nodes.to_string());
             self.switch_page(Page::Subscriptions);
             return Err(self.text().no_nodes.to_string());
         }
         let filtered = self.auto_candidate_tags();
         if filtered.is_empty() {
-            self.last_error = Some(self.text().no_matching_nodes.to_string());
+            self.ui_state.last_error = Some(self.text().no_matching_nodes.to_string());
             return Err(self.text().no_matching_nodes.to_string());
         }
         self.proxy_runtime.runtime_has_auto = filtered.len() >= 2;
@@ -2058,11 +2021,11 @@ impl App {
     }
 
     async fn select_node(&mut self) {
-        let Some(node) = self.nodes.get(self.selected).cloned() else {
+        let Some(node) = self.nodes.get(self.ui_state.selected).cloned() else {
             return;
         };
         if self.proxy_busy() {
-            self.last_error = Some(self.text().msg_proxy_busy.to_string());
+            self.ui_state.last_error = Some(self.text().msg_proxy_busy.to_string());
             return;
         }
         if self.proxy_runtime.proxy.is_none() {
@@ -2186,11 +2149,11 @@ impl App {
     }
 
     fn test_node_delay(&mut self) {
-        let Some(node) = self.nodes.get(self.selected) else {
+        let Some(node) = self.nodes.get(self.ui_state.selected) else {
             return;
         };
         let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
-            self.last_error = Some(self.text().msg_proxy_not_running.to_string());
+            self.ui_state.last_error = Some(self.text().msg_proxy_not_running.to_string());
             return;
         };
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
@@ -2328,7 +2291,7 @@ impl App {
 
     fn select_node_auto(&mut self) {
         if self.proxy_busy() {
-            self.last_error = Some(self.text().msg_proxy_busy.to_string());
+            self.ui_state.last_error = Some(self.text().msg_proxy_busy.to_string());
             return;
         }
         if self.proxy_runtime.proxy.is_none() {
@@ -2339,7 +2302,7 @@ impl App {
         }
         self.selection_generation.fetch_add(1, Ordering::Relaxed);
         let Some(target) = self.auto_selection_target() else {
-            self.last_error = Some(self.text().no_matching_nodes.to_string());
+            self.ui_state.last_error = Some(self.text().no_matching_nodes.to_string());
             return;
         };
         // A running config built with fewer than two auto candidates has no
@@ -2397,7 +2360,7 @@ impl App {
         self.last_totals = None;
         self.metrics = MetricsSnapshot::default();
         self.proxy_ips.clear();
-        self.last_node_sort = None;
+        self.ui_state.last_node_sort = None;
         self.sort_nodes_if_visible();
         self.proxy_ips_in_flight = false;
         self.proxy_ip_backoff_secs = 5;
@@ -2413,7 +2376,7 @@ impl App {
         let mut config = self.config.clone();
         config.language = config.language.toggle();
         if let Err(err) = config.save(&self.paths.config_file) {
-            self.last_error = Some(err.to_string());
+            self.ui_state.last_error = Some(err.to_string());
         } else {
             self.config = config;
             self.notify(self.text().settings_saved);
@@ -2424,11 +2387,11 @@ impl App {
         let mut config = self.config.clone();
         config.allow_lan = !config.allow_lan;
         if let Err(err) = config.save(&self.paths.config_file) {
-            self.last_error = Some(err.to_string());
+            self.ui_state.last_error = Some(err.to_string());
             return;
         }
         self.config = config;
-        self.selected = self.selected.min(
+        self.ui_state.selected = self.ui_state.selected.min(
             settings_items(self.config.allow_lan)
                 .len()
                 .saturating_sub(1),
@@ -2464,9 +2427,13 @@ impl App {
 
     async fn on_tick(&mut self) -> bool {
         let mut changed = false;
-        if self.message_at.is_some_and(|at| at.elapsed() >= TOAST_TTL) {
-            self.message = None;
-            self.message_at = None;
+        if self
+            .ui_state
+            .message_at
+            .is_some_and(|at| at.elapsed() >= TOAST_TTL)
+        {
+            self.ui_state.message = None;
+            self.ui_state.message_at = None;
             changed = true;
         }
         let mut crashed = None;
@@ -2485,7 +2452,8 @@ impl App {
             self.proxy_runtime.stable_reset_at = None;
             self.proxy_runtime.proxy_node_tags.clear();
             self.proxy_runtime.proxy_node_names.clear();
-            self.last_error = Some(format!("{}: {status}", self.text().msg_singbox_exited));
+            self.ui_state.last_error =
+                Some(format!("{}: {status}", self.text().msg_singbox_exited));
             self.proxy_runtime.started_at = None;
             self.reset_metrics();
             self.logger.app(
@@ -2504,8 +2472,8 @@ impl App {
             self.proxy_runtime.restart_attempts = 0;
             self.proxy_runtime.stable_reset_at = None;
         }
-        if self.has_viewer() && self.page == Page::Logs && self.log_follow {
-            self.selected = self.log_count().saturating_sub(1);
+        if self.has_viewer() && self.ui_state.page == Page::Logs && self.ui_state.log_follow {
+            self.ui_state.selected = self.log_count().saturating_sub(1);
         }
         if self.last_local_ips.elapsed() >= Duration::from_secs(30) {
             self.local_ips = netinfo::local_addresses(false);

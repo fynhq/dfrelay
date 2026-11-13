@@ -17,7 +17,7 @@ async fn test_app() -> (App, TempDir) {
     let config = Config::default();
     let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
     let mut app = App::new(config, paths, logger).await;
-    app.overlay = None;
+    app.ui_state.overlay = None;
     (app, dir)
 }
 
@@ -50,67 +50,67 @@ fn node(name: &str) -> Node {
 async fn hjkl_navigates_pages_and_lists() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![node("one"), node("two"), node("three")];
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
 
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert_eq!(app.selected, 1);
+    assert_eq!(app.ui_state.selected, 1);
     app.handle_key(key(KeyCode::Char('k'))).await;
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.ui_state.selected, 0);
     app.handle_key(key(KeyCode::Char('G'))).await;
-    assert_eq!(app.selected, 2);
+    assert_eq!(app.ui_state.selected, 2);
     app.handle_key(key(KeyCode::Char('g'))).await;
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.ui_state.selected, 0);
 
     app.handle_key(key(KeyCode::Char('l'))).await;
-    assert_eq!(app.page, Page::Subscriptions);
+    assert_eq!(app.ui_state.page, Page::Subscriptions);
     app.handle_key(key(KeyCode::Char('h'))).await;
-    assert_eq!(app.page, Page::Nodes);
+    assert_eq!(app.ui_state.page, Page::Nodes);
     app.handle_key(key(KeyCode::Right)).await;
-    assert_eq!(app.page, Page::Subscriptions);
+    assert_eq!(app.ui_state.page, Page::Subscriptions);
     app.handle_key(key(KeyCode::Left)).await;
-    assert_eq!(app.page, Page::Nodes);
+    assert_eq!(app.ui_state.page, Page::Nodes);
 }
 
 #[tokio::test]
 async fn home_and_end_jump_like_g_and_big_g() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![node("one"), node("two"), node("three")];
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.handle_key(key(KeyCode::End)).await;
-    assert_eq!(app.selected, 2);
+    assert_eq!(app.ui_state.selected, 2);
     app.handle_key(key(KeyCode::Home)).await;
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.ui_state.selected, 0);
 
-    app.page = Page::Dashboard;
-    app.dashboard_max_scroll = 4;
+    app.ui_state.page = Page::Dashboard;
+    app.ui_state.dashboard_max_scroll = 4;
     app.handle_key(key(KeyCode::End)).await;
-    assert_eq!(app.dashboard_scroll, 4);
+    assert_eq!(app.ui_state.dashboard_scroll, 4);
     app.handle_key(key(KeyCode::Home)).await;
-    assert_eq!(app.dashboard_scroll, 0);
+    assert_eq!(app.ui_state.dashboard_scroll, 0);
 
-    app.page = Page::Help;
-    app.help_max_scroll = 3;
+    app.ui_state.page = Page::Help;
+    app.ui_state.help_max_scroll = 3;
     app.handle_key(key(KeyCode::End)).await;
-    assert_eq!(app.help_scroll, 3);
+    assert_eq!(app.ui_state.help_scroll, 3);
     app.handle_key(key(KeyCode::Home)).await;
-    assert_eq!(app.help_scroll, 0);
+    assert_eq!(app.ui_state.help_scroll, 0);
 }
 
 #[tokio::test]
 async fn confirmation_keys_only_cancel() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![node("one"), node("two")];
-    app.page = Page::Nodes;
-    app.selected = 0;
+    app.ui_state.page = Page::Nodes;
+    app.ui_state.selected = 0;
 
     app.proxy_runtime.status = ProxyStatus::Running;
     app.handle_key(key(KeyCode::Char('R'))).await;
-    assert!(app.restart_confirm);
+    assert!(app.ui_state.restart_confirm);
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert!(!app.restart_confirm);
-    assert_eq!(app.selected, 0);
+    assert!(!app.ui_state.restart_confirm);
+    assert_eq!(app.ui_state.selected, 0);
 
-    app.page = Page::Subscriptions;
+    app.ui_state.page = Page::Subscriptions;
     let config = SubscriptionConfig {
         id: "s-1".to_string(),
         name: "test".to_string(),
@@ -121,27 +121,27 @@ async fn confirmation_keys_only_cancel() {
     app.subscription_state
         .subscriptions
         .push(empty_runtime(config));
-    app.selected = 0;
+    app.ui_state.selected = 0;
     app.handle_key(key(KeyCode::Char('d'))).await;
-    assert!(app.subscription_delete.is_some());
+    assert!(app.ui_state.subscription_delete.is_some());
     app.handle_key(key(KeyCode::Char('n'))).await;
-    assert!(app.subscription_delete.is_none());
-    assert!(app.overlay.is_none());
+    assert!(app.ui_state.subscription_delete.is_none());
+    assert!(app.ui_state.overlay.is_none());
 }
 
 #[tokio::test]
 async fn ctrl_c_clears_other_confirmations() {
     let (mut app, _dir) = test_app().await;
-    app.restart_confirm = true;
+    app.ui_state.restart_confirm = true;
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
         .await;
-    assert!(!app.restart_confirm);
+    assert!(!app.ui_state.restart_confirm);
     assert!(!app.should_quit);
 
-    app.subscription_delete = Some("s-1".to_string());
+    app.ui_state.subscription_delete = Some("s-1".to_string());
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
         .await;
-    assert!(app.subscription_delete.is_none());
+    assert!(app.ui_state.subscription_delete.is_none());
     assert!(!app.should_quit);
 }
 
@@ -150,34 +150,40 @@ async fn start_stop_reports_busy_state() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Starting;
     app.handle_key(key(KeyCode::Char('s'))).await;
-    assert_eq!(app.message.as_deref(), Some(app.text().msg_proxy_busy));
+    assert_eq!(
+        app.ui_state.message.as_deref(),
+        Some(app.text().msg_proxy_busy)
+    );
 }
 
 #[tokio::test]
 async fn dashboard_enter_opens_logs_only_when_an_error_is_shown() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.handle_key(key(KeyCode::Enter)).await;
-    assert_eq!(app.page, Page::Dashboard);
+    assert_eq!(app.ui_state.page, Page::Dashboard);
 
-    app.last_error = Some("boom".to_string());
+    app.ui_state.last_error = Some("boom".to_string());
     app.handle_key(key(KeyCode::Enter)).await;
-    assert_eq!(app.page, Page::Logs);
+    assert_eq!(app.ui_state.page, Page::Logs);
 }
 
 #[tokio::test]
 async fn settings_install_entry_opens_setup_popup() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Settings;
-    app.selected = setting_index(&app, SettingsItem::BinaryInfo);
+    app.ui_state.page = Page::Settings;
+    app.ui_state.selected = setting_index(&app, SettingsItem::BinaryInfo);
     app.handle_key(key(KeyCode::Enter)).await;
-    assert_eq!(app.page, Page::Settings);
-    assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
+    assert_eq!(app.ui_state.page, Page::Settings);
+    assert!(matches!(
+        app.ui_state.overlay,
+        Some(Overlay::Setup { selected: 0 })
+    ));
     assert_eq!(app.view().tab_page, Page::Settings);
 
     app.handle_key(key(KeyCode::Esc)).await;
-    assert_eq!(app.page, Page::Settings);
-    assert!(app.overlay.is_none());
+    assert_eq!(app.ui_state.page, Page::Settings);
+    assert!(app.ui_state.overlay.is_none());
     assert_eq!(app.view().tab_page, Page::Settings);
 }
 
@@ -192,8 +198,11 @@ async fn missing_binary_opens_the_setup_popup_on_startup() {
     paths.ensure().unwrap();
     let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
     let app = App::new(Config::default(), paths, logger).await;
-    assert_eq!(app.page, Page::Dashboard);
-    assert!(matches!(app.overlay, Some(Overlay::Setup { selected: 0 })));
+    assert_eq!(app.ui_state.page, Page::Dashboard);
+    assert!(matches!(
+        app.ui_state.overlay,
+        Some(Overlay::Setup { selected: 0 })
+    ));
 }
 
 #[tokio::test]
@@ -229,30 +238,30 @@ async fn binary_status_tracks_install_and_upgrade() {
 #[tokio::test]
 async fn rollback_requires_previous_binary() {
     let (mut app, _dir) = test_app().await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.handle_key(key(KeyCode::Char('b'))).await;
     assert_eq!(
-        app.message.as_deref(),
+        app.ui_state.message.as_deref(),
         Some(app.text().msg_rollback_unavailable)
     );
-    assert!(!app.rollback_confirm);
+    assert!(!app.ui_state.rollback_confirm);
 }
 
 #[tokio::test]
 async fn rollback_confirmation_is_consumed_by_other_keys() {
     let (mut app, _dir) = test_app().await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     std::fs::write(app.paths.previous_binary(), b"previous").unwrap();
     app.handle_key(key(KeyCode::Char('b'))).await;
-    assert!(app.rollback_confirm);
+    assert!(app.ui_state.rollback_confirm);
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert!(!app.rollback_confirm);
+    assert!(!app.ui_state.rollback_confirm);
 }
 
 #[tokio::test]
 async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
     let (mut app, _dir) = test_app().await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.candidates = vec![InboxCandidate {
         path: PathBuf::from("/inbox/raw-sing-box"),
         label: "raw-sing-box".to_string(),
@@ -266,7 +275,7 @@ async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
 
     app.handle_key(key(KeyCode::Char('j'))).await;
     assert!(app.setup.pending_install.is_none());
-    assert!(matches!(app.overlay, Some(Overlay::Setup { .. })));
+    assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
 
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.setup.pending_install.is_some());
@@ -278,13 +287,13 @@ async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
     assert!(app.setup.pending_install.is_some());
     app.handle_key(key(KeyCode::Esc)).await;
     assert!(app.setup.pending_install.is_none());
-    assert!(matches!(app.overlay, Some(Overlay::Setup { .. })));
+    assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
 }
 
 #[tokio::test]
 async fn ctrl_c_clears_unverified_install_confirmation() {
     let (mut app, _dir) = test_app().await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.setup.pending_install = Some(PathBuf::from("/inbox/raw-sing-box"));
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
         .await;
@@ -311,6 +320,7 @@ async fn rollback_done_updates_the_current_version() {
     assert_eq!(app.binary_version.as_deref(), Some("1.14.4"));
     assert!(!app.setup.rollback_in_flight);
     assert!(app
+        .ui_state
         .message
         .as_deref()
         .unwrap_or_default()
@@ -385,8 +395,8 @@ async fn background_panic_clears_related_in_flight_state() {
 async fn restart_in_progress_blocks_keys_except_detach() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![node("one"), node("two")];
-    app.page = Page::Nodes;
-    app.selected = 0;
+    app.ui_state.page = Page::Nodes;
+    app.ui_state.selected = 0;
     app.proxy_runtime.restart_in_progress = true;
     let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
     app.handle_event(AppEvent::ClientAttached {
@@ -398,9 +408,9 @@ async fn restart_in_progress_blocks_keys_except_detach() {
     .await;
 
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.ui_state.selected, 0);
     app.handle_key(key(KeyCode::Char('l'))).await;
-    assert_eq!(app.page, Page::Nodes);
+    assert_eq!(app.ui_state.page, Page::Nodes);
     app.handle_key(key(KeyCode::Char('q'))).await;
     assert!(!app.should_quit);
     assert!(!app.has_viewer());
@@ -420,7 +430,7 @@ async fn connections_enter_copies_the_selected_target() {
         accept: tokio::sync::oneshot::channel().0,
     })
     .await;
-    app.page = Page::Connections;
+    app.ui_state.page = Page::Connections;
     app.metrics
         .connections
         .push(crate::singbox::clash::ConnectionInfo {
@@ -433,9 +443,12 @@ async fn connections_enter_copies_the_selected_target() {
             download: 2,
             duration_secs: None,
         });
-    app.selected = 0;
+    app.ui_state.selected = 0;
     app.handle_key(key(KeyCode::Enter)).await;
-    assert_eq!(app.message.as_deref(), Some(app.text().settings_copied));
+    assert_eq!(
+        app.ui_state.message.as_deref(),
+        Some(app.text().settings_copied)
+    );
     let mut copied = None;
     while let Ok(message) = rx.try_recv() {
         if let ServerMsg::Copy { text } = message {
@@ -456,10 +469,13 @@ async fn setup_copies_the_binary_path() {
         accept: tokio::sync::oneshot::channel().0,
     })
     .await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     let expected = app.paths.binary().display().to_string();
     app.handle_key(key(KeyCode::Char('p'))).await;
-    assert_eq!(app.message.as_deref(), Some(app.text().settings_copied));
+    assert_eq!(
+        app.ui_state.message.as_deref(),
+        Some(app.text().settings_copied)
+    );
     let mut copied = None;
     while let Ok(message) = rx.try_recv() {
         if let ServerMsg::Copy { text } = message {
@@ -475,25 +491,25 @@ async fn logs_follow_tail_until_scrolled() {
     for index in 0..20 {
         app.logger.app(LogLevel::Info, format!("line {index}"));
     }
-    app.page = Page::Logs;
-    app.log_follow = true;
-    app.selected = app.max_selection().saturating_sub(1);
-    assert_eq!(app.selected, 19);
+    app.ui_state.page = Page::Logs;
+    app.ui_state.log_follow = true;
+    app.ui_state.selected = app.max_selection().saturating_sub(1);
+    assert_eq!(app.ui_state.selected, 19);
 
     app.handle_key(key(KeyCode::Char('k'))).await;
-    assert!(!app.log_follow);
-    assert_eq!(app.selected, 18);
+    assert!(!app.ui_state.log_follow);
+    assert_eq!(app.ui_state.selected, 18);
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert!(app.log_follow);
-    assert_eq!(app.selected, 19);
+    assert!(app.ui_state.log_follow);
+    assert_eq!(app.ui_state.selected, 19);
     app.handle_key(key(KeyCode::Char('k'))).await;
-    assert!(!app.log_follow);
-    assert_eq!(app.selected, 18);
+    assert!(!app.ui_state.log_follow);
+    assert_eq!(app.ui_state.selected, 18);
     app.handle_key(key(KeyCode::Char('G'))).await;
-    assert!(app.log_follow);
-    assert_eq!(app.selected, 19);
+    assert!(app.ui_state.log_follow);
+    assert_eq!(app.ui_state.selected, 19);
     app.handle_key(key(KeyCode::Char('f'))).await;
-    assert!(!app.log_follow);
+    assert!(!app.ui_state.log_follow);
 }
 
 #[tokio::test]
@@ -501,30 +517,30 @@ async fn logs_source_cycles_and_filters_lines() {
     let (mut app, _dir) = test_app().await;
     app.logger.app(LogLevel::Info, "app line");
     app.logger.singbox(LogLevel::Info, "sing-box line");
-    app.page = Page::Logs;
-    app.log_follow = true;
-    app.selected = app.max_selection().saturating_sub(1);
+    app.ui_state.page = Page::Logs;
+    app.ui_state.log_follow = true;
+    app.ui_state.selected = app.max_selection().saturating_sub(1);
 
-    assert_eq!(app.log_source, LogSource::All);
+    assert_eq!(app.ui_state.log_source, LogSource::All);
     assert_eq!(app.log_lines().len(), 2);
 
     app.handle_key(key(KeyCode::Char('x'))).await;
-    assert_eq!(app.log_source, LogSource::App);
+    assert_eq!(app.ui_state.log_source, LogSource::App);
     assert_eq!(
-        app.message.as_deref(),
+        app.ui_state.message.as_deref(),
         Some(format!("{}: app", app.text().logs_source).as_str())
     );
     assert_eq!(app.log_lines().len(), 1);
     assert_eq!(app.log_lines()[0].message, "app line");
-    assert_eq!(app.selected, 0);
+    assert_eq!(app.ui_state.selected, 0);
 
     app.handle_key(key(KeyCode::Char('x'))).await;
-    assert_eq!(app.log_source, LogSource::Singbox);
+    assert_eq!(app.ui_state.log_source, LogSource::Singbox);
     assert_eq!(app.log_lines().len(), 1);
     assert_eq!(app.log_lines()[0].message, "sing-box line");
 
     app.handle_key(key(KeyCode::Char('x'))).await;
-    assert_eq!(app.log_source, LogSource::All);
+    assert_eq!(app.ui_state.log_source, LogSource::All);
     assert_eq!(app.log_lines().len(), 2);
 }
 
@@ -547,8 +563,8 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
             app.node_delays.insert(item.tag.clone(), delay);
         }
     }
-    app.page = Page::Nodes;
-    app.selected = app
+    app.ui_state.page = Page::Nodes;
+    app.ui_state.selected = app
         .nodes
         .iter()
         .position(|item| item.name == "Delta")
@@ -561,7 +577,7 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
             .collect::<Vec<_>>(),
         vec!["Beta", "Alpha", "Delta", "Gamma"]
     );
-    assert_eq!(app.nodes[app.selected].name, "Delta");
+    assert_eq!(app.nodes[app.ui_state.selected].name, "Delta");
 
     app.handle_key(key(KeyCode::Char('n'))).await;
     assert_eq!(
@@ -571,7 +587,7 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
             .collect::<Vec<_>>(),
         vec!["Alpha", "Beta", "Delta", "Gamma"]
     );
-    assert_eq!(app.nodes[app.selected].name, "Delta");
+    assert_eq!(app.nodes[app.ui_state.selected].name, "Delta");
 
     app.handle_key(key(KeyCode::Char('n'))).await;
     assert_eq!(
@@ -588,16 +604,16 @@ async fn restart_requires_two_presses_and_can_be_cancelled() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Running;
     app.handle_key(key(KeyCode::Char('R'))).await;
-    assert!(app.restart_confirm);
+    assert!(app.ui_state.restart_confirm);
     assert!(app.view().restart_confirm);
     app.handle_key(key(KeyCode::Esc)).await;
-    assert!(!app.restart_confirm);
+    assert!(!app.ui_state.restart_confirm);
 
     app.proxy_runtime.status = ProxyStatus::Stopped;
     app.handle_key(key(KeyCode::Char('R'))).await;
-    assert!(!app.restart_confirm);
+    assert!(!app.ui_state.restart_confirm);
     assert_eq!(
-        app.message.as_deref(),
+        app.ui_state.message.as_deref(),
         Some(app.text().msg_proxy_not_running)
     );
 }
@@ -605,26 +621,26 @@ async fn restart_requires_two_presses_and_can_be_cancelled() {
 #[tokio::test]
 async fn logs_timestamp_cycles_through_time_date_and_hidden() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Logs;
-    assert_eq!(app.log_timestamp, LogTimestamp::Time);
+    app.ui_state.page = Page::Logs;
+    assert_eq!(app.ui_state.log_timestamp, LogTimestamp::Time);
     app.handle_key(key(KeyCode::Char('d'))).await;
-    assert_eq!(app.log_timestamp, LogTimestamp::DateTime);
+    assert_eq!(app.ui_state.log_timestamp, LogTimestamp::DateTime);
     app.handle_key(key(KeyCode::Char('d'))).await;
-    assert_eq!(app.log_timestamp, LogTimestamp::Hidden);
+    assert_eq!(app.ui_state.log_timestamp, LogTimestamp::Hidden);
     app.handle_key(key(KeyCode::Char('d'))).await;
-    assert_eq!(app.log_timestamp, LogTimestamp::Time);
+    assert_eq!(app.ui_state.log_timestamp, LogTimestamp::Time);
 }
 
 #[tokio::test]
 async fn modified_shortcuts_are_ignored() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL))
         .await;
-    assert_eq!(app.page, Page::Nodes);
+    assert_eq!(app.ui_state.page, Page::Nodes);
     app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT))
         .await;
-    assert!(app.message.is_none());
+    assert!(app.ui_state.message.is_none());
 }
 
 #[test]
@@ -682,7 +698,7 @@ async fn config_save_failure_keeps_the_in_memory_config() {
     let language = app.config.language;
     app.toggle_language();
     assert_eq!(app.config.language, language);
-    assert!(app.last_error.is_some());
+    assert!(app.ui_state.last_error.is_some());
 }
 
 #[tokio::test]
@@ -706,6 +722,7 @@ async fn subscription_errors_are_not_cleared_by_another_success() {
     app.subscription_state.subscriptions = vec![failed, empty_runtime(config_b.clone())];
     app.refresh_last_error_from_subscriptions();
     assert!(app
+        .ui_state
         .last_error
         .as_deref()
         .is_some_and(|error| error.contains("a: HTTP 500")));
@@ -720,6 +737,7 @@ async fn subscription_errors_are_not_cleared_by_another_success() {
     })
     .await;
     assert!(app
+        .ui_state
         .last_error
         .as_deref()
         .is_some_and(|error| error.contains("a: HTTP 500")));
@@ -735,6 +753,7 @@ async fn lan_access_defaults_off_and_toggle_warns() {
     assert!(app.config.allow_lan);
     assert!(app.listen_addresses().starts_with("0.0.0.0"));
     assert!(app
+        .ui_state
         .message
         .as_deref()
         .unwrap_or_default()
@@ -747,22 +766,28 @@ async fn lan_access_defaults_off_and_toggle_warns() {
 #[tokio::test]
 async fn settings_jk_selects_and_enter_toggles_or_edits() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Settings;
-    app.selected = setting_index(&app, SettingsItem::Language);
+    app.ui_state.page = Page::Settings;
+    app.ui_state.selected = setting_index(&app, SettingsItem::Language);
     let language = app.config.language;
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(app.config.language, language.toggle());
 
-    app.selected = setting_index(&app, SettingsItem::AllowLan);
+    app.ui_state.selected = setting_index(&app, SettingsItem::AllowLan);
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.config.allow_lan);
 
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert_eq!(app.selected, setting_index(&app, SettingsItem::LanAuth));
+    assert_eq!(
+        app.ui_state.selected,
+        setting_index(&app, SettingsItem::LanAuth)
+    );
     app.handle_key(key(KeyCode::Char('k'))).await;
-    assert_eq!(app.selected, setting_index(&app, SettingsItem::AllowLan));
+    assert_eq!(
+        app.ui_state.selected,
+        setting_index(&app, SettingsItem::AllowLan)
+    );
 
-    app.selected = setting_index(&app, SettingsItem::KeywordsExclude);
+    app.ui_state.selected = setting_index(&app, SettingsItem::KeywordsExclude);
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(
         app.keyword_form().map(|form| form.field),
@@ -781,12 +806,15 @@ async fn test_url_is_read_only_and_copyable() {
         accept: tokio::sync::oneshot::channel().0,
     })
     .await;
-    app.page = Page::Settings;
-    app.selected = setting_index(&app, SettingsItem::TestUrl);
+    app.ui_state.page = Page::Settings;
+    app.ui_state.selected = setting_index(&app, SettingsItem::TestUrl);
     let expected = app.config.test_url.clone();
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.settings_form().is_none());
-    assert_eq!(app.message.as_deref(), Some(app.text().settings_copied));
+    assert_eq!(
+        app.ui_state.message.as_deref(),
+        Some(app.text().settings_copied)
+    );
     let mut copied = None;
     while let Ok(message) = rx.try_recv() {
         if let ServerMsg::Copy { text } = message {
@@ -807,12 +835,15 @@ async fn settings_read_only_item_copies_its_value() {
         accept: tokio::sync::oneshot::channel().0,
     })
     .await;
-    app.page = Page::Settings;
-    app.selected = setting_index(&app, SettingsItem::ConfigPath);
+    app.ui_state.page = Page::Settings;
+    app.ui_state.selected = setting_index(&app, SettingsItem::ConfigPath);
     let expected = app.paths.config_file.display().to_string();
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.settings_form().is_none());
-    assert_eq!(app.message.as_deref(), Some(app.text().settings_copied));
+    assert_eq!(
+        app.ui_state.message.as_deref(),
+        Some(app.text().settings_copied)
+    );
     let mut copied = None;
     while let Ok(message) = rx.try_recv() {
         if let ServerMsg::Copy { text } = message {
@@ -833,12 +864,12 @@ async fn port_and_dns_are_read_only_and_copyable() {
         accept: tokio::sync::oneshot::channel().0,
     })
     .await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     for (item, expected) in [
         (SettingsItem::Port, "12000".to_string()),
         (SettingsItem::DnsServers, "1.1.1.1, 8.8.8.8".to_string()),
     ] {
-        app.selected = setting_index(&app, item);
+        app.ui_state.selected = setting_index(&app, item);
         app.handle_key(key(KeyCode::Enter)).await;
         assert!(app.settings_form().is_none());
         let mut copied = None;
@@ -854,7 +885,7 @@ async fn port_and_dns_are_read_only_and_copyable() {
 #[tokio::test]
 async fn lan_auth_is_one_setting_and_persists_both_fields() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     let base = settings_items(false).len();
     assert_eq!(settings_items(true).len(), base + 1);
     assert!(!settings_items(false).contains(&SettingsItem::LanAuth));
@@ -863,7 +894,7 @@ async fn lan_auth_is_one_setting_and_persists_both_fields() {
     assert!(app.config.allow_lan);
     assert!(settings_items(true).contains(&SettingsItem::LanAuth));
 
-    app.selected = setting_index(&app, SettingsItem::LanAuth);
+    app.ui_state.selected = setting_index(&app, SettingsItem::LanAuth);
     app.handle_key(key(KeyCode::Enter)).await;
     let form = app.settings_form().expect("LAN auth form");
     assert_eq!(form.active, SettingsField::LanUsername);
@@ -902,11 +933,11 @@ async fn lan_auth_is_one_setting_and_persists_both_fields() {
 #[tokio::test]
 async fn lan_auth_form_keeps_password_visible_and_ignores_ctrl_r() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Settings;
+    app.ui_state.page = Page::Settings;
     app.config.allow_lan = true;
     app.config.lan_username = "alice".into();
     app.config.lan_password = "s3cret".into();
-    app.selected = setting_index(&app, SettingsItem::LanAuth);
+    app.ui_state.selected = setting_index(&app, SettingsItem::LanAuth);
     app.handle_key(key(KeyCode::Enter)).await;
     let form = app.settings_form().expect("LAN auth form");
     assert_eq!(form.username.value, "alice");
@@ -923,7 +954,7 @@ async fn lan_auth_form_keeps_password_visible_and_ignores_ctrl_r() {
 #[tokio::test]
 async fn singbox_log_level_is_read_only_on_setup() {
     let (mut app, _dir) = test_app().await;
-    app.overlay = Some(Overlay::Setup { selected: 0 });
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     let before = app.config.singbox_log_level;
     app.handle_key(key(KeyCode::Char('v'))).await;
     assert_eq!(app.config.singbox_log_level, before);
@@ -1016,14 +1047,17 @@ async fn restart_backoff_pauses_after_five_failures() {
     assert_eq!(app.proxy_runtime.restart_attempts, MAX_RESTART_ATTEMPTS);
     app.schedule_restart();
     assert!(app.proxy_runtime.restart_at.is_none());
-    assert_eq!(app.message.as_deref(), Some(app.text().msg_restart_paused));
+    assert_eq!(
+        app.ui_state.message.as_deref(),
+        Some(app.text().msg_restart_paused)
+    );
 }
 
 #[tokio::test]
 async fn subscription_form_validates_and_saves_disabled_entry() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Subscriptions;
-    app.overlay = Some(Overlay::Edit(EditForm::Subscription(
+    app.ui_state.page = Page::Subscriptions;
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Subscription(
         SubscriptionForm::new(),
     )));
     if let Some(form) = app.subscription_form_mut() {
@@ -1056,8 +1090,8 @@ async fn subscription_form_validates_and_saves_disabled_entry() {
 #[tokio::test]
 async fn subscription_form_clears_its_error_when_the_user_edits() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Subscriptions;
-    app.overlay = Some(Overlay::Edit(EditForm::Subscription(
+    app.ui_state.page = Page::Subscriptions;
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Subscription(
         SubscriptionForm::new(),
     )));
     if let Some(form) = app.subscription_form_mut() {
@@ -1083,35 +1117,35 @@ async fn subscription_delete_confirmation_is_persistent_and_cancellable() {
     app.subscription_state
         .subscriptions
         .push(empty_runtime(config));
-    app.page = Page::Subscriptions;
-    app.selected = 0;
+    app.ui_state.page = Page::Subscriptions;
+    app.ui_state.selected = 0;
 
     app.handle_key(key(KeyCode::Char('d'))).await;
-    assert!(app.subscription_delete.is_some());
+    assert!(app.ui_state.subscription_delete.is_some());
     assert!(app.view().subscription_delete);
     assert!(
-        app.message.is_none(),
+        app.ui_state.message.is_none(),
         "confirmations must not use the toast"
     );
 
-    app.message = Some("expired toast".to_string());
-    app.message_at = Some(Instant::now() - TOAST_TTL - Duration::from_secs(1));
+    app.ui_state.message = Some("expired toast".to_string());
+    app.ui_state.message_at = Some(Instant::now() - TOAST_TTL - Duration::from_secs(1));
     app.on_tick().await;
     assert!(
-        app.subscription_delete.is_some(),
+        app.ui_state.subscription_delete.is_some(),
         "toast expiry must not cancel the confirmation"
     );
 
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert!(app.subscription_delete.is_none());
+    assert!(app.ui_state.subscription_delete.is_none());
 
     app.handle_key(key(KeyCode::Char('d'))).await;
     app.handle_key(key(KeyCode::Esc)).await;
-    assert!(app.subscription_delete.is_none());
+    assert!(app.ui_state.subscription_delete.is_none());
     assert_eq!(app.config.subscriptions.len(), 1);
 
     app.handle_key(key(KeyCode::Char('d'))).await;
-    assert!(app.subscription_delete.is_some());
+    assert!(app.ui_state.subscription_delete.is_some());
     app.handle_key(key(KeyCode::Char('d'))).await;
     assert!(app.config.subscriptions.is_empty());
 }
@@ -1120,8 +1154,8 @@ async fn subscription_delete_confirmation_is_persistent_and_cancellable() {
 async fn node_selection_while_stopped_applies_on_start() {
     let (mut app, _dir) = test_app().await;
     app.nodes = vec![node("香港 01"), node("日本 02")];
-    app.page = Page::Nodes;
-    app.selected = 1;
+    app.ui_state.page = Page::Nodes;
+    app.ui_state.selected = 1;
 
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(
@@ -1133,6 +1167,7 @@ async fn node_selection_while_stopped_applies_on_start() {
         Some(PendingSelection::Node(app.nodes[1].tag.clone()))
     );
     assert!(app
+        .ui_state
         .message
         .as_deref()
         .unwrap_or_default()
@@ -1195,19 +1230,19 @@ async fn keyword_form_saves_each_field_separately() {
     app.config.keywords_exclude = vec!["过期".to_string()];
     let mut form = KeywordForm::from_config(&app.config, KeywordField::Include);
     form.value = LineInput::new("香港, HK");
-    app.overlay = Some(Overlay::Edit(EditForm::Keyword(form)));
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Keyword(form)));
 
     app.save_keyword_form();
 
     assert_eq!(app.config.keywords_include, vec!["香港", "HK"]);
     assert_eq!(app.config.keywords_exclude, vec!["过期"]);
     assert!(app.keyword_form().is_none());
-    let message = app.message.as_deref().unwrap_or_default();
+    let message = app.ui_state.message.as_deref().unwrap_or_default();
     assert!(message.contains("1/2"), "{message}");
 
     let mut form = KeywordForm::from_config(&app.config, KeywordField::Exclude);
     form.value = LineInput::new("过期, 剩余");
-    app.overlay = Some(Overlay::Edit(EditForm::Keyword(form)));
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Keyword(form)));
     app.save_keyword_form();
     assert_eq!(app.config.keywords_include, vec!["香港", "HK"]);
     assert_eq!(app.config.keywords_exclude, vec!["过期", "剩余"]);
@@ -1226,7 +1261,7 @@ async fn missing_preferred_node_is_cleared() {
     assert!(app.preferred_node.is_none());
     assert!(app.pending_selection.is_none());
     assert_eq!(
-        app.message.as_deref(),
+        app.ui_state.message.as_deref(),
         Some(app.text().msg_preferred_missing)
     );
     app.logger.flush();
@@ -1325,46 +1360,46 @@ async fn switch_budget_pauses_health_failover_and_resets_the_window() {
 #[tokio::test]
 async fn help_returns_to_the_previous_page() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Logs;
+    app.ui_state.page = Page::Logs;
 
     app.handle_key(key(KeyCode::Char('?'))).await;
-    assert_eq!(app.page, Page::Help);
+    assert_eq!(app.ui_state.page, Page::Help);
     assert_eq!(app.view().tab_page, Page::Logs);
     app.handle_key(key(KeyCode::Esc)).await;
-    assert_eq!(app.page, Page::Logs);
+    assert_eq!(app.ui_state.page, Page::Logs);
 
     app.handle_key(key(KeyCode::Char('?'))).await;
-    assert_eq!(app.page, Page::Help);
+    assert_eq!(app.ui_state.page, Page::Help);
     app.handle_key(key(KeyCode::Char('?'))).await;
-    assert_eq!(app.page, Page::Logs);
+    assert_eq!(app.ui_state.page, Page::Logs);
 }
 
 #[tokio::test]
 async fn help_scrolls_with_jk_and_clamps_at_bottom() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Logs;
+    app.ui_state.page = Page::Logs;
     app.handle_key(key(KeyCode::Char('?'))).await;
-    app.help_max_scroll = 5;
+    app.ui_state.help_max_scroll = 5;
 
     app.handle_key(key(KeyCode::Char('j'))).await;
-    assert_eq!(app.help_scroll, 1);
+    assert_eq!(app.ui_state.help_scroll, 1);
     app.handle_key(key(KeyCode::Down)).await;
-    assert_eq!(app.help_scroll, 2);
+    assert_eq!(app.ui_state.help_scroll, 2);
     app.handle_key(key(KeyCode::Char('k'))).await;
-    assert_eq!(app.help_scroll, 1);
+    assert_eq!(app.ui_state.help_scroll, 1);
     app.handle_key(key(KeyCode::Char('g'))).await;
-    assert_eq!(app.help_scroll, 0);
+    assert_eq!(app.ui_state.help_scroll, 0);
     app.handle_key(key(KeyCode::Char('G'))).await;
-    assert_eq!(app.help_scroll, 5);
+    assert_eq!(app.ui_state.help_scroll, 5);
     for _ in 0..10 {
         app.handle_key(key(KeyCode::Char('j'))).await;
     }
-    assert_eq!(app.help_scroll, 5);
+    assert_eq!(app.ui_state.help_scroll, 5);
     app.handle_key(key(KeyCode::Char('k'))).await;
-    assert_eq!(app.help_scroll, 4);
+    assert_eq!(app.ui_state.help_scroll, 4);
 
     app.handle_event(AppEvent::HelpViewport(2)).await;
-    assert_eq!(app.help_scroll, 2);
+    assert_eq!(app.ui_state.help_scroll, 2);
 }
 
 #[test]
@@ -1399,9 +1434,9 @@ fn line_input_moves_cursor_and_edits_at_position() {
 async fn enter_opens_log_detail_and_esc_closes_it() {
     let (mut app, _dir) = test_app().await;
     app.logger.app(LogLevel::Info, "a detailed log line");
-    app.page = Page::Logs;
-    app.log_follow = true;
-    app.selected = app.max_selection().saturating_sub(1);
+    app.ui_state.page = Page::Logs;
+    app.ui_state.log_follow = true;
+    app.ui_state.selected = app.max_selection().saturating_sub(1);
 
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.log_detail().is_some());
@@ -1416,9 +1451,9 @@ async fn log_detail_scrolls_and_clamps_to_the_viewport() {
         app.logger
             .app(LogLevel::Info, format!("scrolling line {index}"));
     }
-    app.page = Page::Logs;
-    app.log_follow = true;
-    app.selected = app.max_selection().saturating_sub(1);
+    app.ui_state.page = Page::Logs;
+    app.ui_state.log_follow = true;
+    app.ui_state.selected = app.max_selection().saturating_sub(1);
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.log_detail().is_some());
 
@@ -1451,27 +1486,27 @@ async fn toast_expires_after_ttl() {
     assert_eq!(TOAST_TTL, Duration::from_secs(3));
     app.notify("saved");
     assert!(app.view().toast.is_some());
-    app.message_at = Some(Instant::now() - TOAST_TTL - Duration::from_secs(1));
+    app.ui_state.message_at = Some(Instant::now() - TOAST_TTL - Duration::from_secs(1));
     assert!(app.view().toast.is_none());
 }
 
 #[tokio::test]
 async fn dashboard_scroll_clamps_to_viewport() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     app.handle_event(AppEvent::DashboardViewport(3)).await;
     for _ in 0..10 {
         app.handle_key(key(KeyCode::Char('j'))).await;
     }
-    assert_eq!(app.dashboard_scroll, 3);
+    assert_eq!(app.ui_state.dashboard_scroll, 3);
     app.handle_key(key(KeyCode::Char('k'))).await;
-    assert_eq!(app.dashboard_scroll, 2);
+    assert_eq!(app.ui_state.dashboard_scroll, 2);
     app.handle_key(key(KeyCode::Char('g'))).await;
-    assert_eq!(app.dashboard_scroll, 0);
+    assert_eq!(app.ui_state.dashboard_scroll, 0);
     app.handle_key(key(KeyCode::Char('G'))).await;
-    assert_eq!(app.dashboard_scroll, 3);
+    assert_eq!(app.ui_state.dashboard_scroll, 3);
     app.handle_event(AppEvent::DashboardViewport(1)).await;
-    assert_eq!(app.dashboard_scroll, 1);
+    assert_eq!(app.ui_state.dashboard_scroll, 1);
 }
 
 #[tokio::test]
@@ -1481,7 +1516,7 @@ async fn view_roundtrips_through_json() {
     app.delay_testing.insert("n2".to_string());
     let encoded = serde_json::to_string(&app.view()).unwrap();
     let decoded: View = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded.page, app.page);
+    assert_eq!(decoded.page, app.ui_state.page);
     assert_eq!(decoded.config.port, app.config.port);
     assert_eq!(decoded.node_delays.get("n1"), Some(&42));
     assert!(decoded.delay_testing.contains("n2"));
@@ -1490,7 +1525,7 @@ async fn view_roundtrips_through_json() {
 #[tokio::test]
 async fn view_does_not_expose_secrets_or_unused_config_fields() {
     let (mut app, _dir) = test_app().await;
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     app.config.allow_lan = true;
     app.config.lan_password = "s3cret".to_string();
     app.config.subscriptions = vec![SubscriptionConfig {
@@ -1591,7 +1626,7 @@ async fn nodes_view_payload_stays_bounded_at_the_node_cap() {
             item
         })
         .collect();
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     for item in &app.nodes {
         app.node_delays.insert(item.tag.clone(), 42);
     }
@@ -1833,10 +1868,10 @@ async fn no_healthy_nodes_reports_the_failure_without_enabled_subscriptions() {
     app.proxy_runtime.status = ProxyStatus::Running;
     app.on_no_healthy_nodes();
     assert_eq!(
-        app.last_error.as_deref(),
+        app.ui_state.last_error.as_deref(),
         Some(app.text().msg_health_no_nodes)
     );
-    assert!(app.message.is_some());
+    assert!(app.ui_state.message.is_some());
     assert!(!app.health.recovery_refresh_pending);
     assert!(app.health.pause_until.is_some_and(|at| at > Instant::now()));
     app.invalidate_health_tasks();
@@ -1881,7 +1916,7 @@ async fn healthy_probe_clears_no_node_error_and_backoff() {
     app.health.no_node_level = 2;
     app.health.pause_until = Some(Instant::now() - Duration::from_secs(1));
     let no_nodes = app.text().msg_health_no_nodes.to_string();
-    app.last_error = Some(no_nodes);
+    app.ui_state.last_error = Some(no_nodes);
     let generation = app.health.generation;
 
     app.handle_event(AppEvent::HealthProbe {
@@ -1891,7 +1926,7 @@ async fn healthy_probe_clears_no_node_error_and_backoff() {
     })
     .await;
 
-    assert!(app.last_error.is_none());
+    assert!(app.ui_state.last_error.is_none());
     assert!(app.health.pause_until.is_none());
     assert_eq!(app.health.no_node_level, 0);
 }
@@ -2043,18 +2078,18 @@ async fn view_scopes_heavy_lists_to_the_active_page() {
             duration_secs: None,
         });
 
-    app.page = Page::Dashboard;
+    app.ui_state.page = Page::Dashboard;
     let view = app.view();
     assert_eq!(view.node_count, 2);
     assert!(view.nodes.is_empty());
     assert_eq!(view.connection_count, 1);
     assert!(view.metrics.connections.is_empty());
 
-    app.page = Page::Nodes;
+    app.ui_state.page = Page::Nodes;
     let view = app.view();
     assert_eq!(view.nodes.len(), 2);
 
-    app.page = Page::Connections;
+    app.ui_state.page = Page::Connections;
     let view = app.view();
     assert_eq!(view.metrics.connections.len(), 1);
 }
