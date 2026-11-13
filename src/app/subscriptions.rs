@@ -231,6 +231,21 @@ impl App {
         }
     }
 
+    /// Rebuild the merged node list after `self.subscriptions` changed.
+    pub(super) fn refresh_merged_nodes(&mut self) {
+        self.nodes = merge_nodes(&self.subscriptions);
+        self.prune_node_state();
+        self.sync_preferred_node();
+    }
+
+    /// Shared tail for full and single-subscription refresh results.
+    pub(super) fn finalize_subscription_change(&mut self) {
+        self.last_node_sort = None;
+        self.sort_nodes_if_visible();
+        self.save_subscription_cache();
+        self.refresh_last_error_from_subscriptions();
+    }
+
     pub(super) fn save_subscription_cache(&self) {
         if let Err(err) =
             subscription::cache::save(&self.paths.subscription_cache(), &self.subscriptions)

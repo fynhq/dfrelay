@@ -895,7 +895,8 @@ impl App {
                 };
                 let node_count: usize = ordered.iter().map(|item| item.nodes.len()).sum();
                 let capped = node_count > subscription::MAX_TOTAL_NODES;
-                self.nodes = merge_nodes(&ordered);
+                self.subscriptions = ordered;
+                self.refresh_merged_nodes();
                 if capped {
                     self.logger.app(
                         LogLevel::Warn,
@@ -906,8 +907,6 @@ impl App {
                         ),
                     );
                 }
-                self.prune_node_state();
-                self.subscriptions = ordered;
                 if self
                     .subscriptions
                     .iter()
@@ -917,7 +916,6 @@ impl App {
                 } else {
                     self.subscription_refresh_succeeded();
                 }
-                self.sync_preferred_node();
                 self.selected = selected_tag
                     .and_then(|tag| self.nodes.iter().position(|node| node.tag == tag))
                     .unwrap_or_else(|| {
@@ -926,10 +924,7 @@ impl App {
                 if self.page == Page::Logs && self.log_follow {
                     self.selected = self.max_selection_for(Page::Logs).saturating_sub(1);
                 }
-                self.last_node_sort = None;
-                self.sort_nodes_if_visible();
-                self.save_subscription_cache();
-                self.refresh_last_error_from_subscriptions();
+                self.finalize_subscription_change();
                 self.notify(format!(
                     "{}: {node_count}",
                     self.text().msg_subscriptions_refreshed
@@ -976,13 +971,8 @@ impl App {
                 } else {
                     self.subscriptions.push(runtime.clone());
                 }
-                self.nodes = merge_nodes(&self.subscriptions);
-                self.prune_node_state();
-                self.sync_preferred_node();
-                self.last_node_sort = None;
-                self.sort_nodes_if_visible();
-                self.save_subscription_cache();
-                self.refresh_last_error_from_subscriptions();
+                self.refresh_merged_nodes();
+                self.finalize_subscription_change();
                 if runtime.error.is_none() {
                     self.notify(format!(
                         "{}: {}",
@@ -1550,7 +1540,7 @@ impl App {
             self.ack(client_id, true, "proxy is already running");
             return;
         }
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             self.ack(client_id, false, "proxy state is changing");
             return;
         }
@@ -1583,7 +1573,7 @@ impl App {
             self.ack_pending_start(false, "no nodes available");
             return;
         }
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             return;
         }
         if let Err(err) = self.start_proxy() {
@@ -1737,8 +1727,16 @@ impl App {
         }
     }
 
+    fn setup_busy(&self) -> bool {
+        self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight
+    }
+
+    fn proxy_busy(&self) -> bool {
+        matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping)
+    }
+
     fn start_or_stop(&mut self) {
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             self.notify(self.text().msg_proxy_busy);
             return;
         }
@@ -1753,11 +1751,11 @@ impl App {
     }
 
     fn request_restart(&mut self) {
-        if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
+        if self.setup_busy() {
             self.notify(self.text().setup_busy);
             return;
         }
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             self.notify(self.text().msg_proxy_busy);
             return;
         }
@@ -1770,11 +1768,11 @@ impl App {
     }
 
     fn perform_restart(&mut self) {
-        if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
+        if self.setup_busy() {
             self.notify(self.text().setup_busy);
             return;
         }
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             self.notify(self.text().msg_proxy_busy);
             return;
         }
@@ -1795,7 +1793,7 @@ impl App {
         if self.pending_restart_subscription.is_some() {
             return false;
         }
-        if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
+        if self.setup_busy() {
             return false;
         }
         if self.nodes.is_empty() {
@@ -1869,7 +1867,7 @@ impl App {
     }
 
     fn start_proxy(&mut self) -> Result<(), String> {
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             return Err(self.text().msg_proxy_busy.to_string());
         }
         if self.binary_manager.locate().is_none() {
@@ -2100,7 +2098,7 @@ impl App {
         let Some(node) = self.nodes.get(self.selected).cloned() else {
             return;
         };
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             self.last_error = Some(self.text().msg_proxy_busy.to_string());
             return;
         }
@@ -2363,7 +2361,7 @@ impl App {
     }
 
     fn select_node_auto(&mut self) {
-        if matches!(self.status, ProxyStatus::Starting | ProxyStatus::Stopping) {
+        if self.proxy_busy() {
             self.last_error = Some(self.text().msg_proxy_busy.to_string());
             return;
         }

@@ -43,7 +43,7 @@ impl App {
     }
 
     pub(super) fn request_rollback(&mut self) {
-        if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
+        if self.setup_busy() {
             self.notify(self.text().setup_busy);
             return;
         }
@@ -56,7 +56,7 @@ impl App {
     }
 
     pub(super) fn perform_rollback(&mut self) {
-        if self.setup.downloading || self.setup.rollback_in_flight || self.install_in_flight {
+        if self.setup_busy() {
             self.notify(self.text().setup_busy);
             return;
         }
