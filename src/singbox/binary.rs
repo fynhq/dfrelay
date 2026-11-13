@@ -860,8 +860,7 @@ fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::hex::encode(&Sha256::digest(bytes))
 }
 
 fn parse_version_output(output: &str) -> Option<String> {

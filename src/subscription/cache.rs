@@ -96,14 +96,7 @@ pub fn save(path: &Path, runtimes: &[SubscriptionRuntime]) -> std::io::Result<()
 }
 
 pub(super) fn url_hash(url: &str) -> String {
-    use std::fmt::Write as _;
-
-    let digest = Sha256::digest(url.as_bytes());
-    let mut hash = String::with_capacity(64);
-    for byte in digest {
-        let _ = write!(hash, "{byte:02x}");
-    }
-    hash
+    crate::hex::encode(&Sha256::digest(url.as_bytes()))
 }
 
 #[cfg(test)]

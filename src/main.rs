@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod fsutil;
 mod guard;
+mod hex;
 mod http_body;
 mod i18n;
 mod ipc;

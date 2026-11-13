@@ -6,6 +6,7 @@ use super::outbound::{
     ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_supported_network,
     ensure_tuic_congestion, ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
 };
+use crate::config::is_go_duration;
 
 pub type ClashParseOutput = (Vec<Node>, Vec<(String, String)>);
 
@@ -452,31 +453,6 @@ fn insert_duration(
     }
 }
 
-fn is_go_duration(text: &str) -> bool {
-    let mut rest = text;
-    if rest.is_empty() {
-        return false;
-    }
-    while !rest.is_empty() {
-        let digits = rest
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
-            .unwrap_or(rest.len());
-        let number = &rest[..digits];
-        if digits == 0 || number.ends_with('.') || number.parse::<f64>().is_err() {
-            return false;
-        }
-        rest = &rest[digits..];
-        let Some(unit) = ["ns", "us", "µs", "ms", "s", "m", "h"]
-            .iter()
-            .find(|unit| rest.starts_with(*unit))
-        else {
-            return false;
-        };
-        rest = &rest[unit.len()..];
-    }
-    true
-}
-
 fn yaml_bool(map: &Mapping, key: &str) -> Option<bool> {
     let key = YamlValue::String(key.to_string());
     map.get(&key).and_then(YamlValue::as_bool)
@@ -720,10 +696,16 @@ proxies:
         for valid in [
             "30s", "1m", "1h30m", "500ms", "1.5s", ".5s", "250us", "100ns",
         ] {
-            assert!(is_go_duration(valid), "{valid} should be valid");
+            assert!(
+                crate::config::is_go_duration(valid),
+                "{valid} should be valid"
+            );
         }
         for invalid in ["", "soon", "30", "s", "1d", "-5s", "1x", "1m3", "1.s"] {
-            assert!(!is_go_duration(invalid), "{invalid} should be invalid");
+            assert!(
+                !crate::config::is_go_duration(invalid),
+                "{invalid} should be invalid"
+            );
         }
     }
 

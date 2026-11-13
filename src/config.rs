@@ -18,36 +18,30 @@ pub const DEFAULT_DNS_SERVERS: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
 
 /// Accept the Go `time.ParseDuration` subset used by sing-box: a sequence of
 /// decimal numbers with ns/us/µs/μs/ms/s/m/h units. Negative values are not
-/// meaningful for these settings.
-fn is_go_duration(value: &str) -> bool {
+/// meaningful for these settings. Shared with the Clash duration fields.
+pub(crate) fn is_go_duration(value: &str) -> bool {
     let mut rest = value.trim();
     if rest.is_empty() {
         return false;
     }
-    let mut found = false;
     while !rest.is_empty() {
         let number_len = rest
             .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
             .unwrap_or(rest.len());
-        if number_len == 0 {
-            return false;
-        }
         let number = &rest[..number_len];
-        if number.matches('.').count() > 1 || !number.chars().any(|ch| ch.is_ascii_digit()) {
+        if number_len == 0 || number.ends_with('.') || number.parse::<f64>().is_err() {
             return false;
         }
         rest = &rest[number_len..];
-        let unit_len = rest
-            .find(|ch: char| ch.is_ascii_digit() || ch == '.')
-            .unwrap_or(rest.len());
-        let unit = &rest[..unit_len];
-        if !matches!(unit, "ns" | "us" | "µs" | "μs" | "ms" | "s" | "m" | "h") {
+        let Some(unit) = ["ns", "us", "µs", "μs", "ms", "s", "m", "h"]
+            .iter()
+            .find(|unit| rest.starts_with(**unit))
+        else {
             return false;
-        }
-        rest = &rest[unit_len..];
-        found = true;
+        };
+        rest = &rest[unit.len()..];
     }
-    found
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -488,10 +482,10 @@ mod tests {
 
     #[test]
     fn go_duration_validation_accepts_sing_box_values() {
-        for value in ["0s", "300ms", "3m", "1h30m", "1.5h", ".5s", "20µs"] {
+        for value in ["0s", "300ms", "3m", "1h30m", "1.5h", ".5s", "20µs", "20μs"] {
             assert!(is_go_duration(value), "{value}");
         }
-        for value in ["", "3", "3x", "-3s", "1.2.3s", "3m 1s", "h"] {
+        for value in ["", "3", "3x", "-3s", "1.2.3s", "1.s", "3m 1s", "h"] {
             assert!(!is_go_duration(value), "{value}");
         }
     }

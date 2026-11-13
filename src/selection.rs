@@ -4,8 +4,6 @@ use sha2::{Digest, Sha256};
 use crate::subscription::model::Node;
 
 pub fn stable_tag(protocol: &str, server: &str, port: u16, material: &str) -> String {
-    use std::fmt::Write as _;
-
     let mut hasher = Sha256::new();
     hasher.update(protocol.as_bytes());
     hasher.update(b"|");
@@ -15,11 +13,8 @@ pub fn stable_tag(protocol: &str, server: &str, port: u16, material: &str) -> St
     hasher.update(b"|");
     hasher.update(material.as_bytes());
     let digest = hasher.finalize();
-    let mut tag = String::with_capacity(18);
-    tag.push_str("n-");
-    for byte in digest.iter().take(8) {
-        let _ = write!(tag, "{byte:02x}");
-    }
+    let mut tag = String::from("n-");
+    tag.push_str(&crate::hex::encode(&digest[..8]));
     tag
 }
 

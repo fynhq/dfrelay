@@ -350,7 +350,7 @@ fn allocate_clash_port(proxy_port: u16) -> Result<u16, SupervisorError> {
 fn random_secret() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::hex::encode(&bytes)
 }
 
 #[cfg(test)]
