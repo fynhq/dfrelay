@@ -6,6 +6,9 @@ pub mod outbound;
 pub mod parse_clash;
 pub mod parse_uri;
 
+#[cfg(test)]
+mod corpus_tests;
+
 use std::collections::HashSet;
 
 use chrono::Local;
