@@ -121,6 +121,9 @@ jobs:
       - name: Run tests on musl
         run: cargo test --locked --target x86_64-unknown-linux-musl
 
+      - name: Check third-party notices
+        run: python3 .github/scripts/gen_third_party.py --check
+
   build:
     name: Build ${{ matrix.target }}
     needs: [prepare, test]

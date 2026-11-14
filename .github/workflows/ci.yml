@@ -48,6 +48,9 @@ jobs:
       - name: Run tests on musl
         run: cargo test --locked --target x86_64-unknown-linux-musl
 
+      - name: Check third-party notices
+        run: python3 .github/scripts/gen_third_party.py --check
+
   # Public-surface guard: reject private-document references, local environment
   # narration, verification trailers, and local paths in new commit messages
   # and tracked files. It scans only the new range, so historical content does
