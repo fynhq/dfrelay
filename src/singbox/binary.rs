@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -18,6 +18,11 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ASSET_BYTES: usize = 100 * 1024 * 1024;
 const MAX_MANUAL_BYTES: u64 = 256 * 1024 * 1024;
+/// A file written moments ago can still be reported as busy when another
+/// thread's fork duplicated the write handle. Retry briefly instead of failing
+/// an install that is otherwise valid.
+const EXEC_RETRIES: usize = 6;
+const EXEC_RETRY_MIN_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinaryMetadata {
@@ -98,16 +103,12 @@ impl BinaryManager {
     }
 
     pub async fn version(&self, binary: &Path) -> Result<String, BinaryError> {
-        let output = tokio::time::timeout(
-            VERSION_TIMEOUT,
-            tokio::process::Command::new(binary)
-                .arg("version")
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| BinaryError::Version("timed out".to_string()))?
-        .map_err(BinaryError::Io)?;
+        let mut command = tokio::process::Command::new(binary);
+        command.arg("version").kill_on_drop(true);
+        let output = tokio::time::timeout(VERSION_TIMEOUT, output_with_retry(&mut command))
+            .await
+            .map_err(|_| BinaryError::Version("timed out".to_string()))?
+            .map_err(BinaryError::Io)?;
         if !output.status.success() {
             return Err(BinaryError::Version(format!(
                 "exit status {}",
@@ -390,15 +391,9 @@ impl BinaryManager {
     }
 
     async fn check_config_file(&self, binary: &Path, config: &Path) -> Result<(), BinaryError> {
-        let output = tokio::time::timeout(
-            CHECK_TIMEOUT,
-            tokio::process::Command::new(binary)
-                .args(["check", "-c"])
-                .arg(config)
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await;
+        let mut command = tokio::process::Command::new(binary);
+        command.args(["check", "-c"]).arg(config).kill_on_drop(true);
+        let output = tokio::time::timeout(CHECK_TIMEOUT, output_with_retry(&mut command)).await;
         let output = output
             .map_err(|_| BinaryError::Check("timed out".to_string()))?
             .map_err(BinaryError::Io)?;
@@ -414,10 +409,12 @@ impl BinaryManager {
     fn write_temp_binary(&self, bytes: &[u8]) -> Result<PathBuf, BinaryError> {
         fsutil::ensure_private_dir(&self.paths.bin_dir)?;
         let temp = self.paths.bin_dir.join("sing-box.new");
-        let mut file = fsutil::open_private_file(&temp, false)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
+        {
+            let mut file = fsutil::open_private_file(&temp, false)?;
+            file.write_all(bytes)?;
+            file.flush()?;
+            file.sync_all()?;
+        }
         fsutil::set_executable(&temp)?;
         Ok(temp)
     }
@@ -596,6 +593,31 @@ pub(crate) fn download_clients(config: &Config) -> Result<Vec<ChannelClient>, Bi
         });
     }
     Ok(clients)
+}
+
+/// Run a command, retrying while the kernel reports the executable as busy.
+///
+/// `ETXTBSY` can surface even after the local write handle was closed: a
+/// concurrent `fork` duplicates descriptors from other threads, so the child
+/// briefly sees a writer it never opened itself. The window is short, so
+/// bounded backoff is enough; permission or format errors still fail at once.
+async fn output_with_retry(
+    command: &mut tokio::process::Command,
+) -> io::Result<std::process::Output> {
+    let mut delay = EXEC_RETRY_MIN_DELAY;
+    let mut attempt = 0;
+    loop {
+        match command.output().await {
+            Err(err)
+                if err.kind() == io::ErrorKind::ExecutableFileBusy && attempt < EXEC_RETRIES =>
+            {
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
+            result => return result,
+        }
+    }
 }
 
 fn env_proxy_url() -> Option<String> {
@@ -1123,6 +1145,41 @@ mod tests {
         let metadata = manager.install_from_inbox(&archive, &logger).await.unwrap();
         assert_eq!(metadata.version, "1.14.4");
         assert_eq!(manager.version(&paths.binary()).await.unwrap(), "1.14.4");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_retries_while_the_binary_is_open_for_writing() {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        };
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        let binary = paths.bin_dir.join("fake-sing-box");
+        fs::write(&binary, fake_binary_script("1.14.4")).unwrap();
+        fsutil::set_executable(&binary).unwrap();
+
+        // A live write handle makes exec return ETXTBSY; the retry must wait
+        // for it to close instead of failing the install.
+        let writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
+        let target = binary.clone();
+        let task = tokio::spawn(async move { manager.version(&target).await });
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        drop(writer);
+
+        let version = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("version task timed out")
+            .expect("version task panicked")
+            .expect("version failed");
+        assert_eq!(version, "1.14.4");
     }
 
     #[test]
