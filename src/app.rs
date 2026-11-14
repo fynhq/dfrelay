@@ -81,6 +81,10 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_METRICS_INTERVAL: Duration = Duration::from_secs(3);
 const PROXIES_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// Report a sustained event backlog so a future decision on bounded channels
+/// (and a drop policy) is based on measurements instead of speculation.
+const EVENT_QUEUE_WARN_DEPTH: usize = 64;
+const EVENT_QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(300);
 pub const MAX_LIST_ROWS: usize = 200;
 pub const TOAST_TTL: Duration = Duration::from_secs(3);
 pub const VIEW_QUEUE_LIMIT: usize = 2;
@@ -99,7 +103,9 @@ fn connection_id_hash(id: &str) -> u64 {
 
 /// Process-lifetime counters for diagnosing selection churn without adding
 /// user-facing configuration. The rolling deque is bounded by time, not by a
-/// hard capacity; selection changes are logged at most once per window.
+/// hard capacity; selection changes are logged at most once per window. The
+/// event-queue fields sample the channel backlog at the top of each daemon
+/// iteration; they are diagnostic only and never feed routing decisions.
 #[derive(Debug, Default)]
 struct RuntimeStats {
     selection_change_times: VecDeque<Instant>,
@@ -111,6 +117,9 @@ struct RuntimeStats {
     recovery_selected: u64,
     recovery_aborted: u64,
     recovery_no_healthy: u64,
+    event_queue_peak: usize,
+    events_processed_window: u64,
+    last_event_queue_log: Option<Instant>,
 }
 
 fn edit_line_input(input: &mut LineInput, key: &KeyEvent) -> bool {
@@ -648,16 +657,20 @@ impl App {
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         let mut last_publish = Instant::now() - PUBLISH_INTERVAL;
         loop {
+            let queued = self.events_rx.len();
+            self.sample_event_queue(queued);
             let mut publish = false;
             tokio::select! {
                 maybe_event = self.events_rx.recv() => {
                     if let Some(event) = maybe_event {
+                        self.stats.events_processed_window += 1;
                         self.handle_event(event).await;
                         // Coalesce bursts (delay sweeps, key repeats) into one snapshot.
                         for _ in 0..32 {
                             let Ok(event) = self.events_rx.try_recv() else {
                                 break;
                             };
+                            self.stats.events_processed_window += 1;
                             self.handle_event(event).await;
                         }
                         publish = true;
@@ -1580,6 +1593,32 @@ impl App {
         let text = format!("background task failed: {message}");
         self.ui_state.last_error = Some(text.clone());
         self.notify(text);
+    }
+
+    /// Sample the event-channel backlog. A backlog only becomes visible here
+    /// when producers outpace the reducer across iterations; that is exactly
+    /// the condition a bounded channel would have to handle.
+    fn sample_event_queue(&mut self, current: usize) {
+        self.stats.event_queue_peak = self.stats.event_queue_peak.max(current);
+        let due = self
+            .stats
+            .last_event_queue_log
+            .is_none_or(|last| last.elapsed() >= EVENT_QUEUE_LOG_INTERVAL);
+        if !due {
+            return;
+        }
+        if self.stats.event_queue_peak >= EVENT_QUEUE_WARN_DEPTH {
+            self.logger.app(
+                LogLevel::Info,
+                format!(
+                    "event queue peak {} (current {}), {} events processed in window",
+                    self.stats.event_queue_peak, current, self.stats.events_processed_window
+                ),
+            );
+        }
+        self.stats.event_queue_peak = 0;
+        self.stats.events_processed_window = 0;
+        self.stats.last_event_queue_log = Some(Instant::now());
     }
 
     fn publish_view(&mut self) {
