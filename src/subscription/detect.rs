@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use serde_yaml_ng::Value as YamlValue;
 
 use super::model::Node;
 use super::outbound::{
     ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_tuic_congestion,
     ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
 };
-use super::parse_clash::parse_clash_document;
+use super::parse_clash::{parse_clash_document, parse_yaml_value};
 use super::parse_uri::{decode_base64_text, parse_uri_list};
 
 const MAX_YAML_ALIASES: usize = 0;
@@ -152,12 +151,11 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
     let alias_error = ensure_alias_budget(trimmed).err();
     let mut yaml_error = None;
     if alias_error.is_none() {
-        match serde_yaml_ng::from_str::<YamlValue>(trimmed) {
+        match parse_yaml_value(trimmed) {
             Ok(document) => {
-                let proxies_key = YamlValue::String("proxies".to_string());
                 let has_proxies = document
-                    .as_mapping()
-                    .is_some_and(|mapping| mapping.contains_key(&proxies_key));
+                    .as_object()
+                    .is_some_and(|mapping| mapping.contains_key("proxies"));
                 if has_proxies {
                     let (nodes, unsupported) = parse_clash_document(&document, source)?;
                     return Ok(ParseOutcome {
@@ -478,6 +476,29 @@ mod tests {
     fn reports_yaml_errors_for_clash_like_bodies() {
         let err = detect_and_parse("proxies:\n  - name: [broken\n", "test").unwrap_err();
         assert!(err.contains("invalid Clash YAML"), "{err}");
+    }
+
+    #[test]
+    fn yaml_errors_do_not_echo_subscription_secrets() {
+        let body = "proxies:\n  - name: n\n    type: ss\n    server: example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: supersecret\n    broken: [\n";
+        let err = detect_and_parse(body, "test").unwrap_err();
+        assert!(err.contains("invalid Clash YAML"), "{err}");
+        assert!(err.contains("line "), "{err}");
+        assert!(!err.contains("supersecret"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_yaml_keys() {
+        let body = "proxies:\n  - name: n\n    type: ss\n    server: example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n    password: q\n";
+        let err = detect_and_parse(body, "test").unwrap_err();
+        assert!(err.contains("invalid Clash YAML"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_non_string_yaml_keys_outside_proxies() {
+        let body = "proxies:\n  - name: n\n    type: ss\n    server: example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: p\n1: ignored\n";
+        let outcome = detect_and_parse(body, "test").unwrap();
+        assert_eq!(outcome.nodes.len(), 1);
     }
 
     #[test]

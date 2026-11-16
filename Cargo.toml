@@ -2,7 +2,7 @@
 name = "dfrelay"
 version = "1.4.1"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "DFRelay terminal proxy manager"
 license = "MIT"
 
@@ -25,7 +25,7 @@ ratatui = "0.30"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-serde_yaml_ng = "0.10"
+serde-saphyr = { version = "2.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11"
 tar = "0.4"
 thiserror = "2"

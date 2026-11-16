@@ -1,5 +1,4 @@
 use serde_json::{json, Map, Value};
-use serde_yaml_ng::{Mapping, Value as YamlValue};
 
 use super::model::Node;
 use super::outbound::{
@@ -10,27 +9,36 @@ use crate::config::is_go_duration;
 
 pub type ClashParseOutput = (Vec<Node>, Vec<(String, String)>);
 
+type Mapping = Map<String, Value>;
+
+pub(crate) fn parse_yaml_value(text: &str) -> Result<Value, String> {
+    let options = serde_saphyr::options! { with_snippet: false };
+    serde_saphyr::from_str_with_options::<Value>(text, options).map_err(|err| {
+        // Subscription YAML can contain credentials; never echo snippets or scalar values.
+        match err.location() {
+            Some(location) => format!("line {} column {}", location.line(), location.column()),
+            None => "unknown position".to_string(),
+        }
+    })
+}
+
 #[cfg(test)]
 pub fn parse_clash(text: &str, source: &str) -> Result<ClashParseOutput, String> {
-    let document: YamlValue =
-        serde_yaml_ng::from_str(text).map_err(|e| format!("invalid YAML: {e}"))?;
+    let document = parse_yaml_value(text).map_err(|err| format!("invalid YAML: {err}"))?;
     parse_clash_document(&document, source)
 }
 
-pub fn parse_clash_document(
-    document: &YamlValue,
-    source: &str,
-) -> Result<ClashParseOutput, String> {
+pub fn parse_clash_document(document: &Value, source: &str) -> Result<ClashParseOutput, String> {
     let proxies = document
-        .as_mapping()
+        .as_object()
         .and_then(|mapping| yaml_get(mapping, "proxies"))
-        .and_then(YamlValue::as_sequence)
+        .and_then(Value::as_array)
         .ok_or("Clash YAML has no proxies list")?;
 
     let mut nodes = Vec::new();
     let mut unsupported = Vec::new();
     for proxy in proxies {
-        let Some(map) = proxy.as_mapping() else {
+        let Some(map) = proxy.as_object() else {
             continue;
         };
         let name = yaml_str(map, "name").unwrap_or("unnamed").to_string();
@@ -286,21 +294,21 @@ fn attach_transport(proxy: &Mapping, network: &str, outbound: &mut Map<String, V
             transport.insert("type".into(), json!("ws"));
             if let Some(opts) = yaml_get(proxy, "ws-opts") {
                 if let Some(path) = opts
-                    .as_mapping()
+                    .as_object()
                     .and_then(|mapping| yaml_get(mapping, "path"))
-                    .and_then(YamlValue::as_str)
+                    .and_then(Value::as_str)
                 {
                     transport.insert("path".into(), json!(path));
                 }
                 if let Some(headers) = opts
-                    .as_mapping()
+                    .as_object()
                     .and_then(|mapping| yaml_get(mapping, "headers"))
-                    .and_then(YamlValue::as_mapping)
+                    .and_then(Value::as_object)
                 {
                     let mut header_map = Map::new();
                     for (key, value) in headers {
-                        if let (Some(key), Some(value)) = (key.as_str(), value.as_str()) {
-                            header_map.insert(key.to_string(), json!(value));
+                        if let Some(value) = value.as_str() {
+                            header_map.insert(key.clone(), json!(value));
                         }
                     }
                     if !header_map.is_empty() {
@@ -314,9 +322,9 @@ fn attach_transport(proxy: &Mapping, network: &str, outbound: &mut Map<String, V
             let mut transport = Map::new();
             transport.insert("type".into(), json!("grpc"));
             if let Some(service_name) = yaml_get(proxy, "grpc-opts")
-                .and_then(YamlValue::as_mapping)
+                .and_then(Value::as_object)
                 .and_then(|mapping| yaml_get(mapping, "grpc-service-name"))
-                .and_then(YamlValue::as_str)
+                .and_then(Value::as_str)
             {
                 transport.insert("service_name".into(), json!(service_name));
             }
@@ -327,15 +335,15 @@ fn attach_transport(proxy: &Mapping, network: &str, outbound: &mut Map<String, V
             transport.insert("type".into(), json!("http"));
             if let Some(opts) = yaml_get(proxy, "h2-opts") {
                 if let Some(host) = opts
-                    .as_mapping()
+                    .as_object()
                     .and_then(|mapping| yaml_get(mapping, "host"))
                 {
-                    transport.insert("host".into(), yaml_to_json(host));
+                    transport.insert("host".into(), host.clone());
                 }
                 if let Some(path) = opts
-                    .as_mapping()
+                    .as_object()
                     .and_then(|mapping| yaml_get(mapping, "path"))
-                    .and_then(YamlValue::as_str)
+                    .and_then(Value::as_str)
                 {
                     transport.insert("path".into(), json!(path));
                 }
@@ -348,8 +356,8 @@ fn attach_transport(proxy: &Mapping, network: &str, outbound: &mut Map<String, V
 
 fn tls_enabled(proxy: &Mapping) -> bool {
     match yaml_get(proxy, "tls") {
-        Some(YamlValue::Bool(value)) => *value,
-        Some(YamlValue::String(value)) => !matches!(
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "" | "none" | "false" | "0"
         ),
@@ -365,28 +373,26 @@ fn tls_value(proxy: &Mapping, enabled: bool) -> Value {
         .unwrap_or(false)
         .then_some(true);
     let alpn = match yaml_get(proxy, "alpn") {
-        Some(YamlValue::String(value)) => value
+        Some(Value::String(value)) => value
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .collect::<Vec<_>>(),
-        Some(YamlValue::Sequence(values)) => values
+        Some(Value::Array(values)) => values
             .iter()
-            .filter_map(YamlValue::as_str)
+            .filter_map(Value::as_str)
             .map(str::to_string)
             .collect(),
         _ => Vec::new(),
     };
     let fingerprint = yaml_str(proxy, "client-fingerprint");
     let reality = yaml_get(proxy, "reality-opts").and_then(|reality| {
-        let mapping = reality.as_mapping()?;
-        let public_key = mapping
-            .get(YamlValue::String("public-key".into()))
-            .and_then(YamlValue::as_str)?;
+        let mapping = reality.as_object()?;
+        let public_key = mapping.get("public-key").and_then(Value::as_str)?;
         let short_id = mapping
-            .get(YamlValue::String("short-id".into()))
-            .and_then(YamlValue::as_str)
+            .get("short-id")
+            .and_then(Value::as_str)
             .unwrap_or("");
         Some((public_key, short_id))
     });
@@ -402,26 +408,22 @@ fn add_auth(proxy: &Mapping, outbound: &mut Map<String, Value>) {
     }
 }
 
-fn yaml_get<'a>(map: &'a Mapping, key: &str) -> Option<&'a YamlValue> {
-    let key = YamlValue::String(key.to_string());
-    map.get(&key)
+fn yaml_get<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
+    map.get(key)
 }
 
 fn yaml_str<'a>(map: &'a Mapping, key: &str) -> Option<&'a str> {
-    let key = YamlValue::String(key.to_string());
-    map.get(&key).and_then(YamlValue::as_str)
+    map.get(key).and_then(Value::as_str)
 }
 
 fn yaml_u16(map: &Mapping, key: &str) -> Option<u16> {
-    let key = YamlValue::String(key.to_string());
-    map.get(&key)
-        .and_then(YamlValue::as_u64)
+    map.get(key)
+        .and_then(Value::as_u64)
         .and_then(|value| u16::try_from(value).ok())
 }
 
 fn yaml_u64(map: &Mapping, key: &str) -> Option<u64> {
-    let key = YamlValue::String(key.to_string());
-    map.get(&key).and_then(YamlValue::as_u64)
+    map.get(key).and_then(Value::as_u64)
 }
 
 fn insert_duration(
@@ -434,11 +436,11 @@ fn insert_duration(
         return;
     };
     let duration = match value {
-        YamlValue::Number(number) => number
+        Value::Number(number) => number
             .as_u64()
             .filter(|seconds| *seconds > 0)
             .map(|seconds| format!("{seconds}s")),
-        YamlValue::String(text) => {
+        Value::String(text) => {
             let text = text.trim();
             is_go_duration(text).then(|| text.to_string())
         }
@@ -450,12 +452,7 @@ fn insert_duration(
 }
 
 fn yaml_bool(map: &Mapping, key: &str) -> Option<bool> {
-    let key = YamlValue::String(key.to_string());
-    map.get(&key).and_then(YamlValue::as_bool)
-}
-
-fn yaml_to_json(value: &YamlValue) -> Value {
-    serde_json::to_value(value).unwrap_or(Value::Null)
+    map.get(key).and_then(Value::as_bool)
 }
 
 #[cfg(test)]
@@ -703,6 +700,23 @@ proxies:
                 "{invalid} should be invalid"
             );
         }
+    }
+
+    #[test]
+    fn parses_yaml_1_1_boolean_words() {
+        let yaml = r#"
+proxies:
+  - name: booleans
+    type: http
+    server: example.com
+    port: 443
+    tls: yes
+    skip-cert-verify: yes
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert!(unsupported.is_empty());
+        assert_eq!(nodes[0].outbound.value()["tls"]["enabled"], true);
+        assert_eq!(nodes[0].outbound.value()["tls"]["insecure"], true);
     }
 
     #[test]
