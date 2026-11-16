@@ -29,8 +29,6 @@ const PROGRESS_BAR_WIDTH: usize = 12;
 mod format;
 use format::*;
 
-/// Whether the current snapshot contains visible motion that needs periodic
-/// redraws. Idle pages stay static.
 pub fn needs_animation(view: &View) -> bool {
     let setup_busy = matches!(view.overlay, Some(Overlay::Setup { .. }))
         && (view.setup.downloading || view.setup.installing || view.setup.rollback_in_flight);
@@ -40,8 +38,6 @@ pub fn needs_animation(view: &View) -> bool {
         || setup_busy
 }
 
-/// Redraw cadence for the current snapshot. Fast effects tick at 100 ms, the
-/// running indicator pulses at 800 ms, and everything else stays static.
 pub fn animation_period(view: &View) -> Option<Duration> {
     if needs_animation(view) {
         Some(FAST_TICK)
@@ -52,8 +48,6 @@ pub fn animation_period(view: &View) -> Option<Duration> {
     }
 }
 
-/// Next redraw deadline. The running pulse stays on its 800 ms grid even when
-/// view snapshots trigger extra draws in between.
 pub fn next_animation_deadline(period: Duration, status_start: Instant, now: Instant) -> Instant {
     if period == STATUS_PULSE {
         let elapsed = now.duration_since(status_start).as_millis();
@@ -80,8 +74,6 @@ fn spinner_frame(tick: u64) -> &'static str {
     SPINNER_FRAMES[(tick % SPINNER_FRAMES.len() as u64) as usize]
 }
 
-/// Position and length of the filled segment of the indeterminate download
-/// bar. The segment ping-pongs across the track.
 fn progress_fill(tick: u64, width: usize) -> (usize, usize) {
     let width = width.max(4);
     let fill = (width / 3).max(2).min(width);
@@ -98,8 +90,6 @@ fn progress_fill(tick: u64, width: usize) -> (usize, usize) {
     (offset, fill)
 }
 
-/// Renders the view; `tick` advances time-based effects (marquee, spinners and
-/// the download bar), `status_green` sets the running indicator phase.
 pub fn render_at(frame: &mut Frame, view: &View, tick: u64, status_green: bool, palette: Palette) {
     let area = frame.area();
     frame.render_widget(Clear, area);
@@ -380,8 +370,6 @@ fn multi_value_lines(label: &str, values: &[String], width: usize) -> Vec<Line<'
     lines
 }
 
-/// Shared stateful table assembly for the list pages: identical column
-/// spacing, highlight style, and viewport-selected state everywhere.
 #[allow(clippy::too_many_arguments)]
 fn render_table<const N: usize>(
     frame: &mut Frame,
@@ -426,11 +414,6 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
         return;
     }
     let header = Row::new(vec![
-        // The active-node dot shares the name column: one cell for the dot and
-        // one blank cell before the name, so the label aligns with the names.
-        // U+25C9 FISHEYE is East Asian Width N, so every terminal keeps it at
-        // one cell; U+25CF BLACK CIRCLE is ambiguous and turns into an ellipse
-        // or shifts the row in some terminals.
         Cell::from(format!("  {}", text.nodes_name)),
         Cell::from(text.nodes_source),
         Cell::from(text.nodes_protocol),
@@ -481,12 +464,8 @@ fn render_nodes(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tic
     );
 }
 
-/// Tables keep two blank cells between columns; the block padding leaves one
-/// blank cell after the last column.
 const TABLE_COLUMN_SPACING: u16 = 2;
 
-/// Rows visible below the table title/header; only this window is built each
-/// frame so large node/connection lists do not allocate every row.
 fn visible_row_range(total: usize, selected: usize, height: u16) -> (usize, usize) {
     if total == 0 || height == 0 {
         return (0, 0);
@@ -507,12 +486,6 @@ const NODE_COLUMNS: [Constraint; 5] = [
     Constraint::Length(8),
 ];
 
-/// The single node that carries traffic, marked with a dot in the node list.
-///
-/// A manual selection takes precedence over the urltest result; without
-/// metrics (proxy stopped or not yet polled) the pending preferred node is
-/// marked instead. The previous OR-based marking could light up both the
-/// manual pick and the stale urltest result at the same time.
 fn active_node_tag(view: &View) -> Option<&str> {
     match view.metrics.selection.selected.as_deref() {
         Some(tags::AUTO) => view.metrics.selection.auto_now.as_deref(),
@@ -562,9 +535,6 @@ fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::R
         if subscription.stale {
             markers.push(text.subscriptions_stale.to_string());
         }
-        // The status column is reserved for the refresh error or the last
-        // successful update time; unsupported nodes only add the (+N) count
-        // to the nodes column so they never displace the timestamp.
         let status = subscription
             .error
             .clone()
@@ -617,8 +587,6 @@ const SUBSCRIPTION_COLUMNS: [Constraint; 4] = [
     Constraint::Length(15),
 ];
 
-/// The subscription list shows month-day and time; the full timestamp stays in
-/// the cache so refreshes remain unambiguous across years.
 fn display_subscription_time(timestamp: &str) -> String {
     let bytes = timestamp.as_bytes();
     if bytes.len() >= 16 && bytes[4] == b'-' && bytes[7] == b'-' && bytes[10] == b' ' {
@@ -632,7 +600,6 @@ const MARQUEE_STEP_TICKS: u64 = 2;
 const MARQUEE_PAUSE_TICKS: u64 = 8;
 
 fn subscription_value_widths(area: Rect) -> (usize, usize) {
-    // Mirrors the table layout: borders + horizontal padding 2, highlight symbol "▸ ".
     let table_width = area.width.saturating_sub(4);
     let columns_width = table_width.saturating_sub(2);
     let columns = Layout::horizontal(SUBSCRIPTION_COLUMNS)
@@ -758,7 +725,6 @@ fn connection_target(connection: &crate::singbox::clash::ConnectionInfo) -> Stri
     connection.target().unwrap_or_else(|| "—".to_string())
 }
 
-/// Connection age: `MM:SS` below one hour, `H:MM:SS` from one hour on.
 fn format_duration(seconds: Option<u64>) -> String {
     let Some(total) = seconds else {
         return "—".to_string();
@@ -1017,8 +983,6 @@ fn setup_lines(
         .collect()
 }
 
-/// Busy status inside the sing-box popup. Download adds an indeterminate bar
-/// because the binary download exposes no byte-level progress.
 fn animated_status_line(
     label: &str,
     tick: u64,
@@ -1391,8 +1355,6 @@ fn popup_paragraph(title: &str, lines: Vec<Line<'static>>) -> Paragraph<'static>
     Paragraph::new(lines).block(titled_block(title))
 }
 
-/// Total popup height for the given lines, including the border. All popup
-/// content is pre-wrapped to the popup width, so this is exact.
 fn popup_height(area: Rect, lines: &[Line<'static>]) -> u16 {
     let height = lines.len().saturating_add(2);
     u16::try_from(height).unwrap_or(u16::MAX).min(area.height)
@@ -1423,8 +1385,6 @@ fn field_label_style(focused: bool, palette: Palette) -> Style {
     }
 }
 
-/// Multi-field edit forms mark the active row; single-field forms rely on the
-/// cursor only.
 fn field_marker(focused: bool) -> &'static str {
     if focused {
         "▸ "
@@ -1713,7 +1673,6 @@ fn render_footer(
     palette: Palette,
 ) {
     let text = view.text();
-    // Keep two blank cells free at both edges so hints never touch the border.
     let area = Rect {
         x: area.x.saturating_add(2),
         width: area.width.saturating_sub(4),
@@ -1745,7 +1704,6 @@ fn render_footer(
             Style::default().fg(Color::Yellow),
         )]
     } else if view.overlay.is_some() {
-        // Modal popups carry their own key hints; global hints would not apply.
         Vec::new()
     } else {
         footer_hint_spans(text, palette)
@@ -1804,8 +1762,6 @@ fn truncate_to_width(text: &str, max: usize) -> String {
     out
 }
 
-// Widest dashboard label is "Subscriptions" (13 columns); keep at least two
-// blank columns between the label and its value in every language.
 const DASHBOARD_LABEL_WIDTH: usize = 15;
 
 fn key_value_wrapped(label: &str, value: String, width: usize) -> Vec<Line<'static>> {

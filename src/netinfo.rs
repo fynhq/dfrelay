@@ -5,8 +5,6 @@ use std::time::Duration;
 
 use reqwest::Proxy;
 
-/// IP echo endpoints return a short string; cap the body so a malicious proxy
-/// cannot stream an unbounded response into memory.
 const MAX_IP_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -136,7 +134,6 @@ fn is_virtual_interface(name: &str, platform: Platform) -> bool {
     if platform == Platform::Macos && name.starts_with("bridge") {
         return true;
     }
-    // `br-*` is Docker; `br0` on Linux may be the primary LAN bridge and is kept.
     const PREFIXES: &[&str] = &[
         "utun",
         "awdl",
@@ -190,7 +187,6 @@ pub fn local_proxy_url_with_auth(port: u16, username: &str, password: &str) -> S
 }
 
 pub async fn fetch_proxy_ip(url: &str, proxy_url: &str) -> Result<String, NetInfoError> {
-    // The echo endpoints are HTTPS, so the proxy must intercept all schemes.
     let proxy = Proxy::all(proxy_url).map_err(|err| NetInfoError::InvalidProxy(err.to_string()))?;
     let client = reqwest::Client::builder()
         .proxy(proxy)

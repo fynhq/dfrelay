@@ -1231,13 +1231,11 @@ async fn current_node_labels_removed_and_unknown_tags() {
 #[tokio::test]
 async fn selection_mode_follows_selector_state_and_pending_node() {
     let (mut app, _dir) = test_app().await;
-    // Stopped without a pending node: automatic selection.
     assert!(app.selection_mode_auto());
 
     app.selection_state.preferred_node = Some("n1".to_string());
     assert!(!app.selection_mode_auto());
 
-    // While running the selector state is authoritative.
     app.metrics_state.metrics.selection.selected = Some("auto".to_string());
     assert!(app.selection_mode_auto());
 

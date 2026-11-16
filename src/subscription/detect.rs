@@ -10,22 +10,8 @@ use super::outbound::{
 use super::parse_clash::parse_clash_document;
 use super::parse_uri::{decode_base64_text, parse_uri_list};
 
-/// Maximum number of YAML alias references (`*anchor`) tolerated in a
-/// subscription body. Aliases are not needed for a Clash proxy list, and
-/// `serde_yaml_ng` expands them by re-parsing anchored subtrees. A single
-/// alias can therefore clone a large subtree; reject all aliases instead of
-/// trying to guess a safe expansion budget.
 const MAX_YAML_ALIASES: usize = 0;
 
-/// Count YAML alias indicators (`*`) that occur at a node boundary.
-///
-/// This scanner deliberately errs toward counting: a `#` comment or a quoted
-/// scalar hides a `*`, and a line break resets the node position. It does not
-/// need to be a complete YAML lexer, because a false positive only rejects an
-/// exotic subscription while a false negative would let an alias bomb through.
-/// In particular, quotes only open a scalar at a node boundary, so an
-/// apostrophe inside a plain scalar (`name: Bob's node`) cannot hide later
-/// aliases.
 fn count_yaml_aliases(text: &str) -> usize {
     let mut count = 0usize;
     let mut at_node_start = true;
@@ -162,10 +148,7 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
         }
     }
 
-    // Guard against alias-bomb payloads: if the body exceeds the alias budget,
-    // skip the YAML parser (which would materialize the expansion) and fall
-    // through to the base64/URI parsers. If nothing else matches, surface the
-    // aliasing rejection instead of a generic "unrecognized" error.
+    // SECURITY: cap YAML aliases before parsing; alias expansion is a DoS vector.
     let alias_error = ensure_alias_budget(trimmed).err();
     let mut yaml_error = None;
     if alias_error.is_none() {
@@ -391,12 +374,6 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Result<Option<ParseOutcom
     Ok(Some(ParseOutcome { nodes, unsupported }))
 }
 
-/// Remove every `detour` reference from a single outbound.
-///
-/// sing-box accepts `detour` both at the outbound top level and inside `dial`;
-/// DFRelay rewrites tags to stable hashes, so any retained reference points at
-/// a tag that no longer exists. Dropping it makes one chained node fail alone
-/// instead of failing the whole generated configuration.
 fn strip_detour(value: &mut Value) {
     match value {
         Value::Object(object) => {
@@ -550,7 +527,6 @@ mod tests {
 
     #[test]
     fn rejects_yaml_alias_bomb() {
-        // A billion-laughs style payload: each level aliases the previous one.
         let mut body = String::from("a: &a [x, x, x]\n");
         let mut prev = 'a';
         for level in 0..8 {

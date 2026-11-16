@@ -20,14 +20,8 @@ use fetch::fetch_subscription;
 pub use fetch::FetchOptions;
 use model::Node;
 
-/// Per-source node cap. A subscription body is limited to 10 MiB, but a short
-/// URI line can still expand into hundreds of thousands of nodes; bound the
-/// parsed result before it reaches config generation.
 pub const MAX_NODES_PER_SOURCE: usize = 2000;
-/// Per-source unsupported-entry cap: malformed lines allocate names/reasons too.
 pub const MAX_UNSUPPORTED_PER_SOURCE: usize = 500;
-/// Cap across all enabled subscriptions. Users control the number of sources,
-/// so this is a process-memory guard rather than a remote input bound.
 pub const MAX_TOTAL_NODES: usize = 5000;
 
 pub(crate) fn node_limit_error(kind: &str, limit: usize) -> String {
@@ -37,9 +31,6 @@ pub(crate) fn node_limit_error(kind: &str, limit: usize) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionRuntime {
     pub config: SubscriptionConfig,
-    /// URL hash the current node set was fetched from. It can differ from
-    /// `config.url` when the user edits a URL and the refresh fails: the old
-    /// nodes stay visible, but must not be cached under the new URL.
     #[serde(default)]
     pub source_url_hash: Option<String>,
     pub nodes: Vec<Node>,
@@ -89,7 +80,6 @@ fn failed_runtime(
 ) -> SubscriptionRuntime {
     match previous.filter(|runtime| !runtime.nodes.is_empty()) {
         Some(previous) => {
-            // Keep the source hash of the nodes, not the possibly edited URL.
             let source_url_hash = previous
                 .source_url_hash
                 .clone()
@@ -137,8 +127,6 @@ pub async fn refresh_all(
             let index = next;
             next += 1;
             tasks.spawn(async move {
-                // Keep the subscription index on a panic so its slot is filled
-                // with a visible failure instead of silently disappearing.
                 let outcome =
                     crate::guard::CatchUnwind::new(refresh_one(config, &options, old.as_ref()))
                         .await;
@@ -162,13 +150,10 @@ pub async fn refresh_all(
                         format!("refresh task failed: {message}"),
                     ));
                 }
-                // Cancellation carries no index; the fill below covers it.
                 Err(_) => {}
             }
         }
     }
-    // Any slot whose task never reported keeps the previous nodes and records
-    // an explicit error so the subscription does not vanish from the list.
     for (index, slot) in results.iter_mut().enumerate() {
         if slot.is_none() {
             let config = configs[index].clone();

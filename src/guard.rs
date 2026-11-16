@@ -4,13 +4,6 @@ use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-/// A future adapter that catches panics raised while polling the inner future.
-///
-/// `tokio::spawn` captures a panic into the returned `JoinHandle`; when that
-/// handle is dropped the panic is silently discarded. For daemon background
-/// tasks that only report completion through an event channel, a panic would
-/// leave their in-flight flags set forever. Wrapping the future lets the caller
-/// observe the panic and emit a failure event instead.
 pub struct CatchUnwind<F: Future> {
     inner: Pin<Box<F>>,
 }
@@ -35,7 +28,6 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
-/// Best-effort human-readable text for a panic payload.
 pub fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()

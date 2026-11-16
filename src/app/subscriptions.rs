@@ -1,11 +1,5 @@
-//! Subscription refresh orchestration.
-//!
-//! Scheduling and cache writing live here; the form editing and list UI stay
-//! in `app.rs`.
-
 use super::*;
 
-/// Subscription list and refresh scheduling state.
 #[derive(Debug, Default)]
 pub(crate) struct SubscriptionState {
     pub(crate) subscriptions: Vec<SubscriptionRuntime>,
@@ -117,8 +111,6 @@ impl App {
         )
     }
 
-    /// Record that the refreshed node set differs from the running config.
-    /// The restart itself waits until the proxy is idle when configured.
     pub(super) fn note_subscription_apply(&mut self) {
         if self.proxy_runtime.proxy_node_tags.is_empty() {
             self.subscription_state.pending_refresh_apply = None;
@@ -283,14 +275,12 @@ impl App {
         }
     }
 
-    /// Rebuild the merged node list after `self.subscription_state.subscriptions` changed.
     pub(super) fn refresh_merged_nodes(&mut self) {
         self.metrics_state.nodes = merge_nodes(&self.subscription_state.subscriptions);
         self.prune_node_state();
         self.sync_preferred_node();
     }
 
-    /// Shared tail for full and single-subscription refresh results.
     pub(super) fn finalize_subscription_change(&mut self) {
         self.ui_state.last_node_sort = None;
         self.sort_nodes_if_visible();
@@ -336,9 +326,6 @@ impl App {
     }
 
     pub(super) fn refresh_subscription(&mut self, config: SubscriptionConfig) {
-        // Keep last successful nodes even when the URL changed: a failed
-        // refresh of a newly edited URL must not erase the currently working
-        // node set and trigger a restart that cannot start.
         let previous = self
             .subscription_state
             .subscriptions

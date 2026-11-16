@@ -1,11 +1,5 @@
-//! Shared outbound JSON construction used by both subscription parsers.
-//!
-//! Clash and URI inputs reach this module with plain values, so the emitted
-//! `tls` object cannot drift between the two code paths.
-
 use serde_json::{json, Map, Value};
 
-/// Transports DFRelay can translate into a sing-box outbound.
 pub(super) fn ensure_supported_network(network: &str) -> Result<(), String> {
     match network.to_ascii_lowercase().as_str() {
         "tcp" | "ws" | "grpc" | "h2" | "http" => Ok(()),
@@ -13,9 +7,6 @@ pub(super) fn ensure_supported_network(network: &str) -> Result<(), String> {
     }
 }
 
-/// Shadowsocks methods supported by the bundled sing-box baseline. Legacy
-/// stream ciphers are intentionally rejected here: sing-box refuses them, and
-/// one bad node would otherwise fail the whole generated configuration.
 pub(super) fn ensure_shadowsocks_method(method: &str) -> Result<(), String> {
     match method {
         "none"
@@ -31,7 +22,6 @@ pub(super) fn ensure_shadowsocks_method(method: &str) -> Result<(), String> {
     }
 }
 
-/// VMess security values accepted by sing-box.
 pub(super) fn ensure_vmess_security(security: &str) -> Result<(), String> {
     match security {
         "auto" | "none" | "zero" | "aes-128-gcm" | "chacha20-poly1305" => Ok(()),
@@ -39,7 +29,6 @@ pub(super) fn ensure_vmess_security(security: &str) -> Result<(), String> {
     }
 }
 
-/// VLESS flow values accepted by sing-box.
 pub(super) fn ensure_vless_flow(flow: &str) -> Result<(), String> {
     match flow {
         "xtls-rprx-vision" => Ok(()),
@@ -47,7 +36,6 @@ pub(super) fn ensure_vless_flow(flow: &str) -> Result<(), String> {
     }
 }
 
-/// Hysteria2 obfuscation types accepted by sing-box.
 pub(super) fn ensure_hysteria2_obfs(obfs: &str) -> Result<(), String> {
     match obfs {
         "salamander" => Ok(()),
@@ -55,7 +43,6 @@ pub(super) fn ensure_hysteria2_obfs(obfs: &str) -> Result<(), String> {
     }
 }
 
-/// TUIC congestion control algorithms accepted by sing-box.
 pub(super) fn ensure_tuic_congestion(congestion: &str) -> Result<(), String> {
     match congestion {
         "cubic" | "new_reno" | "bbr" => Ok(()),
@@ -63,7 +50,6 @@ pub(super) fn ensure_tuic_congestion(congestion: &str) -> Result<(), String> {
     }
 }
 
-/// TUIC UDP relay modes accepted by sing-box.
 pub(super) fn ensure_tuic_udp_relay_mode(mode: &str) -> Result<(), String> {
     match mode {
         "native" | "quic" => Ok(()),
@@ -87,10 +73,6 @@ fn is_supported_fingerprint(fingerprint: &str) -> bool {
     )
 }
 
-/// Build a sing-box `tls` object.
-///
-/// `insecure` is `Some(false)` for URI inputs (which always emit the field) and
-/// `None` for Clash inputs unless `skip-cert-verify` is set.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tls_value(
     enabled: bool,

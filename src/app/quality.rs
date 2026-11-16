@@ -1,11 +1,3 @@
-//! Per-node quality history used to rank failover candidates.
-//!
-//! The score is an additive penalty on top of the most recent measured delay:
-//! jitter and recent failures make a node less attractive even when its best
-//! probe looks fast. The regular urltest selection stays in sing-box; this
-//! history only decides which candidates DFRelay tests first and which node a
-//! manual-mode recovery should pin.
-
 use std::collections::{HashMap, HashSet};
 
 const DELAY_ALPHA: f64 = 0.3;
@@ -88,8 +80,6 @@ impl QualityBook {
             .record_failure();
     }
 
-    /// Lower is better. `measured_delay` is the delay from the probe that just
-    /// succeeded; historical reliability and jitter are applied on top.
     pub(super) fn score(&self, tag: &str, measured_delay: Option<u64>) -> f64 {
         match self.entries.get(tag) {
             Some(quality) => quality.score(measured_delay),

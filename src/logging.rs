@@ -330,8 +330,6 @@ impl Logger {
             dir: dir.to_path_buf(),
             date: today(),
             file: None,
-            // Grow on demand: most processes keep far fewer than the cap, so a
-            // full-cap VecDeque would reserve the whole ring up front.
             lines: VecDeque::new(),
             app_level,
             singbox_level,

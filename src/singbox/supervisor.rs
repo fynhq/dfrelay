@@ -54,12 +54,6 @@ pub enum SupervisorError {
     Health(String),
 }
 
-/// Validate a proposed configuration without touching the running instance.
-///
-/// The check runs against a temporary file, so a failed proposal never replaces
-/// `runtime/config.json` and never stops the current sing-box process. Listener
-/// port conflicts cannot be validated while the old instance still owns the
-/// port; such failures are reported by `start` after the caller stops.
 pub fn preflight(
     paths: &Paths,
     config: &Config,
@@ -257,11 +251,10 @@ pub async fn start(
 }
 
 pub async fn stop(mut proxy: RunningProxy, logger: &Logger) {
-    // Avoid signalling a pid that has already been reaped; this also keeps the
-    // cached pid from racing with a reused process id.
     let already_exited = matches!(proxy.child.try_wait(), Ok(Some(_)));
     #[cfg(unix)]
     if !already_exited && proxy.pid != 0 {
+        // SAFETY: pid is the live child's non-zero id; kill has no memory-safety preconditions. Pid reuse before the call remains a logic risk.
         unsafe {
             libc::kill(proxy.pid as i32, libc::SIGTERM);
         }
@@ -458,8 +451,6 @@ mod tests {
             .port()
     }
 
-    /// A fake sing-box that answers `version`/`check` and serves the mixed
-    /// listener with a Python socket so `wait_healthy` can succeed.
     #[cfg(unix)]
     fn fake_server_script() -> &'static str {
         r#"#!/bin/sh

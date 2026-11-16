@@ -73,10 +73,6 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
             if needs_draw {
                 if let Some(current) = &view {
                     if last_page != Some(current.page) {
-                        // ratatui 0.30 `clear()` first queries the cursor position, which
-                        // fails on terminals that do not answer DSR. Resizing to the same
-                        // fullscreen area performs the same clear and buffer reset without
-                        // that query.
                         terminal.resize(terminal.size()?.into())?;
                         last_page = Some(current.page);
                         animation_start = Instant::now();
@@ -216,7 +212,6 @@ fn copy_to_clipboard(text: &str) {
     let encoded = BASE64.encode(text.as_bytes());
     let mut out = stdout();
     if std::env::var_os("TMUX").is_some() {
-        // tmux needs the OSC 52 payload wrapped in DCS passthrough.
         let _ = write!(out, "\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\");
     } else {
         let _ = write!(out, "\x1b]52;c;{encoded}\x07");

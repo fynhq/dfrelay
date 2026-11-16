@@ -1,18 +1,8 @@
-//! Shared archive-entry reading for the sing-box and dfr archives.
-//!
-//! Both the tar.gz and zip paths reject oversized entries and bound the bytes
-//! actually read, so a malicious archive cannot inflate memory beyond the
-//! declared entry size.
-
 use std::io::{self, Cursor, Read};
 
 use flate2::read::GzDecoder;
 
-/// Read at most `max + 1` bytes from `reader` and reject entries whose declared
-/// or actual size exceeds `max`.
-///
-/// The extra byte makes a lying size header observable without reading the
-/// whole entry.
+// SECURITY: reject oversized entries and unsafe archive paths; never read beyond the declared size.
 pub(crate) fn read_limited<R: Read>(
     reader: R,
     declared_size: u64,
@@ -37,8 +27,6 @@ fn io_error_message(err: io::Error) -> String {
     err.to_string()
 }
 
-/// Extract exactly one named file from a gzip-compressed tar archive, rejecting
-/// oversized entries, unsafe paths and duplicate matches.
 pub(crate) fn extract_tar_gz_entry(
     bytes: &[u8],
     target_name: &str,

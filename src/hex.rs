@@ -1,5 +1,3 @@
-//! Lowercase hexadecimal encoding for identifiers and digests.
-
 use std::fmt::Write as _;
 
 pub fn encode(bytes: &[u8]) -> String {

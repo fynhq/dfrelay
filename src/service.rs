@@ -59,10 +59,6 @@ pub struct ServiceIdentity {
 }
 
 impl ServiceIdentity {
-    /// Parse the service identity from the environment of `dfr serve`.
-    ///
-    /// `DFRELAY_SERVICE=1` alone keeps the legacy behavior: the daemon is
-    /// service-managed, but automatic supervisor control is unavailable.
     pub fn from_env() -> Result<Option<Self>, String> {
         if std::env::var("DFRELAY_SERVICE").as_deref() != Ok("1") {
             return Ok(None);
@@ -178,6 +174,7 @@ impl ServiceIdentity {
 pub fn current_uid() -> u32 {
     #[cfg(unix)]
     {
+        // SAFETY: geteuid has no preconditions.
         unsafe { libc::geteuid() }
     }
     #[cfg(not(unix))]
@@ -214,8 +211,6 @@ pub fn write_marker(data_dir: &Path, identity: Option<&ServiceIdentity>) -> std:
     fsutil::write_private_atomic(&data_dir.join(MARKER_FILE), &bytes)
 }
 
-/// Remove the service marker after the service has been removed. Returns
-/// `true` when a marker existed, `false` when there was nothing to remove.
 pub fn remove_marker(data_dir: &Path) -> std::io::Result<bool> {
     match std::fs::remove_file(data_dir.join(MARKER_FILE)) {
         Ok(()) => Ok(true),

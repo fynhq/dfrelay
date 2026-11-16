@@ -1,14 +1,8 @@
-//! Health probing and failover for the active node.
-//!
-//! `HealthState` lives here; `App` holds one instance and this file adds the
-//! related `impl App` block.
-
 use super::quality::QualityBook;
 use super::*;
 use crate::singbox::tags;
 use std::collections::VecDeque;
 
-/// Health probing, failover and selection-quality state.
 #[derive(Debug, Default)]
 pub(super) struct HealthState {
     pub(super) failures: u32,
@@ -131,9 +125,6 @@ impl App {
         self.health.failure_tag = None;
     }
 
-    /// Probe targets in priority order. The configured URL stays first; the
-    /// fallback only runs when the primary fails, so a healthy probe costs one
-    /// request and a target-specific block does not fail the node.
     pub(super) fn probe_targets(&self) -> Vec<String> {
         let mut targets = vec![self.config.test_url.clone()];
         if !targets.iter().any(|target| target == FALLBACK_TEST_URL) {
@@ -479,10 +470,6 @@ impl App {
     }
 }
 
-/// Probe one node against multiple targets in priority order. A success on any
-/// target means the node is healthy; only when every target reports a definite
-/// node failure do we count the probe as failed. API/config errors remain
-/// `Unavailable` so a broken Clash API cannot trigger a failover.
 async fn probe_node_outcome(client: &ClashClient, tag: &str, targets: &[String]) -> HealthOutcome {
     let mut saw_failed = false;
     let mut saw_unavailable = false;

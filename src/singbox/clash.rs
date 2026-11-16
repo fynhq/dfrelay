@@ -17,13 +17,11 @@ pub struct ConnectionInfo {
     pub network: String,
     pub upload: u64,
     pub download: u64,
-    /// Seconds since the connection started; `None` when the API omitted it.
     #[serde(default)]
     pub duration_secs: Option<u64>,
 }
 
 impl ConnectionInfo {
-    /// Destination shown in the connection list, without fallback text.
     pub fn target(&self) -> Option<String> {
         let host = self.host.trim();
         let ip = self.destination_ip.trim();
@@ -91,18 +89,12 @@ pub struct ClashClient {
 
 impl ClashClient {
     pub fn new(port: u16, secret: impl Into<String>) -> Self {
-        // Fail closed: the Clash API is loopback-only and carries a bearer
-        // secret, so never fall back to a default client that may honor an
-        // environment proxy. A client-build failure leaves requests disabled
-        // and is reported through ClashError.
+        // SECURITY: fail closed; the loopback Clash API carries a secret and must not use an environment proxy.
         let client = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .ok();
-        // sing-box's delay endpoint uses a 5s timeout; allow enough extra time
-        // for the 503/5xx response to arrive instead of treating every failed
-        // probe as an unreachable Clash API.
         let delay_client = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(8))
@@ -334,7 +326,6 @@ struct DelayResponse {
     delay: Option<u64>,
 }
 
-/// Clash metadata normally uses strings, but tolerate numeric ports too.
 fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -376,8 +367,6 @@ where
     deserializer.deserialize_any(StringOrNumber)
 }
 
-/// Age of a connection, computed from the RFC3339 `start` field at snapshot
-/// time. Clock skew that would yield a negative age clamps to zero.
 fn connection_duration(start: Option<&str>) -> Option<u64> {
     let start = start.and_then(|start| DateTime::parse_from_rfc3339(start).ok())?;
     let seconds = Utc::now().signed_duration_since(start).num_seconds();

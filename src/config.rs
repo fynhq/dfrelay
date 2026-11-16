@@ -16,9 +16,6 @@ pub const DEFAULT_TEST_INTERVAL: &str = "3m";
 pub const DEFAULT_IDLE_TIMEOUT: &str = "30m";
 pub const DEFAULT_DNS_SERVERS: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
 
-/// Accept the Go `time.ParseDuration` subset used by sing-box: a sequence of
-/// decimal numbers with ns/us/µs/μs/ms/s/m/h units. Negative values are not
-/// meaningful for these settings. Shared with the Clash duration fields.
 pub(crate) fn is_go_duration(value: &str) -> bool {
     let mut rest = value.trim();
     if rest.is_empty() {
@@ -421,7 +418,6 @@ fn backup_invalid_config(path: &Path) -> Option<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let backup = path.with_file_name(format!("{file_name}.invalid-{stamp}"));
     fs::rename(path, &backup).ok()?;
-    // A config symlink is backed up as a symlink; do not chmod its target.
     if fs::symlink_metadata(&backup)
         .map(|metadata| !metadata.file_type().is_symlink())
         .unwrap_or(false)

@@ -1,11 +1,3 @@
-/// Remove terminal-control characters from text that originates outside the
-/// program (subscription node names, remote host names, parser errors) before
-/// it is written to a terminal buffer or a log file.
-///
-/// Newlines and tabs are folded to spaces so a single value cannot create a
-/// forged log line. Printable Unicode, including wide CJK characters, is kept
-/// unchanged. Bidi overrides and zero-width format characters are dropped so
-/// an untrusted name cannot reorder or hide text (trojan-source style).
 pub fn sanitize_display(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -19,9 +11,6 @@ pub fn sanitize_display(input: &str) -> String {
     out
 }
 
-/// Sanitize an already-owned string without copying it when it is clean.
-/// Most log lines and node names need no rewriting, so this keeps the hot path
-/// allocation-free instead of copying every value.
 pub fn sanitize_owned(input: String) -> String {
     if input
         .chars()
@@ -33,9 +22,7 @@ pub fn sanitize_owned(input: String) -> String {
     }
 }
 
-/// Zero-width and bidirectional formatting characters (`Unicode` category Cf)
-/// that have no legitimate use in a node or host name and can visually spoof
-/// or reorder surrounding text.
+// SECURITY: strip control and bidi format characters from external text to prevent terminal injection.
 fn is_unsafe_format_char(ch: char) -> bool {
     matches!(
         ch,

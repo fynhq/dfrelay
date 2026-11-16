@@ -7,7 +7,6 @@ use url::Host;
 pub const DEFAULT_USER_AGENT: &str = "clash.meta";
 pub const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Maximum number of redirect hops followed for a subscription fetch.
 const MAX_REDIRECTS: usize = 5;
 
 #[derive(Debug, Clone)]
@@ -58,10 +57,7 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
     let mut current = url::Url::parse(url).map_err(|_| FetchError::InvalidUrl)?;
     let initial_https = current.scheme() == "https";
 
-    // Redirects are followed manually so every hop can be checked against the
-    // private/loopback/link-local ranges. The initial URL is user-provided and
-    // may legitimately point at a LAN address; only provider-controlled
-    // redirect targets are restricted.
+    // SECURITY: resolve once and pin IPs; validate every redirect hop against private ranges (SSRF/DNS rebinding).
     for hop in 0..=MAX_REDIRECTS {
         if !redirect_scheme_allowed(initial_https, current.scheme()) {
             return if initial_https && current.scheme() == "http" {
@@ -70,9 +66,6 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
                 Err(FetchError::InvalidUrl)
             };
         }
-        // Resolve once and pin the same addresses for validation and for the
-        // actual connection. Resolving again in `fetch_hop` would leave a
-        // DNS-rebinding window between the redirect check and the request.
         let host = current.host().ok_or(FetchError::InvalidUrl)?;
         let port = current
             .port_or_known_default()
@@ -82,9 +75,6 @@ pub async fn fetch_subscription(url: &str, options: &FetchOptions) -> Result<Str
             Host::Ipv6(ip) => vec![SocketAddr::new(IpAddr::V6(*ip), port)],
             Host::Domain(domain) => resolve_host(domain, port).await?,
         };
-        // The initial URL is user-provided and may legitimately point at a
-        // LAN address; only provider-controlled redirect targets are
-        // restricted.
         if hop > 0 && addrs.iter().any(|addr| is_blocked_target(&addr.ip())) {
             return Err(FetchError::BlockedRedirect);
         }
@@ -144,8 +134,6 @@ async fn read_body(
         }
         bytes.extend_from_slice(&chunk);
     }
-    // Most subscriptions are valid UTF-8; move the buffer instead of copying
-    // the whole (up to 10 MiB) body just to replace invalid sequences.
     let text = String::from_utf8(bytes)
         .unwrap_or_else(|err| String::from_utf8_lossy(&err.into_bytes()).into_owned());
     if text.trim().is_empty() {
@@ -154,7 +142,6 @@ async fn read_body(
     Ok(text)
 }
 
-/// Reject non-public IPv4/IPv6 destinations.
 fn is_blocked_target(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -241,8 +228,6 @@ mod tests {
     #[test]
     fn blocks_private_and_special_redirect_targets() {
         use std::net::{Ipv4Addr, Ipv6Addr};
-        // Constructed numerically: these are protocol ranges (loopback,
-        // RFC 1918, link-local, CGNAT, ULA), not real hosts.
         let blocked = [
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),

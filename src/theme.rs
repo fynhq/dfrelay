@@ -14,10 +14,6 @@ impl Palette {
     }
 
     pub fn muted(self) -> Color {
-        // ANSI bright black is a mid gray: clearly dimmer than default light
-        // text on dark terminals and clearly lighter than default dark text on
-        // light terminals. The old ANSI gray was nearly the default foreground
-        // on many dark themes.
         match self {
             Self::Dark | Self::Light => Color::DarkGray,
         }
@@ -36,7 +32,6 @@ fn detect_auto() -> Palette {
 
 fn background_from_colorfgbg(value: &str) -> Option<Palette> {
     let background = value.rsplit(';').next()?.trim().parse::<u16>().ok()?;
-    // ANSI background 7 and bright colors (9-15) are light; 0-6 and 8 are dark.
     Some(if background > 6 && background != 8 {
         Palette::Light
     } else {

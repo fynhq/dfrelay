@@ -1,10 +1,3 @@
-//! UI state shared by the daemon reducer and the TUI client.
-//!
-//! These types are part of the control-protocol snapshot (`View`) and are also
-//! mutated by the daemon's key handlers, so they live outside both `app` and
-//! `view` to keep the dependency direction one-way:
-//! `ui/client -> state`, `view -> state`, `app -> state`.
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -335,8 +328,6 @@ impl SettingsForm {
     }
 }
 
-/// Editable modal forms. Multi-field forms mark the active field with `▸`;
-/// single-field forms rely on the cursor only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EditForm {
     Subscription(SubscriptionForm),
@@ -376,8 +367,6 @@ impl EditForm {
     }
 }
 
-/// There is at most one overlay at a time. Edit forms and the read-only log
-/// detail have separate interaction models.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Overlay {
     Edit(EditForm),

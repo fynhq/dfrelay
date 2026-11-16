@@ -1,9 +1,3 @@
-//! Regression corpus for untrusted subscription bodies.
-//!
-//! Outcome-agnostic on purpose: remote input only has to avoid panics and stay
-//! within the per-source caps. A well-formed payload may legitimately be
-//! rejected by detection, so the tests never unwrap a success.
-
 use super::detect::detect_and_parse;
 use super::parse_clash::parse_clash;
 use super::parse_uri::{parse_uri, parse_uri_list};

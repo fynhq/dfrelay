@@ -252,7 +252,6 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             if let Some(min) = yaml_u64(proxy, "min-idle-session") {
                 value.insert("min_idle_session".into(), json!(min));
             }
-            // sing-box requires TLS for anytls; map sni/alpn/insecure/utls.
             value.insert("tls".into(), tls_value(proxy, true));
             ("anytls", Value::Object(value))
         }
@@ -425,9 +424,6 @@ fn yaml_u64(map: &Mapping, key: &str) -> Option<u64> {
     map.get(&key).and_then(YamlValue::as_u64)
 }
 
-/// Map a Clash duration (seconds as a number, or a Go-style duration string)
-/// to sing-box's duration string. Invalid optional values are dropped so a
-/// bad subscription field cannot fail `sing-box check` for the whole profile.
 fn insert_duration(
     proxy: &Mapping,
     clash_key: &str,

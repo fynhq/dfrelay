@@ -1,5 +1,3 @@
-//! Key handling and edit-form interactions for the TUI.
-
 use super::*;
 use crate::logging::LogLine;
 use crate::state::{KeywordField, OverlayKind, SettingsItem, MAIN_PAGES};
@@ -284,8 +282,6 @@ impl App {
     pub(super) fn detach_clients(&mut self) {
         self.broadcast(ServerMsg::Detach);
         self.clients.retain(|_, client| !client.viewer);
-        // `ClientDetached` for those ids arrives after the map entries are
-        // gone, so it cannot clear the flag; do it here.
         self.metrics_state
             .viewer_active
             .store(false, Ordering::Relaxed);
@@ -406,7 +402,6 @@ impl App {
                     .selected
                     .min(self.metrics_state.nodes.len().saturating_sub(1))
             });
-        // Sorting changes the node order, and the cache signature includes it.
         self.refresh_auto_tags_cache();
         self.ui_state.last_node_sort = Some(Instant::now());
     }
@@ -802,9 +797,6 @@ impl App {
         }
     }
 
-    /// React to a node-set change. Keeping the old proxy alive is correct when
-    /// the new configuration is invalid, but an intentional removal of all
-    /// subscriptions should stop the proxy rather than leave stale routing.
     pub(super) fn apply_nodes_change_to_proxy(&mut self) {
         if self.metrics_state.nodes.is_empty() {
             if self.proxy_runtime.proxy.is_some() {

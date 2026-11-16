@@ -461,8 +461,6 @@ fn find_cell(row: &[&str], needle: &str) -> Option<usize> {
     })
 }
 
-/// Finds a label in a rendered row while accounting for the blank cell that
-/// follows a double-width character.
 fn find_cell_text(row: &[String], needle: &str) -> Option<usize> {
     for start in 0..row.len() {
         let mut column = start;
@@ -1858,8 +1856,6 @@ fn connection_destination_adapts_while_traffic_keeps_its_fixed_width() {
 
 #[test]
 fn rates_use_compact_binary_suffixes() {
-    // Formatting itself is covered by ui::format tests; this asserts the
-    // helpers remain reachable from the page renderer.
     assert_eq!(format_rate(1024.0), "1.0 K/s");
 }
 
@@ -1962,8 +1958,6 @@ async fn nodes_mark_a_single_active_node() {
     app.ui_state.page = Page::Nodes;
     app.metrics_state.nodes = vec![node("n1", "hk-01"), node("n2", "jp-02")];
 
-    // Manual selection wins over a different urltest result; previously
-    // both rows carried a dot in this state.
     app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     app.metrics_state.metrics.selection.auto_now = Some("n2".to_string());
     app.selection_state.preferred_node = Some("n1".to_string());
@@ -1976,7 +1970,6 @@ async fn nodes_mark_a_single_active_node() {
     assert_eq!(marks.len(), 1, "{marks:?}");
     assert!(marks[0].contains("hk-01"), "{marks:?}");
 
-    // Auto mode marks the urltest result only.
     app.metrics_state.metrics.selection.selected = Some("auto".to_string());
     app.selection_state.preferred_node = None;
     let rows = rendered_rows(&app.view(), 100, 30);
@@ -1988,7 +1981,6 @@ async fn nodes_mark_a_single_active_node() {
     assert_eq!(marks.len(), 1, "{marks:?}");
     assert!(marks[0].contains("jp-02"), "{marks:?}");
 
-    // Without metrics the pending preferred node is marked.
     app.metrics_state.metrics = crate::singbox::clash::MetricsSnapshot::default();
     app.selection_state.preferred_node = Some("n2".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
@@ -2008,8 +2000,6 @@ async fn nodes_dot_keeps_one_cell_and_one_blank_before_the_name() {
     app.metrics_state.nodes = vec![node("n1", "hk-01")];
     app.metrics_state.metrics.selection.selected = Some("n1".to_string());
     let rows = rendered_rows(&app.view(), 100, 30);
-    // Match the table row (it also carries the source "test"), not the
-    // status bar, which shows the current node name as well.
     let row = rows
         .iter()
         .find(|row| {
@@ -2041,7 +2031,6 @@ async fn nodes_active_row_uses_the_tab_accent_without_bold() {
         node("n3", "sg-03"),
     ];
     app.metrics_state.metrics.selection.selected = Some("n1".to_string());
-    // Keep the cursor off the active row so its own style is visible.
     app.ui_state.selected = 2;
 
     let backend = TestBackend::new(100, 30);
@@ -2113,7 +2102,6 @@ async fn subscriptions_keep_timestamp_when_some_nodes_are_unsupported() {
     assert!(content.contains("8 (+2)"), "{content}");
     assert!(!content.contains("unsupported"), "{content}");
 
-    // Refresh errors still take the status column.
     view.subscriptions[0].error = Some("HTTP 500".to_string());
     let content: String = rendered_rows(&view, 100, 30)
         .iter()

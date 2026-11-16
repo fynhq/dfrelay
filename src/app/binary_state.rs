@@ -1,5 +1,3 @@
-//! sing-box binary version, setup and update-check state.
-
 use super::*;
 
 #[derive(Debug, Default)]

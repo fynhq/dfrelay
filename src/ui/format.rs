@@ -1,8 +1,3 @@
-//! Pure display-width and unit-formatting helpers for the TUI.
-//!
-//! Kept free of `View`/`App` types so they can be unit-tested without a
-//! `TestBackend`.
-
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) fn wrap_help_text(text: &str, width: usize) -> Vec<String> {
@@ -12,14 +7,10 @@ pub(super) fn wrap_help_text(text: &str, width: usize) -> Vec<String> {
     wrap_text(text, width, true)
 }
 
-/// Wrap display text (value columns, errors, hints) without carrying the
-/// source indentation into continuation lines.
 pub(super) fn wrap_display_text(text: &str, width: usize) -> Vec<String> {
     wrap_text(text, width, false)
 }
 
-/// Shared display-width wrapper. `keep_indent` makes continuation lines repeat
-/// the leading spaces of the source line (Help content alignment).
 fn wrap_text(text: &str, width: usize, keep_indent: bool) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
@@ -65,7 +56,6 @@ pub(super) fn format_bytes(bytes: u64) -> String {
     format_units(bytes as f64, "")
 }
 
-/// Shared 1024-based unit ladder: whole bytes below 1 KiB, one decimal above.
 fn format_units(value: f64, suffix: &str) -> String {
     if value < 1024.0 {
         return format!("{value:.0} B{suffix}");

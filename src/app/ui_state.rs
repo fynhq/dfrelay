@@ -1,5 +1,3 @@
-//! Page, selection, overlay, log-view and toast state.
-
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

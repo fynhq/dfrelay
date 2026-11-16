@@ -57,9 +57,6 @@ pub fn open_private_file(path: &Path, append: bool) -> io::Result<File> {
     Ok(file)
 }
 
-/// Tighten an existing file to 0600. Existing directories are intentionally
-/// left unchanged; the product scope promises not to alter user directory
-/// permissions.
 pub fn enforce_private_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -100,8 +97,6 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let result = (|| {
         write_private_file(&temp, bytes)?;
         fs::rename(&temp, path)?;
-        // Persist the rename itself; otherwise a power loss can leave the
-        // directory entry pointing at neither the old nor the new file.
         #[cfg(unix)]
         {
             if let Ok(dir) = File::open(parent) {

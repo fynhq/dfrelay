@@ -6,9 +6,6 @@ use serde_json::Value;
 
 use crate::selection::{node_material, stable_tag};
 
-/// A parsed outbound kept as compact JSON instead of a `serde_json::Value`
-/// tree. The JSON text is immutable and shared between node clones; config
-/// generation re-parses it only when a proxy start actually needs it.
 #[derive(Debug, Clone)]
 pub struct Outbound(Arc<RawValue>);
 
@@ -50,9 +47,6 @@ pub struct Node {
     pub protocol: String,
     pub server: String,
     pub port: u16,
-    /// Compact, immutable outbound JSON. Sharing it through `Arc` keeps
-    /// per-source runtimes, the merged node list, cache snapshots and filtered
-    /// candidate lists from each copying the full object.
     pub outbound: Outbound,
 }
 

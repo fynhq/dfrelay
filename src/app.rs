@@ -81,17 +81,12 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const PUBLISH_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_METRICS_INTERVAL: Duration = Duration::from_secs(3);
 const PROXIES_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-/// Report a sustained event backlog so a future decision on bounded channels
-/// (and a drop policy) is based on measurements instead of speculation.
 const EVENT_QUEUE_WARN_DEPTH: usize = 64;
 const EVENT_QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(300);
 pub const MAX_LIST_ROWS: usize = 200;
 pub const TOAST_TTL: Duration = Duration::from_secs(3);
 pub const VIEW_QUEUE_LIMIT: usize = 2;
 pub const MAX_CLIENTS: usize = 16;
-/// Bound on the connection IDs kept for new-traffic detection. The Clash API
-/// can return an unbounded list; hashing keeps the guard cheap while still
-/// noticing new connections on a busy proxy.
 const MAX_HEALTH_CONNECTION_IDS: usize = 8192;
 
 fn connection_id_hash(id: &str) -> u64 {
@@ -101,11 +96,6 @@ fn connection_id_hash(id: &str) -> u64 {
     hasher.finish()
 }
 
-/// Process-lifetime counters for diagnosing selection churn without adding
-/// user-facing configuration. The rolling deque is bounded by time, not by a
-/// hard capacity; selection changes are logged at most once per window. The
-/// event-queue fields sample the channel backlog at the top of each daemon
-/// iteration; they are diagnostic only and never feed routing decisions.
 #[derive(Debug, Default)]
 struct RuntimeStats {
     selection_change_times: VecDeque<Instant>,
@@ -513,7 +503,6 @@ impl App {
                 Vec::new()
             },
             selection: self.metrics_state.metrics.selection.clone(),
-            // Nodes carry their own delay map; avoid shipping a second copy.
             node_delays: HashMap::new(),
         };
         let lan_password_set = !self.config.lan_password.is_empty();
@@ -665,7 +654,6 @@ impl App {
                     if let Some(event) = maybe_event {
                         self.stats.events_processed_window += 1;
                         self.handle_event(event).await;
-                        // Coalesce bursts (delay sweeps, key repeats) into one snapshot.
                         for _ in 0..32 {
                             let Ok(event) = self.events_rx.try_recv() else {
                                 break;
@@ -1020,10 +1008,6 @@ impl App {
                 self.metrics_state.last_totals =
                     Some((metrics.upload_total, metrics.download_total, now));
                 self.health.last_metrics_at = Some(now);
-                // Check and store the same bounded window. Scanning the full
-                // list while keeping only the first ids would mark every
-                // connection beyond the cap as new on each poll and keep fast
-                // health probes permanently armed.
                 let connection_ids = metrics
                     .connections
                     .iter()
@@ -1041,9 +1025,6 @@ impl App {
                     self.health.last_activity = Some(now);
                     self.health.fast_probe_pending = true;
                 }
-                // Node delays live in their own map; keeping a second copy in
-                // the metrics snapshot doubles the per-node bookkeeping and is
-                // resent every second.
                 for (tag, delay) in metrics.node_delays.drain() {
                     self.metrics_state.node_delays.insert(tag, delay);
                 }
@@ -1518,10 +1499,6 @@ impl App {
         }
     }
 
-    /// Spawn a background task that reports completion through the event
-    /// channel. If the task panics, the panic is caught and surfaced as
-    /// `AppEvent::BackgroundPanic` so the matching in-flight flag is cleared
-    /// instead of staying set forever.
     fn spawn_guarded<F>(&self, task: BackgroundTask, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -1595,9 +1572,6 @@ impl App {
         self.notify(text);
     }
 
-    /// Sample the event-channel backlog. A backlog only becomes visible here
-    /// when producers outpace the reducer across iterations; that is exactly
-    /// the condition a bounded channel would have to handle.
     fn sample_event_queue(&mut self, current: usize) {
         self.stats.event_queue_peak = self.stats.event_queue_peak.max(current);
         let due = self
@@ -1771,9 +1745,6 @@ impl App {
         if self.proxy_runtime.preflight_in_flight || self.proxy_runtime.restart_in_progress {
             return false;
         }
-        // Validate the proposed configuration before tearing down the running
-        // instance. The check runs on a blocking thread so a slow `sing-box
-        // check` cannot stall the daemon event loop.
         self.ui_state.restart_confirm = false;
         self.ui_state.rollback_confirm = false;
         self.ui_state.subscription_delete = None;
@@ -1805,8 +1776,6 @@ impl App {
                     self.proxy_runtime.restart_after_stop = true;
                     self.stop_proxy();
                 } else {
-                    // The instance disappeared while the check was running;
-                    // avoid leaving the busy flag set with nothing to restart.
                     self.proxy_runtime.restart_in_progress = false;
                     let _ = self.start_proxy();
                 }
@@ -1970,8 +1939,6 @@ impl App {
                         match client.proxies().await {
                             Ok(snapshot) => {
                                 selection = snapshot.selection;
-                                // Publish the delay map once per proxies poll;
-                                // the app merges it into its own copy.
                                 pending_node_delays = snapshot.node_delays;
                                 last_proxy_error = None;
                             }
@@ -2287,9 +2254,6 @@ impl App {
         });
     }
 
-    /// Signature of the inputs that affect the automatic candidate set. The
-    /// cache is keyed by value rather than by call site, so direct node or
-    /// keyword changes cannot leave a stale result behind.
     fn auto_tags_signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2322,8 +2286,6 @@ impl App {
         self.metrics_state.auto_tags_cache = Some((signature, tags));
     }
 
-    /// Tags of the nodes eligible for automatic selection under the current
-    /// keyword filters. Centralised so every caller uses the same predicate.
     fn auto_candidate_tags(&self) -> Vec<String> {
         let signature = self.auto_tags_signature();
         if let Some((cached, tags)) = &self.metrics_state.auto_tags_cache {
@@ -2365,10 +2327,6 @@ impl App {
             self.ui_state.last_error = Some(self.text().no_matching_nodes.to_string());
             return;
         };
-        // A running config built with fewer than two auto candidates has no
-        // urltest group. If a refresh added candidates, restart to regenerate
-        // the topology instead of sending a selector request for a missing
-        // "auto" child.
         if target == tags::AUTO && !self.proxy_runtime.runtime_has_auto {
             self.selection_state.preferred_node = None;
             self.selection_state.pending_selection = Some(PendingSelection::Auto);
@@ -2570,8 +2528,6 @@ impl App {
         {
             self.proxy_runtime.restart_at = None;
             if self.start_proxy().is_err() {
-                // A synchronous failure (no matching nodes, missing binary, ...)
-                // must not silently end the scheduled retry loop.
                 self.schedule_restart();
             }
             changed = true;
@@ -2610,10 +2566,6 @@ impl App {
         }
     }
 
-    /// Whether nodes are picked automatically (urltest) or pinned manually.
-    ///
-    /// While running the selector state is authoritative; before startup the
-    /// pending preferred node decides the mode.
     pub fn selection_mode_auto(&self) -> bool {
         match self.metrics_state.metrics.selection.selected.as_deref() {
             Some(selected) => selected == tags::AUTO,
@@ -2714,8 +2666,6 @@ fn sort_nodes(
     auto_tags: &HashSet<String>,
     delays: &HashMap<String, u64>,
 ) {
-    // Compute the sort keys once per node instead of lowercasing and probing
-    // the maps on every comparison (O(n log n) allocations on each refresh).
     match mode {
         NodeSort::AutoLatency => nodes.sort_by_cached_key(|node| {
             (

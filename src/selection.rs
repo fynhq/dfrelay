@@ -42,10 +42,6 @@ pub fn filter_nodes(nodes: &[Node], include: &[String], exclude: &[String]) -> V
         .collect()
 }
 
-/// Same filter as `filter_nodes`, without cloning each node's outbound JSON.
-///
-/// UI counts, selector prechecks, and sorting only need tags; cloning a full
-/// `Node` (including credentials) on every view tick is unnecessary.
 pub fn filter_node_tags(nodes: &[Node], include: &[String], exclude: &[String]) -> Vec<String> {
     nodes
         .iter()

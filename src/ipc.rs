@@ -18,17 +18,12 @@ use crate::app::{AppEvent, BackgroundTask};
 use crate::view::{DaemonStatus, View};
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
-/// Bumped when `ClientMsg`/`ServerMsg` or the `View` snapshot changes
-/// incompatibly. A mismatched client is rejected at the Hello step instead of
-/// failing later on every poll.
 pub const PROTOCOL_VERSION: u32 = 2;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-/// Hard cap for a single client message; keys/Hello are tiny, but
-/// `BufReader::lines` would otherwise grow without bound.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
@@ -100,8 +95,6 @@ impl InputCode {
 pub enum ClientMsg {
     Hello {
         viewer: bool,
-        /// Missing on clients older than protocol v2; defaults to 0 so the
-        /// daemon can answer with an explicit incompatibility message.
         #[serde(default)]
         version: u32,
     },
@@ -163,8 +156,6 @@ pub fn spawn_listener(listener: UnixListener, events_tx: UnboundedSender<AppEven
                     });
                 }
                 Ok(Err(_)) => {
-                    // Back off so a persistent accept error (e.g. fd
-                    // exhaustion) cannot spin this task at 100% CPU.
                     tokio::time::sleep(ACCEPT_BACKOFF).await;
                 }
                 Err(payload) => {
@@ -180,7 +171,6 @@ pub fn spawn_listener(listener: UnixListener, events_tx: UnboundedSender<AppEven
     });
 }
 
-/// Read one newline-terminated UTF-8 line with a hard size cap.
 async fn next_line_limited<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,
@@ -261,8 +251,6 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
     {
         return;
     }
-    // Do not forward any message until the daemon accepts this connection. A
-    // rejected second viewer must not be able to send keys or commands.
     match tokio::time::timeout(HELLO_TIMEOUT, accept_rx).await {
         Ok(Ok(true)) => {}
         _ => return,
@@ -289,8 +277,6 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
         };
         match message {
             ClientMsg::Hello { .. } => {}
-            // Only a TUI viewer may drive the UI. A control-only client can
-            // start/stop/status, but must not inject keys or viewport sizes.
             ClientMsg::Key { code, ctrl, alt } if viewer => {
                 let _ = events_tx.send(AppEvent::Key(code.to_key_event(ctrl, alt)));
             }
@@ -336,23 +322,20 @@ async fn write_client(
     }
 }
 
-/// Bind a Unix socket with owner-only permissions from the moment it exists.
-/// The umask is process-global, but it is held only across the synchronous
-/// bind call; the subsequent chmod remains as a belt-and-braces measure.
+// SECURITY: bind 0600 under umask, hold the daemon flock, and only unlink a socket file at the control path.
 fn bind_private(socket: &Path) -> io::Result<UnixListener> {
     #[cfg(unix)]
+    // SAFETY: umask has no preconditions; the process-global mode is restored immediately after bind.
     let previous = unsafe { libc::umask(0o077) };
     let result = UnixListener::bind(socket);
     #[cfg(unix)]
+    // SAFETY: restores the mode saved above; umask has no preconditions.
     unsafe {
         libc::umask(previous);
     }
     result
 }
 
-/// Hold an exclusive lock for the lifetime of the daemon. The socket bind
-/// already rejects a live peer, but a bind/connect race or a transient socket
-/// error must not allow two daemons to replace each other's socket.
 pub fn acquire_daemon_lock(data_dir: &Path) -> io::Result<std::fs::File> {
     crate::fsutil::ensure_private_dir(data_dir)?;
     let path = data_dir.join("daemon.lock");
@@ -360,6 +343,7 @@ pub fn acquire_daemon_lock(data_dir: &Path) -> io::Result<std::fs::File> {
     {
         use std::os::unix::io::AsRawFd;
         let file = crate::fsutil::open_private_file(&path, false)?;
+        // SAFETY: file owns the descriptor for this scope; flock does not retain it after the call.
         let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
         if locked {
             Ok(file)
@@ -380,7 +364,6 @@ pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        // Keep a margin below the platform's sockaddr_un.sun_path limit.
         if socket.as_os_str().as_bytes().len() >= 100 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -411,9 +394,6 @@ pub async fn bind_listener(socket: &Path) -> io::Result<UnixListener> {
                         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
                     ) =>
                 {
-                    // Only a socket file may be removed. A regular file,
-                    // symlink or directory at the control path is not ours;
-                    // deleting it could destroy user data.
                     match std::fs::symlink_metadata(socket) {
                         Ok(metadata) if metadata.file_type().is_socket() => {
                             std::fs::remove_file(socket)?;
@@ -466,7 +446,6 @@ pub fn spawn_daemon_at(
     if let Some(data_dir) = data_dir {
         command.arg("--data").arg(data_dir);
     }
-    // `start` is an ad-hoc launch; never inherit a service-manager marker.
     command.env_remove("DFRELAY_SERVICE");
     command
         .stdin(Stdio::null())
@@ -475,6 +454,7 @@ pub fn spawn_daemon_at(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec runs after fork before exec; the closure only calls setsid and allocates or locks nothing.
         unsafe {
             command.pre_exec(|| {
                 libc::setsid();
@@ -608,9 +588,6 @@ pub async fn control_shutdown(socket: &Path) -> io::Result<()> {
     ))
 }
 
-/// Send an explicit incompatibility message before closing. Older TUI clients
-/// report a daemon as incompatible after three unparseable snapshots, so send
-/// three lines even though a current client only needs the first one.
 async fn reject_incompatible(mut write: OwnedWriteHalf, got: u32) {
     let Ok(mut line) = serde_json::to_vec(&ServerMsg::Incompatible {
         expected: PROTOCOL_VERSION,

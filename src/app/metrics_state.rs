@@ -1,5 +1,3 @@
-//! Node, metrics, IP and viewer-observation state.
-
 use super::*;
 
 pub(crate) struct MetricsState {

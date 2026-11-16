@@ -114,8 +114,6 @@ fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
     let decoded_userinfo = if userinfo.contains(':') {
         decode_percent(&userinfo)
     } else {
-        // SIP002 percent-encodes the separator (`method%3Apassword`); try the
-        // decoded form before falling back to the legacy base64 form.
         let percent = decode_percent(&userinfo);
         if percent.contains(':') {
             percent
@@ -733,10 +731,6 @@ fn short_name(uri: &str) -> String {
     let (scheme, rest) = uri
         .split_once("://")
         .map_or(("unknown", ""), |(scheme, rest)| (scheme, rest));
-    // VMess payloads are base64 JSON; the base64 is not a host and may encode
-    // the UUID. Legacy Shadowsocks payloads have the same problem. Keep only
-    // the scheme so an unsupported-node name cannot carry credentials into the
-    // cache or an error path.
     if scheme.eq_ignore_ascii_case("vmess") {
         return "vmess://…".to_string();
     }

@@ -18,9 +18,6 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_ASSET_BYTES: usize = 100 * 1024 * 1024;
 const MAX_MANUAL_BYTES: u64 = 256 * 1024 * 1024;
-/// A file written moments ago can still be reported as busy when another
-/// thread's fork duplicated the write handle. Retry briefly instead of failing
-/// an install that is otherwise valid.
 const EXEC_RETRIES: usize = 6;
 const EXEC_RETRY_MIN_DELAY: Duration = Duration::from_millis(25);
 
@@ -86,8 +83,6 @@ impl BinaryManager {
 
     pub fn locate(&self) -> Option<PathBuf> {
         let managed = self.paths.binary();
-        // Repair a binary swap interrupted by a crash before reporting the
-        // managed binary as missing.
         self.recover_interrupted_install(&managed, &self.paths.previous_binary());
         managed.is_file().then_some(managed)
     }
@@ -361,12 +356,6 @@ impl BinaryManager {
         })
     }
 
-    /// Check a new binary against the currently generated runtime configuration.
-    ///
-    /// The minimal config only proves that the executable can start. Upgrade
-    /// compatibility must also cover the node fields in the live configuration;
-    /// otherwise a new sing-box can replace the old one and fail at the next
-    /// proxy start. Fall back to the minimal check when no runtime config exists.
     async fn check_existing_config(&self, binary: &Path) -> Result<(), BinaryError> {
         let runtime = self.paths.runtime_config();
         if runtime.is_file() {
@@ -429,8 +418,7 @@ impl BinaryManager {
     ) -> Result<(), BinaryError> {
         let target = self.paths.binary();
         let previous = self.paths.previous_binary();
-        // A crash after moving the current binary aside but before committing
-        // the new one would otherwise leave no usable `bin/sing-box`.
+        // RELIABILITY: recover a leftover swap after a crash; exec may report ETXTBSY until forked write handles close.
         self.recover_interrupted_install(&target, &previous);
 
         let current_metadata = fs::read_to_string(self.paths.binary_metadata()).ok();
@@ -455,8 +443,6 @@ impl BinaryManager {
             verified,
         };
         if let Err(err) = self.write_metadata(&metadata) {
-            // Restore the old binary so a metadata failure cannot leave the
-            // daemon without a runnable current version.
             let _ = fs::remove_file(&target);
             if had_target {
                 let _ = fs::rename(&staging, &target);
@@ -469,10 +455,6 @@ impl BinaryManager {
         }
 
         if had_target {
-            // The new current binary and metadata are already committed. A
-            // failure to rotate the previous version is recoverable on the
-            // next install and must not turn a successful install into an
-            // error for the running version.
             let _ = fs::remove_file(&previous);
             if fs::rename(&staging, &previous).is_ok() {
                 match current_metadata.as_deref() {
@@ -491,9 +473,6 @@ impl BinaryManager {
         Ok(())
     }
 
-    /// Repair a leftover `sing-box.swap` from an interrupted install. If the
-    /// current binary is missing, the swap is the old current; otherwise it is
-    /// the old current waiting to become the previous version.
     fn recover_interrupted_install(&self, target: &Path, previous: &Path) {
         let staging = self.paths.bin_dir.join("sing-box.swap");
         if !staging.is_file() {
@@ -548,8 +527,6 @@ pub(crate) struct ChannelClient {
     pub(crate) client: Client,
 }
 
-/// Ordered download attempts: direct/environment/local-proxy channel clients
-/// first, then configured GitHub mirrors through the direct client.
 pub(crate) fn download_attempts<'a>(
     clients: &'a [ChannelClient],
     mirrors: &[String],
@@ -595,12 +572,6 @@ pub(crate) fn download_clients(config: &Config) -> Result<Vec<ChannelClient>, Bi
     Ok(clients)
 }
 
-/// Run a command, retrying while the kernel reports the executable as busy.
-///
-/// `ETXTBSY` can surface even after the local write handle was closed: a
-/// concurrent `fork` duplicates descriptors from other threads, so the child
-/// briefly sees a writer it never opened itself. The window is short, so
-/// bounded backoff is enough; permission or format errors still fail at once.
 async fn output_with_retry(
     command: &mut tokio::process::Command,
 ) -> io::Result<std::process::Output> {
@@ -1166,8 +1137,6 @@ mod tests {
         fs::write(&binary, fake_binary_script("1.14.4")).unwrap();
         fsutil::set_executable(&binary).unwrap();
 
-        // A live write handle makes exec return ETXTBSY; the retry must wait
-        // for it to close instead of failing the install.
         let writer = fs::OpenOptions::new().write(true).open(&binary).unwrap();
         let target = binary.clone();
         let task = tokio::spawn(async move { manager.version(&target).await });
@@ -1197,8 +1166,6 @@ mod tests {
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
         fs::write(paths.binary(), b"v1").unwrap();
-        // A directory at the metadata path makes the atomic rename fail and
-        // exercises the restore path after the new binary was committed.
         fs::create_dir(paths.binary_metadata()).unwrap();
 
         let temp = manager.write_temp_binary(b"v2").unwrap();

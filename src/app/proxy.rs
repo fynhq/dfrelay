@@ -1,5 +1,3 @@
-//! Proxy process lifecycle state.
-
 use super::*;
 
 pub(crate) struct ProxyRuntime {

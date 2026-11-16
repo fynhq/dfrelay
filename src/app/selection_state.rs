@@ -1,5 +1,3 @@
-//! Manual selection, selection generation and pending-start state.
-
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

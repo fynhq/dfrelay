@@ -38,8 +38,6 @@ pub struct SubscriptionView {
     pub stale: bool,
 }
 
-/// The subset of `Config` the TUI needs. Keeping this as a dedicated type
-/// prevents future secret fields from being serialized into `View` by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigView {
     pub language: Lang,

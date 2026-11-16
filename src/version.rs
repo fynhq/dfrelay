@@ -1,8 +1,5 @@
-/// Version declared in `Cargo.toml`; used for protocol/user-agent strings.
 pub const BASE: &str = env!("CARGO_PKG_VERSION");
 
-/// User-visible version. Local non-CI builds append `+{git short hash}` via
-/// `build.rs`; CI/release builds keep the bare version.
 pub const DISPLAY: &str = env!("DFRELAY_VERSION_DISPLAY");
 
 #[cfg(test)]

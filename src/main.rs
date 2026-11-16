@@ -82,8 +82,6 @@ enum ServiceCommand {
     Forget,
 }
 
-/// Commands that run after configuration loading. `Service` must be handled
-/// before `Config`/`Logger` are created, so it has no variant here.
 #[derive(Debug, Clone)]
 enum RuntimeCommand {
     Start,
@@ -124,9 +122,6 @@ fn main() -> anyhow::Result<()> {
         logger.app(LogLevel::Warn, warning);
     }
 
-    // The daemon needs concurrent background tasks; the TUI, status and
-    // lifecycle commands are short-lived or single-viewer and do not need a
-    // worker pool per CPU core.
     let runtime = if matches!(cli.command.as_ref(), Some(Command::Serve)) {
         daemon_runtime()?
     } else {
@@ -170,9 +165,6 @@ fn current_thread_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 fn daemon_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    // Two workers are enough for the daemon's I/O-bound polling, process
-    // supervision and at most four concurrent subscription fetches, and avoid
-    // a thread per CPU core on large hosts.
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_name("dfr-daemon")
@@ -508,8 +500,6 @@ async fn wait_for_socket_gone(socket: &Path, timeout: Duration) -> anyhow::Resul
     bail!("DFRelay daemon is still running after the service stop request")
 }
 
-// The daemon removes its control socket before exiting, so control_shutdown
-// returning does not mean the old process has released the flock.
 async fn wait_for_daemon_lock(data_dir: &Path, timeout: Duration) -> anyhow::Result<()> {
     let deadline = Instant::now() + timeout;
     loop {

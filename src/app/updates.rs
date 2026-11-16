@@ -1,8 +1,3 @@
-//! sing-box binary update orchestration.
-//!
-//! Daily version checks, downloads, inbox installs, and previous-version
-//! switching live here; the UI overlay and key handling stay in `app.rs`.
-
 use super::*;
 
 impl App {

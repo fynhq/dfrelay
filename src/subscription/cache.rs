@@ -78,9 +78,6 @@ pub fn save(path: &Path, runtimes: &[SubscriptionRuntime]) -> std::io::Result<()
             .iter()
             .map(|runtime| CachedSubscription {
                 id: runtime.config.id.clone(),
-                // If the URL changed and its refresh failed, keep the old
-                // source hash so the next startup does not treat stale nodes
-                // as belonging to the new URL.
                 url_hash: runtime
                     .source_url_hash
                     .clone()
