@@ -320,7 +320,9 @@ impl App {
             .collect();
         if !errors.is_empty() {
             self.ui_state.last_error = Some(errors.join("; "));
-        } else if self.proxy_runtime.status != ProxyStatus::Failed {
+        } else if self.proxy_runtime.status != ProxyStatus::Failed
+            && self.ui_state.last_error.as_deref() != Some(self.text().msg_health_no_nodes)
+        {
             self.ui_state.last_error = None;
         }
     }

@@ -1951,6 +1951,70 @@ async fn healthy_probe_clears_no_node_error_and_backoff() {
     assert_eq!(app.health.no_node_level, 0);
 }
 
+#[tokio::test]
+async fn recovery_applied_requires_current_generation_and_running_proxy() {
+    let (mut app, _dir) = test_app().await;
+    app.proxy_runtime.status = ProxyStatus::Running;
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
+    app.selection_state.preferred_node = Some("n0".to_string());
+    app.health.failures = 3;
+    let generation = app
+        .selection_state
+        .selection_generation
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    app.handle_event(AppEvent::RecoveryApplied {
+        target: RecoveryTarget::Node("n1".to_string()),
+        trigger: "n0".to_string(),
+        generation: generation.wrapping_add(1),
+    })
+    .await;
+    assert_eq!(app.selection_state.preferred_node.as_deref(), Some("n0"));
+    assert_eq!(app.health.failures, 3);
+
+    app.handle_event(AppEvent::RecoveryApplied {
+        target: RecoveryTarget::Node("n1".to_string()),
+        trigger: "n0".to_string(),
+        generation,
+    })
+    .await;
+    assert_eq!(app.selection_state.preferred_node.as_deref(), Some("n0"));
+    assert_eq!(app.health.failures, 3);
+    assert_eq!(app.stats.recovery_selected, 0);
+}
+
+#[tokio::test]
+async fn subscription_refresh_preserves_health_no_nodes_error() {
+    let (mut app, _dir) = test_app().await;
+    app.proxy_runtime.status = ProxyStatus::Running;
+    app.ui_state.last_error = Some(app.text().msg_health_no_nodes.to_string());
+    app.refresh_last_error_from_subscriptions();
+    assert_eq!(
+        app.ui_state.last_error.as_deref(),
+        Some(app.text().msg_health_no_nodes)
+    );
+
+    app.ui_state.last_error = Some("stale proxy error".to_string());
+    app.refresh_last_error_from_subscriptions();
+    assert!(app.ui_state.last_error.is_none());
+}
+
+#[tokio::test]
+async fn nodes_cursor_survives_reorder_while_away() {
+    let (mut app, _dir) = test_app().await;
+    app.metrics_state.nodes = vec![
+        tagged_node("A", "n1"),
+        tagged_node("B", "n2"),
+        tagged_node("C", "n3"),
+    ];
+    app.ui_state.page = Page::Nodes;
+    app.ui_state.selected = 2;
+    app.switch_page(Page::Dashboard);
+    app.metrics_state.nodes.reverse();
+    app.switch_page(Page::Nodes);
+    assert_eq!(app.metrics_state.nodes[app.ui_state.selected].tag, "n3");
+}
+
 #[test]
 fn proxy_ip_failure_warnings_are_throttled() {
     assert_eq!(proxy_ip_failure_level(1, false), LogLevel::Warn);

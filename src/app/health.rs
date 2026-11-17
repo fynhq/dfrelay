@@ -431,6 +431,7 @@ impl App {
             return;
         }
         if self.subscription_state.refreshing_subscriptions {
+            self.health.last_recovery_refresh = Some(Instant::now());
             self.health.recovery_refresh_pending = true;
             return;
         }

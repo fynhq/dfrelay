@@ -139,7 +139,7 @@ pub enum HealthOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RecoveryTarget {
+pub(crate) enum RecoveryTarget {
     Auto,
     Node(String),
 }
@@ -231,6 +231,11 @@ pub enum AppEvent {
         generation: u64,
         trigger: String,
         healthy: Vec<(String, u64)>,
+    },
+    RecoveryApplied {
+        target: RecoveryTarget,
+        trigger: String,
+        generation: u64,
     },
     NodeDelay {
         tag: String,
@@ -390,6 +395,7 @@ impl App {
 
     pub async fn new(config: Config, paths: Paths, logger: Logger) -> Self {
         let binary_manager = BinaryManager::new(paths.clone());
+        binary_manager.recover_install();
         let mut setup = SetupState::default();
         let locator = binary_manager.locate();
         let binary_installed = locator.is_some();
@@ -645,36 +651,46 @@ impl App {
         spawn_auto_start(socket_path.clone(), self.logger.clone());
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         let mut last_publish = Instant::now() - PUBLISH_INTERVAL;
-        loop {
-            let queued = self.events_rx.len();
-            self.sample_event_queue(queued);
-            let mut publish = false;
-            tokio::select! {
-                maybe_event = self.events_rx.recv() => {
-                    if let Some(event) = maybe_event {
-                        self.stats.events_processed_window += 1;
-                        self.handle_event(event).await;
-                        for _ in 0..32 {
-                            let Ok(event) = self.events_rx.try_recv() else {
-                                break;
-                            };
+        let loop_result = crate::guard::CatchUnwind::new(async {
+            loop {
+                let queued = self.events_rx.len();
+                self.sample_event_queue(queued);
+                let mut publish = false;
+                tokio::select! {
+                    maybe_event = self.events_rx.recv() => {
+                        if let Some(event) = maybe_event {
                             self.stats.events_processed_window += 1;
                             self.handle_event(event).await;
+                            for _ in 0..32 {
+                                let Ok(event) = self.events_rx.try_recv() else {
+                                    break;
+                                };
+                                self.stats.events_processed_window += 1;
+                                self.handle_event(event).await;
+                            }
+                            publish = true;
                         }
-                        publish = true;
+                    }
+                    _ = ticker.tick() => {
+                        publish = self.on_tick().await;
                     }
                 }
-                _ = ticker.tick() => {
-                    publish = self.on_tick().await;
+                if publish || last_publish.elapsed() >= PUBLISH_INTERVAL {
+                    self.publish_view();
+                    last_publish = Instant::now();
+                }
+                if self.should_quit {
+                    break;
                 }
             }
-            if publish || last_publish.elapsed() >= PUBLISH_INTERVAL {
-                self.publish_view();
-                last_publish = Instant::now();
-            }
-            if self.should_quit {
-                break;
-            }
+        })
+        .await;
+        if let Err(payload) = loop_result {
+            let message = crate::guard::panic_message(payload.as_ref());
+            self.logger.app(
+                LogLevel::Error,
+                format!("daemon event loop panicked: {message}"),
+            );
         }
         self.broadcast(ServerMsg::Shutdown);
         self.clients.clear();
@@ -1147,8 +1163,58 @@ impl App {
                     self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
                     return;
                 };
-                self.stats.recovery_selected = self.stats.recovery_selected.saturating_add(1);
                 let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
+                let tag = match &target {
+                    RecoveryTarget::Auto => tags::AUTO.to_string(),
+                    RecoveryTarget::Node(tag) => tag.clone(),
+                };
+                self.selection_state
+                    .selection_generation
+                    .fetch_add(1, Ordering::Relaxed);
+                let tx = self.events_tx.clone();
+                let generation = self
+                    .selection_state
+                    .selection_generation
+                    .load(Ordering::Relaxed);
+                let token = self.selection_state.selection_generation.clone();
+                self.spawn_guarded(BackgroundTask::Selection, async move {
+                    if token.load(Ordering::Relaxed) != generation {
+                        return;
+                    }
+                    match client.select(&tag).await {
+                        Ok(()) => {
+                            if token.load(Ordering::Relaxed) == generation {
+                                let _ = tx.send(AppEvent::RecoveryApplied {
+                                    target,
+                                    trigger,
+                                    generation,
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx.send(AppEvent::Error(err.to_string()));
+                        }
+                    }
+                });
+            }
+            AppEvent::RecoveryApplied {
+                target,
+                trigger,
+                generation,
+            } => {
+                if generation
+                    != self
+                        .selection_state
+                        .selection_generation
+                        .load(Ordering::Relaxed)
+                {
+                    return;
+                }
+                if self.proxy_runtime.status != ProxyStatus::Running
+                    || self.proxy_runtime.proxy.is_none()
+                {
+                    return;
+                }
                 let (tag, name) = match &target {
                     RecoveryTarget::Auto => {
                         self.selection_state.preferred_node = None;
@@ -1167,11 +1233,9 @@ impl App {
                     }
                 };
                 self.selection_state.pending_selection = None;
+                self.stats.recovery_selected = self.stats.recovery_selected.saturating_add(1);
                 self.record_auto_switch();
                 self.set_switch_reason("recovery");
-                self.selection_state
-                    .selection_generation
-                    .fetch_add(1, Ordering::Relaxed);
                 self.health.failures = 0;
                 self.health.failure_tag = None;
                 self.health.no_node_level = 0;
@@ -1187,27 +1251,8 @@ impl App {
                         format!("{}: {name}", self.text().msg_health_switched)
                     }
                 };
-                let tx = self.events_tx.clone();
-                let generation = self
-                    .selection_state
-                    .selection_generation
-                    .load(Ordering::Relaxed);
-                let token = self.selection_state.selection_generation.clone();
-                self.spawn_guarded(BackgroundTask::Selection, async move {
-                    if token.load(Ordering::Relaxed) != generation {
-                        return;
-                    }
-                    match client.select(&tag).await {
-                        Ok(()) => {
-                            if token.load(Ordering::Relaxed) == generation {
-                                let _ = tx.send(AppEvent::Info(label));
-                            }
-                        }
-                        Err(err) => {
-                            let _ = tx.send(AppEvent::Error(err.to_string()));
-                        }
-                    }
-                });
+                self.notify(label);
+                self.request_metrics_refresh();
             }
             AppEvent::ProxyIps { ips, errors } => {
                 self.metrics_state.proxy_ips_in_flight = false;
@@ -1435,6 +1480,10 @@ impl App {
             self.ack(client_id, false, "proxy state is changing");
             return;
         }
+        if self.setup_busy() {
+            self.ack(client_id, false, "binary setup is in progress");
+            return;
+        }
         if self.metrics_state.nodes.is_empty() {
             self.selection_state.pending_start = Some(client_id);
             if self.subscription_state.refreshing_subscriptions {
@@ -1465,6 +1514,9 @@ impl App {
             return;
         }
         if self.proxy_busy() {
+            return;
+        }
+        if self.setup_busy() {
             return;
         }
         if let Err(err) = self.start_proxy() {
@@ -1535,6 +1587,7 @@ impl App {
                 self.proxy_runtime.restart_in_progress = false;
                 self.proxy_runtime.status = ProxyStatus::Failed;
                 self.ack_pending_start(false, "proxy start task failed");
+                self.schedule_restart();
             }
             BackgroundTask::ProxyStop => {
                 self.proxy_runtime.restart_in_progress = false;
@@ -1671,6 +1724,10 @@ impl App {
             self.stop_proxy();
             return;
         }
+        if self.setup_busy() {
+            self.notify(self.text().setup_busy);
+            return;
+        }
         self.proxy_runtime.restart_attempts = 0;
         self.proxy_runtime.restart_at = None;
         self.proxy_runtime.stable_reset_at = None;
@@ -1757,12 +1814,9 @@ impl App {
         let preferred = self.selection_state.preferred_node.clone();
         let tx = self.events_tx.clone();
         self.spawn_guarded(BackgroundTask::Preflight, async move {
-            let result = tokio::task::spawn_blocking(move || {
-                supervisor::preflight(&paths, &config, &nodes, preferred.as_deref())
-                    .map_err(|err| err.to_string())
-            })
-            .await
-            .unwrap_or_else(|err| Err(format!("preflight task failed: {err}")));
+            let result = supervisor::preflight(&paths, &config, &nodes, preferred.as_deref())
+                .await
+                .map_err(|err| err.to_string());
             let _ = tx.send(AppEvent::PreflightDone(result));
         });
         true
@@ -2521,6 +2575,7 @@ impl App {
             && self.proxy_runtime.proxy.is_none()
             && !self.proxy_runtime.restart_in_progress
             && !self.proxy_runtime.preflight_in_flight
+            && !self.setup_busy()
             && self
                 .proxy_runtime
                 .restart_at

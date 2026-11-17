@@ -292,6 +292,13 @@ impl App {
             return;
         }
         self.ui_state.page_selection[self.ui_state.page.index()] = self.ui_state.selected;
+        if self.ui_state.page == Page::Nodes {
+            self.ui_state.nodes_cursor_tag = self
+                .metrics_state
+                .nodes
+                .get(self.ui_state.selected)
+                .map(|node| node.tag.clone());
+        }
         if self.ui_state.page == Page::Help && page != Page::Help {
             self.ui_state.help_return = None;
         }
@@ -302,6 +309,16 @@ impl App {
         let max = self.max_selection_for(page);
         if page == Page::Logs && self.ui_state.log_follow {
             self.ui_state.selected = max.saturating_sub(1);
+        } else if page == Page::Nodes {
+            let by_tag = self.ui_state.nodes_cursor_tag.as_ref().and_then(|tag| {
+                self.metrics_state
+                    .nodes
+                    .iter()
+                    .position(|node| node.tag == *tag)
+            });
+            self.ui_state.selected = by_tag
+                .unwrap_or(self.ui_state.page_selection[page.index()])
+                .min(max.saturating_sub(1));
         } else {
             self.ui_state.selected =
                 self.ui_state.page_selection[page.index()].min(max.saturating_sub(1));
