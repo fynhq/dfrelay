@@ -83,12 +83,24 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
         .to_string();
     let network = yaml_str(proxy, "network")
         .filter(|network| !network.is_empty())
-        .unwrap_or("tcp");
+        .unwrap_or("tcp")
+        .to_ascii_lowercase();
     if matches!(kind, "vmess" | "vless" | "trojan") {
-        ensure_supported_network(network)?;
+        ensure_supported_network(&network)?;
+        if network == "http" {
+            return Err("unsupported transport: http (Clash HTTP obfs)".to_string());
+        }
+        let has_public_key = yaml_get(proxy, "reality-opts")
+            .and_then(Value::as_object)
+            .and_then(|mapping| mapping.get("public-key"))
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.is_empty());
+        if yaml_get(proxy, "reality-opts").is_some() && !has_public_key {
+            return Err("reality-opts missing public-key".to_string());
+        }
     }
 
-    let (protocol, mut outbound) = match kind {
+    let (protocol, outbound) = match kind {
         "ss" => {
             if yaml_str(proxy, "plugin").is_some() {
                 return Err("shadowsocks plugin is not supported".to_string());
@@ -129,7 +141,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             if alter_id > 0 {
                 value.insert("alter_id".into(), json!(alter_id));
             }
-            attach_transport_tls(proxy, network, &mut value);
+            attach_transport_tls(proxy, &network, &mut value);
             ("vmess", Value::Object(value))
         }
         "vless" => {
@@ -146,7 +158,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
                 ensure_vless_flow(flow)?;
                 value.insert("flow".into(), json!(flow));
             }
-            attach_transport_tls(proxy, network, &mut value);
+            attach_transport_tls(proxy, &network, &mut value);
             ("vless", Value::Object(value))
         }
         "trojan" => {
@@ -159,7 +171,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             value.insert("server".into(), json!(server));
             value.insert("server_port".into(), json!(port));
             value.insert("password".into(), json!(password));
-            attach_transport(proxy, network, &mut value);
+            attach_transport(proxy, &network, &mut value);
             value.insert("tls".into(), tls_value(proxy, true));
             ("trojan", Value::Object(value))
         }
@@ -266,9 +278,6 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
         other => return Err(format!("unsupported protocol: {other}")),
     };
 
-    if let Some(object) = outbound.as_object_mut() {
-        object.remove("tag");
-    }
     Ok(Node::new(
         name,
         source.to_string(),
@@ -759,5 +768,93 @@ proxies:
         }
         let err = parse_clash(&yaml, "test").unwrap_err();
         assert!(err.contains("more than"), "{err}");
+    }
+
+    #[test]
+    fn clash_rejects_http_obfs_but_keeps_h2() {
+        let yaml = r#"
+proxies:
+  - name: http obfs
+    type: vmess
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    network: http
+    http-opts:
+      path: /obfs
+  - name: h2
+    type: vmess
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    network: h2
+    h2-opts:
+      host: cdn.example.com
+      path: /h2
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].outbound.value()["transport"]["type"], "http");
+        assert_eq!(unsupported.len(), 1);
+        assert!(
+            unsupported[0].1.contains("Clash HTTP obfs"),
+            "{}",
+            unsupported[0].1
+        );
+    }
+
+    #[test]
+    fn clash_normalizes_uppercase_network() {
+        let yaml = r#"
+proxies:
+  - name: upper ws
+    type: vmess
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    network: WS
+    ws-opts:
+      path: /ws
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert_eq!(unsupported.len(), 0);
+        assert_eq!(nodes[0].outbound.value()["transport"]["type"], "ws");
+    }
+
+    #[test]
+    fn clash_rejects_reality_without_public_key() {
+        let yaml = r#"
+proxies:
+  - name: missing key
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    tls: true
+    reality-opts:
+      short-id: "1234"
+  - name: with key
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    tls: true
+    servername: example.com
+    reality-opts:
+      public-key: abc
+      short-id: "1234"
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0].outbound.value()["tls"]["reality"]["public_key"],
+            "abc"
+        );
+        assert_eq!(unsupported.len(), 1);
+        assert!(
+            unsupported[0].1.contains("public-key"),
+            "{}",
+            unsupported[0].1
+        );
     }
 }
