@@ -1,8 +1,7 @@
-use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
 use std::path::Path;
-use std::process::{Command as StdCommand, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Stdio;
+use std::time::Duration;
 
 use rand::Rng;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -54,7 +53,7 @@ pub enum SupervisorError {
     Health(String),
 }
 
-pub fn preflight(
+pub async fn preflight(
     paths: &Paths,
     config: &Config,
     nodes: &[Node],
@@ -81,36 +80,29 @@ pub fn preflight(
     let candidate = paths.runtime_config().with_extension("json.preflight");
     let generated = serde_json::to_string_pretty(&generated)?;
     fsutil::write_private_file(&candidate, generated.as_bytes())?;
-    let result = run_check_blocking(&binary, &candidate);
+    let result = check_config(&binary, &candidate).await;
     let _ = std::fs::remove_file(&candidate);
     result
 }
 
-fn run_check_blocking(binary: &Path, config: &Path) -> Result<(), SupervisorError> {
-    let mut child = StdCommand::new(binary)
-        .args(["check", "-c"])
-        .arg(config)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.try_wait()? {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if status.success() {
-                return Ok(());
-            }
-            return Err(SupervisorError::Check(stderr.trim().to_string()));
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(SupervisorError::Check("timeout".to_string()));
-        }
-        std::thread::sleep(Duration::from_millis(20));
+async fn check_config(binary: &Path, config: &Path) -> Result<(), SupervisorError> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        Command::new(binary)
+            .args(["check", "-c"])
+            .arg(config)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| SupervisorError::Check("timeout".to_string()))?
+    .map_err(SupervisorError::Io)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(SupervisorError::Check(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ))
     }
 }
 
@@ -164,27 +156,9 @@ pub async fn start(
     let generated = serde_json::to_string_pretty(&generated)?;
     fsutil::write_private_file(&candidate, generated.as_bytes())?;
 
-    let check = Command::new(&binary)
-        .args(["check", "-c"])
-        .arg(&candidate)
-        .kill_on_drop(true)
-        .output();
-    let check = match tokio::time::timeout(Duration::from_secs(15), check).await {
-        Err(_) => {
-            let _ = std::fs::remove_file(&candidate);
-            return Err(SupervisorError::Check("timeout".to_string()));
-        }
-        Ok(Err(err)) => {
-            let _ = std::fs::remove_file(&candidate);
-            return Err(SupervisorError::Io(err));
-        }
-        Ok(Ok(output)) => output,
-    };
-    if !check.status.success() {
+    if let Err(err) = check_config(&binary, &candidate).await {
         let _ = std::fs::remove_file(&candidate);
-        return Err(SupervisorError::Check(
-            String::from_utf8_lossy(&check.stderr).trim().to_string(),
-        ));
+        return Err(err);
     }
     if let Err(err) = std::fs::rename(&candidate, &runtime_config) {
         let _ = std::fs::remove_file(&candidate);
@@ -349,6 +323,8 @@ fn random_secret() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::process::Command as StdCommand;
 
     #[test]
     fn secret_is_32_hex_chars() {
@@ -365,8 +341,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn preflight_checks_the_generated_config() {
+    #[tokio::test]
+    async fn preflight_checks_the_generated_config() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
         use tempfile::TempDir;
@@ -401,12 +377,16 @@ mod tests {
             }),
         );
         let config = Config::default();
-        assert!(preflight(&paths, &config, std::slice::from_ref(&node), None).is_ok());
+        assert!(
+            preflight(&paths, &config, std::slice::from_ref(&node), None)
+                .await
+                .is_ok()
+        );
 
         fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(
-            preflight(&paths, &config, &[node], None),
+            preflight(&paths, &config, &[node], None).await,
             Err(SupervisorError::Check(_))
         ));
     }
