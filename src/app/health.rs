@@ -151,6 +151,7 @@ impl App {
         self.health.fast_probe_pending = false;
         self.health.recovery_in_flight = false;
         self.health.pause_until = None;
+        self.health.last_probe = None;
         self.health.no_node_level = 0;
         self.health.recovery_refresh_pending = false;
         self.reset_health_failures();

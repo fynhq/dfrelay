@@ -853,21 +853,20 @@ impl App {
                 }
                 self.refresh_merged_nodes();
                 self.finalize_subscription_change();
-                if runtime.error.is_none() {
-                    self.notify(format!(
-                        "{}: {}",
-                        self.text().msg_subscription_saved,
-                        runtime.config.name
-                    ));
-                }
-                self.logger.app(
-                    LogLevel::Info,
-                    format!(
-                        "subscription {} refreshed: {} nodes",
-                        runtime.config.name,
-                        runtime.nodes.len()
+                match &runtime.error {
+                    Some(err) => self.logger.app(
+                        LogLevel::Warn,
+                        format!("subscription {} refresh failed: {err}", runtime.config.name),
                     ),
-                );
+                    None => self.logger.app(
+                        LogLevel::Info,
+                        format!(
+                            "subscription {} refreshed: {} nodes",
+                            runtime.config.name,
+                            runtime.nodes.len()
+                        ),
+                    ),
+                }
                 if self
                     .subscription_state
                     .pending_restart_subscription
@@ -896,6 +895,7 @@ impl App {
                         ));
                         self.binary_state.setup.message = None;
                         self.refresh_previous_binary_state();
+                        self.close_overlay();
                         self.switch_page(Page::Dashboard);
                         self.auto_restart_after_change();
                     }
@@ -924,6 +924,7 @@ impl App {
                         self.binary_state.setup.message = None;
                         self.binary_state.setup.pending_install = None;
                         self.refresh_previous_binary_state();
+                        self.close_overlay();
                         self.switch_page(Page::Dashboard);
                         self.maybe_check_binary_update();
                         self.auto_restart_after_change();
@@ -1034,6 +1035,8 @@ impl App {
                     .any(|id| !self.health.connection_ids.contains(&id));
                 self.health.connection_ids.clear();
                 self.health.connection_ids.extend(connection_ids);
+                // Probes and proxy-IP lookups create their own connections through the
+                // proxy; ignoring them while in flight avoids a self-triggered probe loop.
                 if new_connection
                     && !self.metrics_state.proxy_ips_in_flight
                     && !self.health.probe_in_flight
@@ -1068,6 +1071,12 @@ impl App {
                 }
                 match outcome {
                     HealthOutcome::Healthy(delay) => {
+                        self.health.quality.record_success(&tag, delay);
+                        self.metrics_state.node_delays.insert(tag.clone(), delay);
+                        if self.health_target().as_deref() != Some(tag.as_str()) {
+                            self.sort_nodes_if_visible();
+                            return;
+                        }
                         let recovered = self.health.pause_until.take().is_some()
                             || self.health.no_node_level > 0;
                         let had_failures = self.health.failures > 0;
@@ -1090,8 +1099,6 @@ impl App {
                                 format!("health recovered: {tag} ({delay} ms)"),
                             );
                         }
-                        self.health.quality.record_success(&tag, delay);
-                        self.metrics_state.node_delays.insert(tag, delay);
                         self.sort_nodes_if_visible();
                     }
                     HealthOutcome::Failed => {

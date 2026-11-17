@@ -2015,6 +2015,60 @@ async fn nodes_cursor_survives_reorder_while_away() {
     assert_eq!(app.metrics_state.nodes[app.ui_state.selected].tag, "n3");
 }
 
+#[tokio::test]
+async fn stale_healthy_probe_does_not_clear_current_health_state() {
+    let (mut app, _dir) = test_app().await;
+    app.proxy_runtime.status = ProxyStatus::Running;
+    app.metrics_state.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
+    app.metrics_state.metrics.selection.selected = Some("n1".to_string());
+    app.health.failures = 3;
+    app.health.failure_tag = Some("n1".to_string());
+    app.health.pause_until = Some(Instant::now() + Duration::from_secs(60));
+    let no_nodes = app.text().msg_health_no_nodes.to_string();
+    app.ui_state.last_error = Some(no_nodes.clone());
+    let generation = app.health.generation;
+
+    app.handle_event(AppEvent::HealthProbe {
+        generation,
+        tag: "n2".to_string(),
+        outcome: HealthOutcome::Healthy(42),
+    })
+    .await;
+
+    assert_eq!(app.health.failures, 3);
+    assert_eq!(app.health.failure_tag.as_deref(), Some("n1"));
+    assert!(app.health.pause_until.is_some());
+    assert_eq!(app.ui_state.last_error.as_deref(), Some(no_nodes.as_str()));
+    assert_eq!(app.metrics_state.node_delays.get("n2"), Some(&42));
+}
+
+#[tokio::test]
+async fn invalidate_health_tasks_resets_last_probe() {
+    let (mut app, _dir) = test_app().await;
+    app.health.last_probe = Some(Instant::now());
+    app.invalidate_health_tasks();
+    assert!(app.health.last_probe.is_none());
+}
+
+#[tokio::test]
+async fn install_success_closes_setup_overlay_on_dashboard() {
+    let (mut app, _dir) = test_app().await;
+    app.ui_state.page = Page::Dashboard;
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
+    app.handle_event(AppEvent::InstallDone(Ok(
+        crate::singbox::binary::BinaryMetadata {
+            version: "1.14.4".to_string(),
+            source: "test".to_string(),
+            sha256: None,
+            installed_at: "2026-11-17 00:00:00".to_string(),
+            verified: true,
+        },
+    )))
+    .await;
+    assert!(app.ui_state.overlay.is_none());
+}
+
 #[test]
 fn proxy_ip_failure_warnings_are_throttled() {
     assert_eq!(proxy_ip_failure_level(1, false), LogLevel::Warn);
