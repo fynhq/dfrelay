@@ -84,10 +84,12 @@ fn failed_runtime(
                 .source_url_hash
                 .clone()
                 .or_else(|| Some(cache::url_hash(&previous.config.url)));
+            let mut nodes = previous.nodes.clone();
+            rename_source(&mut nodes, &config.name);
             SubscriptionRuntime {
                 config,
                 source_url_hash,
-                nodes: previous.nodes.clone(),
+                nodes,
                 unsupported: previous.unsupported.clone(),
                 last_updated: previous.last_updated.clone(),
                 error: Some(error),
@@ -103,6 +105,13 @@ fn failed_runtime(
             error: Some(error),
             stale: false,
         },
+    }
+}
+
+pub(crate) fn rename_source(nodes: &mut [Node], name: &str) {
+    let name = crate::text::sanitize_owned(name.to_string());
+    for node in nodes {
+        node.source = name.clone();
     }
 }
 
@@ -293,5 +302,15 @@ mod tests {
         let first_failure = failed_runtime(previous.config.clone(), None, "timeout".to_string());
         assert!(first_failure.nodes.is_empty());
         assert!(!first_failure.stale);
+    }
+
+    #[test]
+    fn failed_refresh_after_rename_updates_node_source() {
+        let previous = runtime(vec![node("A", "same")]);
+        let mut new_config = previous.config.clone();
+        new_config.name = "renamed".to_string();
+        let failed = failed_runtime(new_config, Some(&previous), "timeout".to_string());
+        assert_eq!(failed.nodes[0].source, "renamed");
+        assert_eq!(failed.nodes[0].tag, previous.nodes[0].tag);
     }
 }

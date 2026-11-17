@@ -52,10 +52,12 @@ pub fn load(path: &Path, configs: &[SubscriptionConfig]) -> Vec<SubscriptionRunt
             if cached.nodes.is_empty() {
                 return None;
             }
+            let mut nodes = cached.nodes.clone();
+            super::rename_source(&mut nodes, &config.name);
             Some(SubscriptionRuntime {
                 config: config.clone(),
                 source_url_hash: Some(cached.url_hash.clone()),
-                nodes: cached.nodes.clone(),
+                nodes,
                 unsupported: cached.unsupported.clone(),
                 last_updated: cached.last_updated.clone(),
                 error: None,
@@ -198,5 +200,20 @@ mod tests {
         save(&path, &[runtime(config("one", "https://example.com/sub"))]).unwrap();
         assert!(load(&path, &[disabled]).is_empty());
         assert!(load(&path, &[config("other", "https://example.com/sub")]).is_empty());
+    }
+
+    #[test]
+    fn load_rewrites_source_to_current_subscription_name() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.json");
+        let mut old = config("one", "https://example.com/sub");
+        old.name = "old".to_string();
+        save(&path, &[runtime(old)]).unwrap();
+
+        let mut current = config("one", "https://example.com/sub");
+        current.name = "new".to_string();
+        let loaded = load(&path, &[current]);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].nodes[0].source, "new");
     }
 }
