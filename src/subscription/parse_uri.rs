@@ -95,7 +95,9 @@ fn strip_uri_scheme<'a>(uri: &'a str, expected: &str) -> Result<&'a str, String>
 fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
     let rest = strip_uri_scheme(uri, "ss")?;
     let (rest, name) = split_fragment(rest);
-    let name = name.map(|name| decode_percent(&name));
+    let name = name
+        .map(|name| decode_percent(&name))
+        .filter(|name| !name.is_empty());
     let (rest, query) = split_query(rest);
     if query.split('&').any(|part| part.starts_with("plugin=")) {
         return Err("shadowsocks plugin is not supported".to_string());
@@ -128,6 +130,10 @@ fn parse_ss(uri: &str, source: &str) -> Result<Node, String> {
         return Err("ss method or password is empty".to_string());
     }
     ensure_shadowsocks_method(method)?;
+    let hostport = hostport
+        .split_once('/')
+        .map(|(host, _)| host.to_string())
+        .unwrap_or(hostport);
     let (server, port) = parse_host_port(&hostport)?;
     if server.is_empty() {
         return Err("ss missing server".to_string());
@@ -179,8 +185,15 @@ fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
     ensure_vmess_security(security)?;
     let network = string_field(object, "net")
         .filter(|network| !network.is_empty())
-        .unwrap_or("tcp");
-    ensure_supported_network(network)?;
+        .unwrap_or("tcp")
+        .to_ascii_lowercase();
+    ensure_supported_network(&network)?;
+    if string_field(object, "type")
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+    {
+        return Err("vmess tcp header obfs is not supported".to_string());
+    }
     let tls_enabled = tls_string_enabled(string_field(object, "tls"));
     let sni = string_field(object, "sni").filter(|s| !s.is_empty());
     let host = string_field(object, "host").filter(|s| !s.is_empty());
@@ -195,7 +208,7 @@ fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
     if alter_id > 0 {
         outbound.insert("alter_id".into(), json!(alter_id));
     }
-    if let Some(transport) = transport_value(network, host, path, None) {
+    if let Some(transport) = transport_value(&network, host, path, None) {
         outbound.insert("transport".into(), transport);
     }
     if tls_enabled {
@@ -228,8 +241,16 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
         .get("type")
         .map(String::as_str)
         .filter(|network| !network.is_empty())
-        .unwrap_or("tcp");
-    ensure_supported_network(network)?;
+        .unwrap_or("tcp")
+        .to_ascii_lowercase();
+    ensure_supported_network(&network)?;
+    if query
+        .get("headerType")
+        .map(|value| value.trim())
+        .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+    {
+        return Err("vless tcp header obfs is not supported".to_string());
+    }
     let security = query.get("security").map(String::as_str).unwrap_or("");
     let tls_enabled = match security.to_ascii_lowercase().as_str() {
         "" | "none" => false,
@@ -286,7 +307,7 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
     if let Some(flow) = flow {
         outbound.insert("flow".into(), json!(flow));
     }
-    if let Some(transport) = transport_value(network, host, path, service_name) {
+    if let Some(transport) = transport_value(&network, host, path, service_name) {
         outbound.insert("transport".into(), transport);
     }
     if tls_enabled {
@@ -330,8 +351,9 @@ fn parse_trojan(uri: &str, source: &str) -> Result<Node, String> {
         .get("type")
         .map(String::as_str)
         .filter(|network| !network.is_empty())
-        .unwrap_or("tcp");
-    ensure_supported_network(network)?;
+        .unwrap_or("tcp")
+        .to_ascii_lowercase();
+    ensure_supported_network(&network)?;
     let host = query
         .get("host")
         .map(String::as_str)
@@ -356,7 +378,7 @@ fn parse_trojan(uri: &str, source: &str) -> Result<Node, String> {
     outbound.insert("server".into(), json!(server));
     outbound.insert("server_port".into(), json!(port));
     outbound.insert("password".into(), json!(password));
-    if let Some(transport) = transport_value(network, host, path, service_name) {
+    if let Some(transport) = transport_value(&network, host, path, service_name) {
         outbound.insert("transport".into(), transport);
     }
     outbound.insert(
@@ -478,7 +500,7 @@ fn parse_http(uri: &str, source: &str) -> Result<Node, String> {
     let url = Url::parse(uri).map_err(|e| format!("invalid http URI: {e}"))?;
     let tls = url.scheme().eq_ignore_ascii_case("https");
     let server = normalize_host(url.host_str().ok_or("http missing host")?);
-    let port = port_or(url.port(), if tls { 443 } else { 8080 })?;
+    let port = port_or(url.port_or_known_default(), if tls { 443 } else { 80 })?;
     let query = query_map(&url);
     let sni = query
         .get("sni")
@@ -956,5 +978,111 @@ mod tests {
         let text = "wireguard://x\n".repeat(super::super::MAX_UNSUPPORTED_PER_SOURCE + 1);
         let err = parse_uri_list(&text, "test").unwrap_err();
         assert!(err.contains("unsupported entries"), "{err}");
+    }
+
+    #[test]
+    fn http_keeps_explicit_port_and_defaults_to_80() {
+        assert_eq!(
+            parse_uri("http://example.com:80#a", "test")
+                .unwrap()
+                .outbound
+                .value()["server_port"],
+            80
+        );
+        assert_eq!(
+            parse_uri("http://example.com#a", "test")
+                .unwrap()
+                .outbound
+                .value()["server_port"],
+            80
+        );
+        assert_eq!(
+            parse_uri("http://example.com:8080#a", "test")
+                .unwrap()
+                .outbound
+                .value()["server_port"],
+            8080
+        );
+        assert_eq!(
+            parse_uri("https://example.com:443#a", "test")
+                .unwrap()
+                .outbound
+                .value()["server_port"],
+            443
+        );
+        assert_eq!(
+            parse_uri("https://example.com#a", "test")
+                .unwrap()
+                .outbound
+                .value()["server_port"],
+            443
+        );
+    }
+
+    #[test]
+    fn uppercase_transport_is_normalized() {
+        let vless = parse_uri(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=WS&security=tls#v",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(vless.outbound.value()["transport"]["type"], "ws");
+
+        let trojan = parse_uri(
+            "trojan://pass@example.com:443?type=GRPC&serviceName=svc#t",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(trojan.outbound.value()["transport"]["type"], "grpc");
+
+        let payload = serde_json::json!({
+            "add": "example.com", "port": "443",
+            "id": "11111111-1111-1111-1111-111111111111",
+            "net": "WS", "host": "cdn.example.com", "path": "/ws"
+        });
+        let vmess = parse_uri(
+            &format!("vmess://{}", STANDARD.encode(payload.to_string())),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(vmess.outbound.value()["transport"]["type"], "ws");
+    }
+
+    #[test]
+    fn rejects_tcp_header_obfs() {
+        let payload = serde_json::json!({
+            "add": "example.com", "port": "443",
+            "id": "11111111-1111-1111-1111-111111111111",
+            "net": "tcp", "type": "http"
+        });
+        let err = parse_uri(
+            &format!("vmess://{}", STANDARD.encode(payload.to_string())),
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.contains("header obfs"), "{err}");
+
+        let err = parse_uri(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&headerType=http#v",
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.contains("header obfs"), "{err}");
+
+        assert!(parse_uri(
+            "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&headerType=none#v",
+            "test"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn ss_accepts_trailing_slash_and_empty_fragment() {
+        let node = parse_uri("ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:443/", "test").unwrap();
+        assert_eq!(node.port, 443);
+        assert_eq!(node.name, "example.com:443");
+
+        let node = parse_uri("ss://YWVzLTEyOC1nY206c2VjcmV0@example.com:443#", "test").unwrap();
+        assert_eq!(node.name, "example.com:443");
     }
 }
