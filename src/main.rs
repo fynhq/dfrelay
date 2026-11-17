@@ -439,6 +439,9 @@ async fn print_status(paths: &Paths) -> anyhow::Result<()> {
         .await
         .context("query DFRelay daemon status")?;
     println!("DFRelay daemon: running (pid {})", status.pid);
+    if !status.version.is_empty() {
+        println!("Version: {}", status.version);
+    }
     let mode = if status.managed {
         match &status.service {
             Some(service) => format!("service-managed ({})", service.summary()),
