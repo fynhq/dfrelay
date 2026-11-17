@@ -44,23 +44,14 @@ pub fn parse_clash_document(document: &Value, source: &str) -> Result<ClashParse
         let name = yaml_str(map, "name").unwrap_or("unnamed").to_string();
         match parse_proxy(map, source) {
             Ok(node) => {
-                if nodes.len() >= super::MAX_NODES_PER_SOURCE {
-                    return Err(super::node_limit_error(
-                        "nodes",
-                        super::MAX_NODES_PER_SOURCE,
-                    ));
-                }
-                nodes.push(node);
+                super::push_limited(&mut nodes, node, "nodes", super::MAX_NODES_PER_SOURCE)?
             }
-            Err(reason) => {
-                if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
-                    return Err(super::node_limit_error(
-                        "unsupported entries",
-                        super::MAX_UNSUPPORTED_PER_SOURCE,
-                    ));
-                }
-                unsupported.push((name, reason));
-            }
+            Err(reason) => super::push_limited(
+                &mut unsupported,
+                (name, reason),
+                "unsupported entries",
+                super::MAX_UNSUPPORTED_PER_SOURCE,
+            )?,
         }
     }
     Ok((nodes, unsupported))
@@ -366,10 +357,7 @@ fn attach_transport(proxy: &Mapping, network: &str, outbound: &mut Map<String, V
 fn tls_enabled(proxy: &Mapping) -> bool {
     match yaml_get(proxy, "tls") {
         Some(Value::Bool(value)) => *value,
-        Some(Value::String(value)) => !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "" | "none" | "false" | "0"
-        ),
+        Some(Value::String(value)) => super::outbound::tls_string_enabled(Some(value.as_str())),
         _ => false,
     }
 }
@@ -382,12 +370,7 @@ fn tls_value(proxy: &Mapping, enabled: bool) -> Value {
         .unwrap_or(false)
         .then_some(true);
     let alpn = match yaml_get(proxy, "alpn") {
-        Some(Value::String(value)) => value
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
+        Some(Value::String(value)) => super::outbound::split_alpn_list(value),
         Some(Value::Array(values)) => values
             .iter()
             .filter_map(Value::as_str)

@@ -293,21 +293,6 @@ fn validate_sing_box_node(
     Ok(())
 }
 
-fn record_unsupported(
-    unsupported: &mut Vec<UnsupportedNode>,
-    name: String,
-    reason: String,
-) -> Result<(), String> {
-    if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
-        return Err(super::node_limit_error(
-            "unsupported entries",
-            super::MAX_UNSUPPORTED_PER_SOURCE,
-        ));
-    }
-    unsupported.push(UnsupportedNode { name, reason });
-    Ok(())
-}
-
 fn parse_sing_box_json(value: &Value, source: &str) -> Result<Option<ParseOutcome>, String> {
     let Some(outbounds) = value
         .get("outbounds")
@@ -337,43 +322,59 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Result<Option<ParseOutcom
             object.get("server").and_then(Value::as_str),
             object.get("server_port").and_then(Value::as_u64),
         ) else {
-            record_unsupported(
+            super::push_limited(
                 &mut unsupported,
-                name,
-                "missing server or server_port".to_string(),
+                UnsupportedNode {
+                    name,
+                    reason: "missing server or server_port".to_string(),
+                },
+                "unsupported entries",
+                super::MAX_UNSUPPORTED_PER_SOURCE,
             )?;
             continue;
         };
         let port = match u16::try_from(port) {
             Ok(port) if port > 0 => port,
             _ => {
-                record_unsupported(&mut unsupported, name, "invalid server_port".to_string())?;
+                super::push_limited(
+                    &mut unsupported,
+                    UnsupportedNode {
+                        name,
+                        reason: "invalid server_port".to_string(),
+                    },
+                    "unsupported entries",
+                    super::MAX_UNSUPPORTED_PER_SOURCE,
+                )?;
                 continue;
             }
         };
         if let Err(reason) = validate_sing_box_node(object, kind) {
-            record_unsupported(&mut unsupported, name, reason)?;
+            super::push_limited(
+                &mut unsupported,
+                UnsupportedNode { name, reason },
+                "unsupported entries",
+                super::MAX_UNSUPPORTED_PER_SOURCE,
+            )?;
             continue;
-        }
-        if nodes.len() >= super::MAX_NODES_PER_SOURCE {
-            return Err(super::node_limit_error(
-                "nodes",
-                super::MAX_NODES_PER_SOURCE,
-            ));
         }
         let mut outbound = outbound.clone();
         if let Some(object) = outbound.as_object_mut() {
             object.remove("tag");
         }
         strip_detour(&mut outbound);
-        nodes.push(Node::new(
-            name,
-            source.to_string(),
-            kind.to_string(),
-            server.to_string(),
-            port,
-            outbound,
-        ));
+        super::push_limited(
+            &mut nodes,
+            Node::new(
+                name,
+                source.to_string(),
+                kind.to_string(),
+                server.to_string(),
+                port,
+                outbound,
+            ),
+            "nodes",
+            super::MAX_NODES_PER_SOURCE,
+        )?;
     }
     if nodes.is_empty() && unsupported.is_empty() {
         return Ok(None);

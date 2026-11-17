@@ -26,23 +26,14 @@ pub fn parse_uri_list(text: &str, source: &str) -> Result<UriParseOutput, String
         }
         match parse_uri(line, source) {
             Ok(node) => {
-                if nodes.len() >= super::MAX_NODES_PER_SOURCE {
-                    return Err(super::node_limit_error(
-                        "nodes",
-                        super::MAX_NODES_PER_SOURCE,
-                    ));
-                }
-                nodes.push(node);
+                super::push_limited(&mut nodes, node, "nodes", super::MAX_NODES_PER_SOURCE)?
             }
-            Err(reason) => {
-                if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
-                    return Err(super::node_limit_error(
-                        "unsupported entries",
-                        super::MAX_UNSUPPORTED_PER_SOURCE,
-                    ));
-                }
-                unsupported.push((short_name(line), reason));
-            }
+            Err(reason) => super::push_limited(
+                &mut unsupported,
+                (short_name(line), reason),
+                "unsupported entries",
+                super::MAX_UNSUPPORTED_PER_SOURCE,
+            )?,
         }
     }
     Ok((nodes, unsupported))
@@ -194,7 +185,7 @@ fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
     {
         return Err("vmess tcp header obfs is not supported".to_string());
     }
-    let tls_enabled = tls_string_enabled(string_field(object, "tls"));
+    let tls_enabled = super::outbound::tls_string_enabled(string_field(object, "tls"));
     let sni = string_field(object, "sni").filter(|s| !s.is_empty());
     let host = string_field(object, "host").filter(|s| !s.is_empty());
     let path = string_field(object, "path").filter(|s| !s.is_empty());
@@ -650,16 +641,6 @@ fn fragment_name(url: &Url, server: &str, port: u16) -> String {
         .unwrap_or_else(|| format!("{server}:{port}"))
 }
 
-fn tls_string_enabled(value: Option<&str>) -> bool {
-    let Some(value) = value else {
-        return false;
-    };
-    !matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "" | "none" | "false" | "0"
-    )
-}
-
 fn query_map(url: &Url) -> HashMap<String, String> {
     url.query_pairs().into_owned().collect()
 }
@@ -672,13 +653,7 @@ fn bool_query(query: &HashMap<String, String>, key: &str) -> bool {
 
 fn split_alpn(value: Option<&String>) -> Vec<String> {
     value
-        .map(|v| {
-            v.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|value| super::outbound::split_alpn_list(value))
         .unwrap_or_default()
 }
 

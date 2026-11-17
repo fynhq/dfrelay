@@ -28,6 +28,19 @@ pub(crate) fn node_limit_error(kind: &str, limit: usize) -> String {
     format!("subscription contains more than {limit} {kind}; rejected to bound memory use")
 }
 
+pub(crate) fn push_limited<T>(
+    items: &mut Vec<T>,
+    item: T,
+    kind: &str,
+    limit: usize,
+) -> Result<(), String> {
+    if items.len() >= limit {
+        return Err(node_limit_error(kind, limit));
+    }
+    items.push(item);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionRuntime {
     pub config: SubscriptionConfig,

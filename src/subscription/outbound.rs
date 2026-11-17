@@ -111,3 +111,22 @@ pub(super) fn tls_value(
     }
     Value::Object(tls)
 }
+
+pub(super) fn tls_string_enabled(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "none" | "false" | "0"
+    )
+}
+
+pub(super) fn split_alpn_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
+}
