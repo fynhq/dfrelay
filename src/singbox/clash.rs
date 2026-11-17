@@ -34,6 +34,8 @@ impl ConnectionInfo {
         };
         if self.destination_port.is_empty() {
             Some(address.to_string())
+        } else if address.contains(':') {
+            Some(format!("[{address}]:{}", self.destination_port))
         } else {
             Some(format!("{address}:{}", self.destination_port))
         }
@@ -390,6 +392,18 @@ mod tests {
         assert_eq!(item.target().as_deref(), Some("203.0.113.5:443"));
         item.destination_ip.clear();
         assert_eq!(item.target(), None);
+    }
+
+    #[test]
+    fn connection_target_brackets_ipv6() {
+        let mut item = ConnectionInfo {
+            destination_ip: "2001:db8::1".to_string(),
+            destination_port: "443".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(item.target().as_deref(), Some("[2001:db8::1]:443"));
+        item.host = "2001:db8::2".to_string();
+        assert_eq!(item.target().as_deref(), Some("[2001:db8::2]:443"));
     }
 
     #[test]
