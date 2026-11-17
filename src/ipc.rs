@@ -610,11 +610,11 @@ async fn send(write: &mut OwnedWriteHalf, message: &ClientMsg) -> io::Result<()>
     write.write_all(&line).await
 }
 
-fn incompatible_error(expected: u32, got: u32) -> io::Error {
+fn incompatible_error(daemon_version: u32, client_version: u32) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "daemon protocol {got} does not match client protocol {expected}; restart the daemon"
+            "daemon protocol {daemon_version} does not match client protocol {client_version}; restart the daemon"
         ),
     )
 }
@@ -1031,5 +1031,12 @@ mod tests {
                 .is_err(),
             "client without a protocol version must not be accepted"
         );
+    }
+
+    #[test]
+    fn incompatible_error_labels_daemon_and_client_versions() {
+        let message = incompatible_error(7, 3).to_string();
+        assert!(message.contains("daemon protocol 7"), "{message}");
+        assert!(message.contains("client protocol 3"), "{message}");
     }
 }

@@ -228,21 +228,20 @@ async fn serve(config: Config, paths: Paths, logger: Logger) -> anyhow::Result<(
 async fn start_daemon(cli: &Cli, paths: &Paths) -> anyhow::Result<()> {
     let socket = paths.control_socket();
     if ipc::daemon_is_running(&socket).await {
-        if let Ok(status) = ipc::control_status(&socket).await {
-            if status.proxy != ProxyStatus::Running {
-                let ack = ipc::control_start(&socket)
-                    .await
-                    .context("request proxy start")?;
-                if !ack.ok {
-                    bail!("{}", ack.message);
-                }
-                println!("{}", ack.message);
-            } else {
-                println!("DFRelay is already running.");
+        let status = ipc::control_status(&socket).await.context(
+            "query DFRelay daemon status; the daemon is running but did not answer (try `dfr restart`)",
+        )?;
+        if status.proxy != ProxyStatus::Running {
+            let ack = ipc::control_start(&socket)
+                .await
+                .context("request proxy start")?;
+            if !ack.ok {
+                bail!("{}", ack.message);
             }
-            return Ok(());
+            println!("{}", ack.message);
+        } else {
+            println!("DFRelay is already running.");
         }
-        println!("DFRelay is already running.");
         return Ok(());
     }
 
