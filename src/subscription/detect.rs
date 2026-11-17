@@ -177,6 +177,10 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
         }
     }
 
+    if let Some(message) = alias_error {
+        return Err(message);
+    }
+
     if let Some(decoded) = decode_base64_text(trimmed) {
         if decoded.contains("://") {
             let (nodes, unsupported) = parse_uri_list(&decoded, source)?;
@@ -205,9 +209,6 @@ pub fn detect_and_parse(body: &str, source: &str) -> Result<ParseOutcome, String
         }
     }
 
-    if let Some(message) = alias_error {
-        return Err(message);
-    }
     Err("unrecognized subscription format".to_string())
 }
 
@@ -292,6 +293,21 @@ fn validate_sing_box_node(
     Ok(())
 }
 
+fn record_unsupported(
+    unsupported: &mut Vec<UnsupportedNode>,
+    name: String,
+    reason: String,
+) -> Result<(), String> {
+    if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
+        return Err(super::node_limit_error(
+            "unsupported entries",
+            super::MAX_UNSUPPORTED_PER_SOURCE,
+        ));
+    }
+    unsupported.push(UnsupportedNode { name, reason });
+    Ok(())
+}
+
 fn parse_sing_box_json(value: &Value, source: &str) -> Result<Option<ParseOutcome>, String> {
     let Some(outbounds) = value
         .get("outbounds")
@@ -309,41 +325,34 @@ fn parse_sing_box_json(value: &Value, source: &str) -> Result<Option<ParseOutcom
         let Some(kind) = object.get("type").and_then(Value::as_str) else {
             continue;
         };
-        let Some(server) = object.get("server").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(port) = object.get("server_port").and_then(Value::as_u64) else {
-            continue;
-        };
         let name = object
             .get("tag")
             .and_then(Value::as_str)
             .unwrap_or(kind)
             .to_string();
+        if matches!(kind, "direct" | "block" | "selector" | "urltest" | "dns") {
+            continue;
+        }
+        let (Some(server), Some(port)) = (
+            object.get("server").and_then(Value::as_str),
+            object.get("server_port").and_then(Value::as_u64),
+        ) else {
+            record_unsupported(
+                &mut unsupported,
+                name,
+                "missing server or server_port".to_string(),
+            )?;
+            continue;
+        };
         let port = match u16::try_from(port) {
             Ok(port) if port > 0 => port,
             _ => {
-                if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
-                    return Err(super::node_limit_error(
-                        "unsupported entries",
-                        super::MAX_UNSUPPORTED_PER_SOURCE,
-                    ));
-                }
-                unsupported.push(UnsupportedNode {
-                    name,
-                    reason: "invalid server_port".to_string(),
-                });
+                record_unsupported(&mut unsupported, name, "invalid server_port".to_string())?;
                 continue;
             }
         };
         if let Err(reason) = validate_sing_box_node(object, kind) {
-            if unsupported.len() >= super::MAX_UNSUPPORTED_PER_SOURCE {
-                return Err(super::node_limit_error(
-                    "unsupported entries",
-                    super::MAX_UNSUPPORTED_PER_SOURCE,
-                ));
-            }
-            unsupported.push(UnsupportedNode { name, reason });
+            record_unsupported(&mut unsupported, name, reason)?;
             continue;
         }
         if nodes.len() >= super::MAX_NODES_PER_SOURCE {
@@ -592,5 +601,34 @@ mod tests {
         let body = serde_json::json!({ "outbounds": outbounds }).to_string();
         let err = detect_and_parse(&body, "test").unwrap_err();
         assert!(err.contains("more than"), "{err}");
+    }
+
+    #[test]
+    fn sing_box_json_reports_missing_server_fields_but_ignores_groups() {
+        let body = serde_json::json!({
+            "outbounds": [
+                { "type": "selector", "tag": "proxy", "outbounds": ["a"] },
+                { "type": "direct", "tag": "direct" },
+                { "type": "shadowsocks", "tag": "no-server", "server_port": 443,
+                  "method": "aes-128-gcm", "password": "p" },
+                { "type": "vmess", "tag": "no-port", "server": "example.com",
+                  "uuid": "11111111-1111-1111-1111-111111111111" }
+            ]
+        })
+        .to_string();
+        let outcome = detect_and_parse(&body, "test").unwrap();
+        assert_eq!(outcome.nodes.len(), 0);
+        assert_eq!(outcome.unsupported.len(), 2);
+        assert!(outcome
+            .unsupported
+            .iter()
+            .all(|item| item.reason.contains("missing server or server_port")));
+    }
+
+    #[test]
+    fn alias_rejection_is_not_masked_by_uri_fallback() {
+        let body = "a: &a\n  x: 1\nb: *a\nurl: https://example.com/sub\n";
+        let err = detect_and_parse(body, "test").unwrap_err();
+        assert!(err.contains("aliasing"), "unexpected error: {err}");
     }
 }
