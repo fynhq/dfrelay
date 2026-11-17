@@ -83,8 +83,11 @@ impl BinaryManager {
 
     pub fn locate(&self) -> Option<PathBuf> {
         let managed = self.paths.binary();
-        self.recover_interrupted_install(&managed, &self.paths.previous_binary());
         managed.is_file().then_some(managed)
+    }
+
+    pub fn recover_install(&self) {
+        self.recover_interrupted_install(&self.paths.binary(), &self.paths.previous_binary());
     }
 
     pub fn metadata(&self) -> Option<BinaryMetadata> {
@@ -256,15 +259,16 @@ impl BinaryManager {
     }
 
     pub async fn rollback(&self, logger: &Logger) -> Result<BinaryMetadata, BinaryError> {
+        let target = self.paths.binary();
         let previous = self.paths.previous_binary();
+        self.recover_interrupted_install(&target, &previous);
         if !previous.is_file() {
             return Err(BinaryError::NoPrevious);
         }
         let version = self.version(&previous).await?;
         self.check_binary(&previous).await?;
 
-        let target = self.paths.binary();
-        let swap = self.paths.bin_dir.join("sing-box.rollback");
+        let swap = self.paths.bin_dir.join("sing-box.swap");
         let current_metadata = fs::read_to_string(self.paths.binary_metadata()).ok();
         let previous_metadata = self.previous_metadata();
         let had_current = target.exists();
@@ -1177,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn locate_restores_a_binary_left_in_the_swap_file() {
+    fn recover_install_restores_a_binary_left_in_the_swap_file() {
         let dir = TempDir::new().unwrap();
         let paths = Paths {
             config_file: dir.path().join("config.toml"),
@@ -1192,6 +1196,8 @@ mod tests {
         fs::write(paths.bin_dir.join("sing-box.swap"), b"v1").unwrap();
         let manager = BinaryManager::new(paths.clone());
 
+        assert_eq!(manager.locate(), None);
+        manager.recover_install();
         assert_eq!(manager.locate(), Some(paths.binary()));
         assert_eq!(fs::read(paths.binary()).unwrap(), b"v1");
     }
