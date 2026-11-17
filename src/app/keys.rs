@@ -851,11 +851,7 @@ impl App {
             SettingsItem::KeywordsExclude => self.open_keyword_form(KeywordField::Exclude),
             SettingsItem::AppLogLevel => self.cycle_app_log_level(),
             SettingsItem::BinaryInfo => self.open_setup_overlay(),
-            SettingsItem::Port
-            | SettingsItem::DnsServers
-            | SettingsItem::TestUrl
-            | SettingsItem::ConfigPath
-            | SettingsItem::LogFile => {}
+            _ => {}
         }
     }
 
