@@ -10,7 +10,7 @@ use std::os::unix::fs::FileTypeExt;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
@@ -470,7 +470,9 @@ pub async fn daemon_is_running(socket: &Path) -> bool {
     UnixStream::connect(socket).await.is_ok()
 }
 
-pub async fn control_start(socket: &Path) -> io::Result<Ack> {
+async fn open_control(
+    socket: &Path,
+) -> io::Result<(tokio::io::Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf)> {
     let stream = UnixStream::connect(socket).await?;
     let (read_half, mut write_half) = stream.into_split();
     send(
@@ -481,18 +483,32 @@ pub async fn control_start(socket: &Path) -> io::Result<Ack> {
         },
     )
     .await?;
+    Ok((BufReader::new(read_half).lines(), write_half))
+}
+
+async fn read_control_line(
+    lines: &mut tokio::io::Lines<BufReader<OwnedReadHalf>>,
+    timeout: Duration,
+    timeout_message: &'static str,
+    closed_message: &'static str,
+) -> io::Result<String> {
+    let line = tokio::time::timeout(timeout, lines.next_line())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, timeout_message))??;
+    line.ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, closed_message))
+}
+
+pub async fn control_start(socket: &Path) -> io::Result<Ack> {
+    let (mut lines, mut write_half) = open_control(socket).await?;
     send(&mut write_half, &ClientMsg::StartProxy).await?;
-    let mut lines = BufReader::new(read_half).lines();
     loop {
-        let line = tokio::time::timeout(CONTROL_TIMEOUT, lines.next_line())
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "daemon did not answer"))??;
-        let Some(line) = line else {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "daemon closed the control connection",
-            ));
-        };
+        let line = read_control_line(
+            &mut lines,
+            CONTROL_TIMEOUT,
+            "daemon did not answer",
+            "daemon closed the control connection",
+        )
+        .await?;
         match serde_json::from_str::<ServerMsg>(&line) {
             Ok(ServerMsg::Ack { ok, message }) => return Ok(Ack { ok, message }),
             Ok(ServerMsg::Incompatible { expected, got }) => {
@@ -504,30 +520,16 @@ pub async fn control_start(socket: &Path) -> io::Result<Ack> {
 }
 
 pub async fn control_status(socket: &Path) -> io::Result<DaemonStatus> {
-    let stream = UnixStream::connect(socket).await?;
-    let (read_half, mut write_half) = stream.into_split();
-    send(
-        &mut write_half,
-        &ClientMsg::Hello {
-            viewer: false,
-            version: PROTOCOL_VERSION,
-        },
-    )
-    .await?;
+    let (mut lines, mut write_half) = open_control(socket).await?;
     send(&mut write_half, &ClientMsg::Status).await?;
-    let mut lines = BufReader::new(read_half).lines();
     loop {
-        let line = tokio::time::timeout(STATUS_TIMEOUT, lines.next_line())
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "daemon did not answer status")
-            })??;
-        let Some(line) = line else {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "daemon closed the control connection",
-            ));
-        };
+        let line = read_control_line(
+            &mut lines,
+            STATUS_TIMEOUT,
+            "daemon did not answer status",
+            "daemon closed the control connection",
+        )
+        .await?;
         match serde_json::from_str::<ServerMsg>(&line) {
             Ok(ServerMsg::Status(status)) => return Ok(*status),
             Ok(ServerMsg::Incompatible { expected, got }) => {
@@ -539,40 +541,22 @@ pub async fn control_status(socket: &Path) -> io::Result<DaemonStatus> {
 }
 
 pub async fn control_shutdown(socket: &Path) -> io::Result<()> {
-    let stream = UnixStream::connect(socket).await?;
-    let (read_half, mut write_half) = stream.into_split();
-    send(
-        &mut write_half,
-        &ClientMsg::Hello {
-            viewer: false,
-            version: PROTOCOL_VERSION,
-        },
-    )
-    .await?;
+    let (mut lines, mut write_half) = open_control(socket).await?;
     send(&mut write_half, &ClientMsg::Shutdown).await?;
-    let mut lines = BufReader::new(read_half).lines();
     loop {
-        match tokio::time::timeout(CONTROL_TIMEOUT, lines.next_line()).await {
-            Ok(Ok(Some(line))) => match serde_json::from_str::<ServerMsg>(&line) {
-                Ok(ServerMsg::Ack { .. }) => break,
-                Ok(ServerMsg::Incompatible { expected, got }) => {
-                    return Err(incompatible_error(expected, got));
-                }
-                _ => {}
-            },
-            Ok(Ok(None)) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "daemon closed the control connection before acknowledging shutdown",
-                ));
+        let line = read_control_line(
+            &mut lines,
+            CONTROL_TIMEOUT,
+            "daemon did not acknowledge shutdown",
+            "daemon closed the control connection before acknowledging shutdown",
+        )
+        .await?;
+        match serde_json::from_str::<ServerMsg>(&line) {
+            Ok(ServerMsg::Ack { .. }) => break,
+            Ok(ServerMsg::Incompatible { expected, got }) => {
+                return Err(incompatible_error(expected, got));
             }
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "daemon did not acknowledge shutdown",
-                ));
-            }
-            Ok(Err(err)) => return Err(err),
+            _ => {}
         }
     }
     let deadline = tokio::time::Instant::now() + SHUTDOWN_WAIT;
