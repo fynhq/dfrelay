@@ -223,7 +223,7 @@ impl Default for Config {
                 .collect(),
             test_url: DEFAULT_TEST_URL.to_string(),
             test_interval: DEFAULT_TEST_INTERVAL.to_string(),
-            tolerance_ms: 50,
+            tolerance_ms: 100,
             idle_timeout: DEFAULT_IDLE_TIMEOUT.to_string(),
             keywords_include: Vec::new(),
             keywords_exclude: Vec::new(),
@@ -444,6 +444,7 @@ mod tests {
         assert!(config.lan_username.is_empty());
         assert!(config.lan_password.is_empty());
         assert_eq!(config.dns_servers, vec!["1.1.1.1", "8.8.8.8"]);
+        assert_eq!(config.tolerance_ms, 100);
         assert!(!config.github_mirrors.is_empty());
     }
 

@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(selector["default"], "auto");
         assert_eq!(selector["outbounds"].as_array().unwrap().len(), 3);
         assert_eq!(urltest["outbounds"].as_array().unwrap().len(), 2);
-        assert_eq!(urltest["tolerance"], 50);
+        assert_eq!(urltest["tolerance"], 100);
     }
 
     #[test]
