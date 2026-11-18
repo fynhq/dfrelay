@@ -95,7 +95,8 @@ impl App {
         let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
             return;
         };
-        let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
+        let port = proxy.port;
+        let auth = proxy.lan_auth.clone();
         let targets = self.probe_targets();
         let tx = self.events_tx.clone();
         let logger = self.logger.clone();
@@ -105,7 +106,7 @@ impl App {
         self.health.last_probe = Some(now);
         self.stats.health_probes_total = self.stats.health_probes_total.saturating_add(1);
         self.spawn_guarded(BackgroundTask::HealthProbe, async move {
-            let outcome = probe_node_outcome(&client, &tag, &targets).await;
+            let outcome = probe_proxy_outcome(port, auth, &targets).await;
             if matches!(outcome, HealthOutcome::Unavailable) {
                 logger.app(
                     LogLevel::Debug,
@@ -469,6 +470,54 @@ impl App {
         } else {
             self.notify(self.text().msg_health_new_nodes);
         }
+    }
+}
+
+async fn probe_proxy_outcome(
+    port: u16,
+    auth: Option<(String, String)>,
+    targets: &[String],
+) -> HealthOutcome {
+    let mut proxy = match reqwest::Proxy::all(format!("http://127.0.0.1:{port}")) {
+        Ok(proxy) => proxy,
+        Err(_) => return HealthOutcome::Unavailable,
+    };
+    if let Some((username, password)) = &auth {
+        proxy = proxy.basic_auth(username, password);
+    }
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .proxy(proxy)
+        .timeout(HEALTH_PROBE_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return HealthOutcome::Unavailable,
+    };
+    let mut saw_failed = false;
+    let mut saw_unavailable = false;
+    for target in targets {
+        let started = Instant::now();
+        match client.get(target).send().await {
+            Ok(response) => {
+                let outcome = http_probe_outcome(response.status().as_u16(), started.elapsed());
+                if outcome == HealthOutcome::Unavailable {
+                    saw_unavailable = true;
+                    continue;
+                }
+                return outcome;
+            }
+            Err(_) => saw_failed = true,
+        }
+    }
+    probe_failure_outcome(saw_failed, saw_unavailable)
+}
+
+pub(super) fn http_probe_outcome(status: u16, elapsed: Duration) -> HealthOutcome {
+    if status == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED.as_u16() {
+        HealthOutcome::Unavailable
+    } else {
+        HealthOutcome::Healthy(elapsed.as_millis().max(1) as u64)
     }
 }
 

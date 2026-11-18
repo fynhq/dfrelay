@@ -59,6 +59,7 @@ const HEALTH_ACTIVE_WINDOW: Duration = Duration::from_secs(120);
 const HEALTH_IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(120);
 const HEALTH_FAST_PROBE_GAP: Duration = Duration::from_secs(1);
 const HEALTH_PROBE_STALE: Duration = Duration::from_secs(5);
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const HEALTH_FAILURE_THRESHOLD: u32 = 3;
 const HEALTH_RECOVERY_COOLDOWN: Duration = Duration::from_secs(120);
 const HEALTH_NO_NODE_BACKOFF_SECS: [u64; 3] = [60, 120, 300];

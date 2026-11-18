@@ -1,5 +1,5 @@
 #![allow(clippy::field_reassign_with_default)]
-use super::health::probe_failure_outcome;
+use super::health::{http_probe_outcome, probe_failure_outcome};
 use super::selection_state::PendingSelection;
 use super::subscriptions::{PendingRefreshApply, SubscriptionDiff};
 use super::*;
@@ -1856,6 +1856,26 @@ fn health_probe_outcomes_distinguish_node_and_api_errors() {
     for status in [400, 401, 404, 429] {
         assert_eq!(health_outcome_for(status), HealthOutcome::Unavailable);
     }
+}
+
+#[test]
+fn http_probe_treats_any_response_as_healthy_except_proxy_auth() {
+    assert_eq!(
+        http_probe_outcome(204, Duration::from_millis(120)),
+        HealthOutcome::Healthy(120)
+    );
+    assert_eq!(
+        http_probe_outcome(500, Duration::from_millis(80)),
+        HealthOutcome::Healthy(80)
+    );
+    assert_eq!(
+        http_probe_outcome(407, Duration::from_millis(10)),
+        HealthOutcome::Unavailable
+    );
+    assert_eq!(
+        http_probe_outcome(204, Duration::ZERO),
+        HealthOutcome::Healthy(1)
+    );
 }
 
 #[test]
