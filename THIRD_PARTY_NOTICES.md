@@ -24,7 +24,6 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `adler2` | `2.0.1` | 0BSD OR MIT OR Apache-2.0 |
 | `aho-corasick` | `1.1.5` | Unlicense OR MIT |
 | `allocator-api2` | `0.2.21` | MIT OR Apache-2.0 |
-| `android_system_properties` | `0.1.6` | MIT OR Apache-2.0 |
 | `annotate-snippets` | `0.12.18` | MIT OR Apache-2.0 |
 | `anstream` | `1.0.0` | MIT OR Apache-2.0 |
 | `anstyle` | `1.0.14` | MIT OR Apache-2.0 |
@@ -56,17 +55,15 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `cfg-if` | `1.0.5` | MIT OR Apache-2.0 |
 | `cfg_aliases` | `0.2.2` | MIT |
 | `chacha20` | `0.10.2` | MIT OR Apache-2.0 |
-| `chrono` | `0.4.45` | MIT OR Apache-2.0 |
-| `clap` | `4.6.7` | MIT OR Apache-2.0 |
+| `clap` | `4.6.8` | MIT OR Apache-2.0 |
 | `clap_builder` | `4.6.7` | MIT OR Apache-2.0 |
-| `clap_derive` | `4.6.7` | MIT OR Apache-2.0 |
+| `clap_derive` | `4.6.8` | MIT OR Apache-2.0 |
 | `clap_lex` | `1.1.1` | MIT OR Apache-2.0 |
 | `colorchoice` | `1.0.5` | MIT OR Apache-2.0 |
 | `compact_str` | `0.9.1` | MIT |
 | `const-oid` | `0.10.3` | Apache-2.0 OR MIT |
 | `constant_time_eq` | `0.6.1` | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | `convert_case` | `0.10.0` | MIT |
-| `core-foundation-sys` | `0.8.7` | MIT OR Apache-2.0 |
 | `core_detect` | `1.0.0` | MIT/Apache-2.0 |
 | `cpufeatures` | `0.2.17` | MIT OR Apache-2.0 |
 | `cpufeatures` | `0.3.1` | MIT OR Apache-2.0 |
@@ -116,7 +113,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `getrandom` | `0.2.17` | MIT OR Apache-2.0 |
 | `getrandom` | `0.3.4` | MIT OR Apache-2.0 |
 | `getrandom` | `0.4.3` | MIT OR Apache-2.0 |
-| `granit-parser` | `2.1.0` | MIT OR Apache-2.0 |
+| `granit-parser` | `2.2.0` | MIT OR Apache-2.0 |
 | `hashbrown` | `0.17.1` | MIT OR Apache-2.0 |
 | `heck` | `0.5.0` | MIT OR Apache-2.0 |
 | `hex` | `0.4.3` | MIT OR Apache-2.0 |
@@ -128,8 +125,6 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `hyper` | `1.12.0` | MIT |
 | `hyper-rustls` | `0.27.10` | Apache-2.0 OR ISC OR MIT |
 | `hyper-util` | `0.1.21` | MIT |
-| `iana-time-zone` | `0.1.65` | MIT OR Apache-2.0 |
-| `iana-time-zone-haiku` | `0.1.2` | MIT OR Apache-2.0 |
 | `icu_collections` | `2.4.0` | Unicode-3.0 |
 | `icu_locale_core` | `2.4.0` | Unicode-3.0 |
 | `icu_normalizer` | `2.4.0` | Unicode-3.0 |
@@ -148,6 +143,11 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `is_terminal_polyfill` | `1.70.2` | MIT OR Apache-2.0 |
 | `itertools` | `0.14.0` | MIT OR Apache-2.0 |
 | `itoa` | `1.0.19` | MIT OR Apache-2.0 |
+| `jiff` | `1.0.1` | Unlicense OR MIT |
+| `jiff-core` | `1.0.1` | Unlicense OR MIT |
+| `jiff-static` | `1.0.1` | Unlicense OR MIT |
+| `jiff-tzdb` | `1.0.0` | Unlicense OR MIT |
+| `jiff-tzdb-platform` | `1.0.0` | Unlicense OR MIT |
 | `jobserver` | `0.1.35` | MIT OR Apache-2.0 |
 | `js-sys` | `0.3.107` | MIT OR Apache-2.0 |
 | `kasuari` | `0.4.13` | MIT OR Apache-2.0 |
@@ -176,7 +176,6 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `multiversion_no_op` | `1.0.0` | Apache-2.0 OR MIT |
 | `nix` | `0.29.0` | MIT |
 | `nix` | `0.31.3` | MIT |
-| `nix` | `0.32.0` | MIT |
 | `nom` | `7.1.3` | MIT |
 | `num-conv` | `0.2.2` | MIT OR Apache-2.0 |
 | `num-derive` | `0.4.2` | MIT OR Apache-2.0 |
@@ -206,6 +205,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `pin-project-lite` | `0.2.17` | Apache-2.0 OR MIT |
 | `pkg-config` | `0.3.34` | MIT OR Apache-2.0 |
 | `portable-atomic` | `1.15.0` | Apache-2.0 OR MIT |
+| `portable-atomic-util` | `0.2.8` | Apache-2.0 OR MIT |
 | `potential_utf` | `0.1.6` | Unicode-3.0 |
 | `powerfmt` | `0.2.1` | MIT OR Apache-2.0 |
 | `ppmd-rust` | `1.5.2` | CC0-1.0 OR MIT-0 |
@@ -247,7 +247,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `scopeguard` | `1.2.0` | MIT OR Apache-2.0 |
 | `semver` | `1.0.28` | MIT OR Apache-2.0 |
 | `serde` | `1.0.229` | MIT OR Apache-2.0 |
-| `serde-saphyr` | `2.1.1` | MIT OR Apache-2.0 |
+| `serde-saphyr` | `2.2.0` | MIT OR Apache-2.0 |
 | `serde_core` | `1.0.229` | MIT OR Apache-2.0 |
 | `serde_derive` | `1.0.229` | MIT OR Apache-2.0 |
 | `serde_json` | `1.0.154` | MIT OR Apache-2.0 |
@@ -340,12 +340,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `winapi` | `0.3.9` | MIT/Apache-2.0 |
 | `winapi-i686-pc-windows-gnu` | `0.4.0` | MIT/Apache-2.0 |
 | `winapi-x86_64-pc-windows-gnu` | `0.4.0` | MIT/Apache-2.0 |
-| `windows-core` | `0.62.2` | MIT OR Apache-2.0 |
-| `windows-implement` | `0.60.2` | MIT OR Apache-2.0 |
-| `windows-interface` | `0.59.3` | MIT OR Apache-2.0 |
 | `windows-link` | `0.2.1` | MIT OR Apache-2.0 |
-| `windows-result` | `0.4.1` | MIT OR Apache-2.0 |
-| `windows-strings` | `0.5.1` | MIT OR Apache-2.0 |
 | `windows-sys` | `0.52.0` | MIT OR Apache-2.0 |
 | `windows-sys` | `0.61.2` | MIT OR Apache-2.0 |
 | `windows-targets` | `0.52.6` | MIT OR Apache-2.0 |
@@ -370,7 +365,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `zerotrie` | `0.2.5` | Unicode-3.0 |
 | `zerovec` | `0.11.9` | Unicode-3.0 |
 | `zerovec-derive` | `0.11.7` | Unicode-3.0 |
-| `zip` | `9.6.0` | MIT |
+| `zip` | `9.7.0` | MIT |
 | `zlib-rs` | `0.6.8` | Zlib |
 | `zmij` | `1.0.23` | MIT |
 | `zopfli` | `0.8.4` | Apache-2.0 |

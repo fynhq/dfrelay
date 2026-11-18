@@ -5,7 +5,8 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Local, NaiveDate};
+use jiff::civil::Date;
+use jiff::{Span, ZonedDateTime};
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil;
@@ -219,7 +220,7 @@ fn strip_timestamp(line: &str) -> Option<&str> {
             return Some(skip_tokens(trimmed, 2));
         }
     }
-    if chrono::DateTime::parse_from_rfc3339(first).is_ok() {
+    if first.parse::<jiff::Timestamp>().is_ok() {
         return Some(skip_tokens(trimmed, 1));
     }
     None
@@ -363,8 +364,8 @@ impl Logger {
             return;
         }
 
-        let now = Local::now();
-        let date = now.format("%Y-%m-%d").to_string();
+        let now = ZonedDateTime::now();
+        let date = now.date().to_string();
         if date != inner.date || inner.file.is_none() {
             if let Some(file) = inner.file.as_mut() {
                 let _ = file.flush();
@@ -383,7 +384,7 @@ impl Logger {
 
         let message: String = message.into();
         let line = LogLine {
-            timestamp: now.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+            timestamp: now.strftime("%Y-%m-%d %H:%M:%S%.3f").to_string(),
             level,
             component,
             message: crate::text::sanitize_owned(message),
@@ -496,7 +497,12 @@ impl Logger {
             };
             inner.dir.clone()
         };
-        let cutoff = Local::now().date_naive() - Duration::days(RETENTION_DAYS - 1);
+        let Ok(cutoff) = ZonedDateTime::now()
+            .date()
+            .checked_sub(Span::new().days(RETENTION_DAYS - 1))
+        else {
+            return;
+        };
         let Ok(entries) = fs::read_dir(&dir) else {
             return;
         };
@@ -511,7 +517,7 @@ impl Logger {
             else {
                 continue;
             };
-            let Ok(date) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") else {
+            let Ok(date) = Date::strptime("%Y-%m-%d", date_part) else {
                 continue;
             };
             if date < cutoff {
@@ -522,7 +528,7 @@ impl Logger {
 }
 
 fn today() -> String {
-    Local::now().format("%Y-%m-%d").to_string()
+    ZonedDateTime::now().date().to_string()
 }
 
 fn open_log_file(dir: &Path, date: &str) -> std::io::Result<File> {
@@ -647,12 +653,16 @@ mod tests {
     #[test]
     fn cleanup_keeps_exactly_seven_days_of_logs() {
         let dir = TempDir::new().unwrap();
-        let boundary = Local::now().date_naive() - Duration::days(RETENTION_DAYS - 1);
+        let boundary = ZonedDateTime::now()
+            .date()
+            .checked_sub(Span::new().days(RETENTION_DAYS - 1))
+            .unwrap();
         let kept_path = dir.path().join(format!("dfrelay-{boundary}.log"));
         fs::write(&kept_path, "keep").unwrap();
-        let old_path = dir
-            .path()
-            .join(format!("dfrelay-{}.log", boundary - Duration::days(1)));
+        let old_path = dir.path().join(format!(
+            "dfrelay-{}.log",
+            boundary.checked_sub(Span::new().days(1)).unwrap()
+        ));
         fs::write(&old_path, "old").unwrap();
         let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
         logger.cleanup_old();

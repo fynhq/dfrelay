@@ -11,7 +11,7 @@ mod corpus_tests;
 
 use std::collections::HashSet;
 
-use chrono::Local;
+use jiff::ZonedDateTime;
 use serde::{Deserialize, Serialize};
 
 use crate::config::SubscriptionConfig;
@@ -76,7 +76,11 @@ pub async fn refresh_one(
                 config,
                 nodes: outcome.nodes,
                 unsupported: outcome.unsupported,
-                last_updated: Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                last_updated: Some(
+                    ZonedDateTime::now()
+                        .strftime("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
+                ),
                 error: None,
                 stale: false,
             },

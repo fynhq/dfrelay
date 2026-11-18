@@ -415,7 +415,7 @@ pub enum ConfigError {
 
 fn backup_invalid_config(path: &Path) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_string_lossy();
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let stamp = jiff::ZonedDateTime::now().strftime("%Y%m%d-%H%M%S");
     let backup = path.with_file_name(format!("{file_name}.invalid-{stamp}"));
     fs::rename(path, &backup).ok()?;
     if fs::symlink_metadata(&backup)

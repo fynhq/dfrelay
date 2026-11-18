@@ -2219,10 +2219,11 @@ fn cached_subscription_age_uses_oldest_enabled_entry() {
         url: "https://example.com/sub".to_string(),
         enabled,
     };
-    let now = chrono::Local::now();
+    let now = jiff::ZonedDateTime::now();
     let stamp = |minutes: i64| {
-        (now - chrono::Duration::minutes(minutes))
-            .format("%Y-%m-%d %H:%M:%S")
+        now.checked_sub(jiff::SignedDuration::from_mins(minutes))
+            .unwrap()
+            .strftime("%Y-%m-%d %H:%M:%S")
             .to_string()
     };
     let mut fresh = empty_runtime(config("a", true));
@@ -2266,13 +2267,17 @@ async fn app_with_cached_subscription(last_updated: Option<String>) -> (App, Tem
 
 #[tokio::test]
 async fn fresh_subscription_cache_skips_startup_refresh() {
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = jiff::ZonedDateTime::now()
+        .strftime("%Y-%m-%d %H:%M:%S")
+        .to_string();
     let (app, _dir) = app_with_cached_subscription(Some(now)).await;
     assert!(!app.subscription_state.refreshing_subscriptions);
     assert!(app.subscription_state.last_subscription_refresh.is_some());
 
-    let old = (chrono::Local::now() - chrono::Duration::hours(2))
-        .format("%Y-%m-%d %H:%M:%S")
+    let old = jiff::ZonedDateTime::now()
+        .checked_sub(jiff::SignedDuration::from_hours(2))
+        .unwrap()
+        .strftime("%Y-%m-%d %H:%M:%S")
         .to_string();
     let (app, _dir) = app_with_cached_subscription(Some(old)).await;
     assert!(app.subscription_state.refreshing_subscriptions);

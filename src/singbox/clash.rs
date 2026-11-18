@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -370,9 +370,9 @@ where
 }
 
 fn connection_duration(start: Option<&str>) -> Option<u64> {
-    let start = start.and_then(|start| DateTime::parse_from_rfc3339(start).ok())?;
-    let seconds = Utc::now().signed_duration_since(start).num_seconds();
-    Some(seconds.max(0) as u64)
+    let start = start.and_then(|start| start.parse::<Timestamp>().ok())?;
+    let seconds = Timestamp::now().duration_since(start).as_secs_f64();
+    Some(seconds.max(0.0) as u64)
 }
 
 #[cfg(test)]
@@ -408,7 +408,9 @@ mod tests {
 
     #[test]
     fn parses_connections_and_selection() {
-        let started = Utc::now() - chrono::TimeDelta::seconds(3661);
+        let started = Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_secs(3661))
+            .unwrap();
         let connections = json!({
             "uploadTotal": 100,
             "downloadTotal": 200,
@@ -426,7 +428,7 @@ mod tests {
                 },
                 "upload": 10,
                 "download": 20,
-                "start": started.to_rfc3339(),
+                "start": started.to_string(),
                 "chains": ["proxy", "auto", "n-1a2b3c4d"],
                 "rule": "final"
             }, {

@@ -2729,15 +2729,16 @@ fn proxy_ip_failure_level(failures: u32, in_startup_grace: bool) -> LogLevel {
 }
 
 fn cached_subscription_age(runtimes: &[SubscriptionRuntime]) -> Option<Duration> {
-    let now = chrono::Local::now().naive_local();
+    let now = jiff::ZonedDateTime::now().datetime();
     let mut oldest = 0i64;
     let mut count = 0usize;
     for runtime in runtimes.iter().filter(|runtime| runtime.config.enabled) {
         count += 1;
-        let updated = runtime.last_updated.as_deref().and_then(|value| {
-            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
-        })?;
-        oldest = oldest.max((now - updated).num_seconds().max(0));
+        let updated = runtime
+            .last_updated
+            .as_deref()
+            .and_then(|value| jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S", value).ok())?;
+        oldest = oldest.max(now.duration_since(updated).as_secs_f64().max(0.0) as i64);
     }
     (count > 0).then(|| Duration::from_secs(oldest as u64))
 }

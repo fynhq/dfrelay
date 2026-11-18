@@ -3,7 +3,7 @@ use std::io::{self, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Local;
+use jiff::ZonedDateTime;
 use reqwest::{Client, Proxy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -253,7 +253,9 @@ impl BinaryManager {
             version: actual_version,
             source: path.display().to_string(),
             sha256: checksum,
-            installed_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            installed_at: ZonedDateTime::now()
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string(),
             verified,
         })
     }
@@ -355,7 +357,9 @@ impl BinaryManager {
             version,
             source: asset.url.clone(),
             sha256: Some(digest.to_string()),
-            installed_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            installed_at: ZonedDateTime::now()
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string(),
             verified,
         })
     }
@@ -443,7 +447,9 @@ impl BinaryManager {
             version: version.to_string(),
             source: source.display().to_string(),
             sha256: sha256.map(str::to_string),
-            installed_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            installed_at: ZonedDateTime::now()
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string(),
             verified,
         };
         if let Err(err) = self.write_metadata(&metadata) {
@@ -503,7 +509,9 @@ impl BinaryManager {
             version: version.to_string(),
             source: "rollback".to_string(),
             sha256: None,
-            installed_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            installed_at: ZonedDateTime::now()
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string(),
             verified: false,
         }
     }
