@@ -1,7 +1,7 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::health::probe_failure_outcome;
 use super::selection_state::PendingSelection;
-use super::subscriptions::PendingRefreshApply;
+use super::subscriptions::{PendingRefreshApply, SubscriptionDiff};
 use super::*;
 use crate::singbox::binary::InboxCandidate;
 use crate::state::{KeywordField, SettingsField, SettingsItem};
@@ -1295,15 +1295,18 @@ async fn missing_preferred_node_is_cleared() {
 #[tokio::test]
 async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
     let (mut app, _dir) = test_app().await;
+    app.config.keywords_exclude = vec!["B".to_string()];
     app.metrics_state.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_auto_tags = ["n1".to_string()].into_iter().collect();
     app.note_subscription_apply();
     let pending = app
         .subscription_state
         .pending_refresh_apply
         .as_ref()
         .expect("pending diff");
-    assert_eq!((pending.added, pending.removed), (1, 0));
+    assert_eq!((pending.diff.added, pending.diff.removed), (1, 0));
+    assert!(!pending.diff.auto_changed);
 
     app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.note_subscription_apply();
@@ -1311,10 +1314,29 @@ async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
 }
 
 #[tokio::test]
+async fn auto_candidate_change_triggers_apply_even_when_tags_match() {
+    let (mut app, _dir) = test_app().await;
+    app.config.keywords_include = vec!["香港".to_string()];
+    app.metrics_state.nodes = vec![tagged_node("香港 A", "n1"), tagged_node("日本 B", "n2")];
+    app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
+    app.proxy_runtime.proxy_auto_tags = ["n1".to_string(), "n2".to_string()].into_iter().collect();
+
+    app.note_subscription_apply();
+    let pending = app
+        .subscription_state
+        .pending_refresh_apply
+        .as_ref()
+        .expect("auto candidate diff");
+    assert_eq!((pending.diff.added, pending.diff.removed), (0, 0));
+    assert!(pending.diff.auto_changed);
+}
+
+#[tokio::test]
 async fn unchanged_subscription_refresh_skips_the_restart() {
     let (mut app, _dir) = test_app().await;
     app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_auto_tags = ["n1".to_string()].into_iter().collect();
     app.subscription_state.pending_restart_subscription = Some("s-1".to_string());
     app.restart_after_pending_subscription();
     assert!(app
@@ -1329,9 +1351,13 @@ async fn reconcile_clears_the_pending_apply_after_a_matching_start() {
     let (mut app, _dir) = test_app().await;
     app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string()];
+    app.proxy_runtime.proxy_auto_tags = ["n1".to_string()].into_iter().collect();
     app.subscription_state.pending_refresh_apply = Some(PendingRefreshApply {
-        added: 1,
-        removed: 0,
+        diff: SubscriptionDiff {
+            added: 1,
+            removed: 0,
+            auto_changed: false,
+        },
         since: Instant::now(),
         wait_logged: false,
     });
@@ -1344,10 +1370,99 @@ async fn pending_apply_is_dropped_when_the_proxy_is_not_running() {
     let (mut app, _dir) = test_app().await;
     app.metrics_state.nodes = vec![tagged_node("A", "n1")];
     app.proxy_runtime.proxy_node_tags = vec!["n1".to_string(), "n2".to_string()];
+    app.proxy_runtime.proxy_auto_tags = ["n1".to_string()].into_iter().collect();
     app.note_subscription_apply();
     assert!(app.subscription_state.pending_refresh_apply.is_some());
     app.maybe_apply_subscription_changes();
     assert!(app.subscription_state.pending_refresh_apply.is_none());
+}
+
+#[tokio::test]
+async fn single_refresh_clears_backoff_only_when_no_errors_remain() {
+    let (mut app, _dir) = test_app().await;
+    let config = |id: &str| SubscriptionConfig {
+        id: id.to_string(),
+        name: id.to_string(),
+        url: "https://example.com/sub".to_string(),
+        enabled: true,
+    };
+    let mut healthy = empty_runtime(config("a"));
+    healthy.error = None;
+    let mut failed = empty_runtime(config("b"));
+    failed.error = Some("timeout".to_string());
+    app.subscription_state.subscriptions = vec![healthy, failed];
+    app.subscription_state.subscription_refresh_retry_at = Some(Instant::now());
+    app.subscription_state.subscription_refresh_backoff = Duration::from_secs(600);
+
+    app.clear_refresh_retry_if_healthy();
+    assert!(app
+        .subscription_state
+        .subscription_refresh_retry_at
+        .is_some());
+
+    app.subscription_state.subscriptions[1].error = None;
+    app.clear_refresh_retry_if_healthy();
+    assert!(app
+        .subscription_state
+        .subscription_refresh_retry_at
+        .is_none());
+    assert_eq!(
+        app.subscription_state.subscription_refresh_backoff,
+        SUBSCRIPTION_REFRESH_MIN_BACKOFF
+    );
+}
+
+#[tokio::test]
+async fn recompute_nodes_preserves_selection_and_prunes_removed_state() {
+    let (mut app, _dir) = test_app().await;
+    let subscription = SubscriptionConfig {
+        id: "s-1".to_string(),
+        name: "test".to_string(),
+        url: "https://example.com/sub".to_string(),
+        enabled: true,
+    };
+    let mut runtime = empty_runtime(subscription);
+    runtime.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
+    app.subscription_state.subscriptions = vec![runtime];
+    app.metrics_state.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
+    app.ui_state.page = Page::Nodes;
+    app.ui_state.selected = 1;
+    app.metrics_state.node_delays.insert("n1".to_string(), 10);
+    app.metrics_state.node_delays.insert("n2".to_string(), 20);
+    app.health.quality.record_success("n2", 20);
+
+    app.subscription_state.subscriptions[0].nodes = vec![tagged_node("A", "n1")];
+    app.recompute_nodes();
+
+    assert_eq!(app.metrics_state.nodes.len(), 1);
+    assert_eq!(app.ui_state.selected, 0);
+    assert!(!app.metrics_state.node_delays.contains_key("n2"));
+    assert_eq!(app.health.quality.score("n2", Some(42)), 42.0);
+}
+
+#[tokio::test]
+async fn auto_start_without_nodes_reports_and_clears_the_pending_flag() {
+    let (mut app, _dir) = test_app().await;
+    app.handle_event(AppEvent::AutoStart).await;
+    assert!(!app.selection_state.pending_auto_start);
+    assert_eq!(
+        app.ui_state.last_error.as_deref(),
+        Some(app.text().no_nodes)
+    );
+}
+
+#[tokio::test]
+async fn auto_start_without_a_binary_opens_the_setup_popup() {
+    let (mut app, _dir) = test_app().await;
+    app.ui_state.overlay = None;
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
+    app.handle_event(AppEvent::AutoStart).await;
+    assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
+    assert!(app
+        .ui_state
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains(app.text().msg_singbox_missing)));
 }
 
 #[tokio::test]

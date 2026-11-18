@@ -13,6 +13,7 @@ pub(crate) struct ProxyRuntime {
     pub(crate) stable_reset_at: Option<Instant>,
     pub(crate) runtime_has_auto: bool,
     pub(crate) proxy_node_tags: Vec<String>,
+    pub(crate) proxy_auto_tags: HashSet<String>,
     pub(crate) proxy_node_names: HashMap<String, String>,
 }
 
@@ -31,6 +32,7 @@ impl Default for ProxyRuntime {
             stable_reset_at: None,
             runtime_has_auto: false,
             proxy_node_tags: Vec::new(),
+            proxy_auto_tags: HashSet::new(),
             proxy_node_names: HashMap::new(),
         }
     }

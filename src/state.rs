@@ -271,7 +271,51 @@ pub fn settings_items(allow_lan: bool) -> Vec<SettingsItem> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsAction {
+    ToggleLanguage,
+    ToggleAllowLan,
+    EditLanAuth,
+    EditKeywordsInclude,
+    EditKeywordsExclude,
+    CycleAppLogLevel,
+    OpenBinary,
+    CopyValue,
+}
+
 impl SettingsItem {
+    pub fn label(self, text: &Text) -> &'static str {
+        match self {
+            Self::Language => text.settings_language,
+            Self::Port => text.settings_port,
+            Self::AllowLan => text.settings_allow_lan,
+            Self::LanAuth => text.settings_lan_auth,
+            Self::DnsServers => text.settings_dns_servers,
+            Self::TestUrl => text.settings_test_url,
+            Self::KeywordsInclude => text.settings_keywords_include,
+            Self::KeywordsExclude => text.settings_keywords_exclude,
+            Self::AppLogLevel => text.settings_app_log_level,
+            Self::BinaryInfo => text.settings_binary_info,
+            Self::ConfigPath => text.settings_config_path,
+            Self::LogFile => text.settings_log_file,
+        }
+    }
+
+    pub fn action(self) -> SettingsAction {
+        match self {
+            Self::Language => SettingsAction::ToggleLanguage,
+            Self::AllowLan => SettingsAction::ToggleAllowLan,
+            Self::LanAuth => SettingsAction::EditLanAuth,
+            Self::KeywordsInclude => SettingsAction::EditKeywordsInclude,
+            Self::KeywordsExclude => SettingsAction::EditKeywordsExclude,
+            Self::AppLogLevel => SettingsAction::CycleAppLogLevel,
+            Self::BinaryInfo => SettingsAction::OpenBinary,
+            Self::Port | Self::DnsServers | Self::TestUrl | Self::ConfigPath | Self::LogFile => {
+                SettingsAction::CopyValue
+            }
+        }
+    }
+
     pub fn read_only(self) -> bool {
         matches!(
             self,

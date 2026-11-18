@@ -65,24 +65,46 @@ pub async fn preflight(
     let binary = BinaryManager::new(paths.clone())
         .locate()
         .ok_or(SupervisorError::BinaryMissing)?;
+    // The old proxy may still hold the mixed port, so preflight can only validate the configured
+    // IPv6 shape; the final start probes actual availability after the old instance stops.
+    let (generated, _, _) = build_generated(paths, config, nodes, config.enable_ipv6, preferred)?;
+    let candidate = write_candidate(paths, &generated, "json.preflight")?;
+    let result = check_config(&binary, &candidate).await;
+    let _ = std::fs::remove_file(&candidate);
+    result
+}
+
+fn build_generated(
+    paths: &Paths,
+    config: &Config,
+    nodes: &[Node],
+    ipv6_available: bool,
+    preferred: Option<&str>,
+) -> Result<(serde_json::Value, u16, String), SupervisorError> {
     let clash_port = allocate_clash_port(config.port)?;
     let secret = random_secret();
     let generated = config_gen::generate_with_selection(
         config,
         nodes,
-        config.enable_ipv6,
+        ipv6_available,
         clash_port,
         &secret,
         &paths.cache_file(),
         preferred,
     )?;
+    Ok((generated, clash_port, secret))
+}
+
+fn write_candidate(
+    paths: &Paths,
+    generated: &serde_json::Value,
+    suffix: &str,
+) -> Result<std::path::PathBuf, SupervisorError> {
     fsutil::ensure_private_dir(&paths.runtime_dir)?;
-    let candidate = paths.runtime_config().with_extension("json.preflight");
-    let generated = serde_json::to_string_pretty(&generated)?;
+    let candidate = paths.runtime_config().with_extension(suffix);
+    let generated = serde_json::to_string_pretty(generated)?;
     fsutil::write_private_file(&candidate, generated.as_bytes())?;
-    let result = check_config(&binary, &candidate).await;
-    let _ = std::fs::remove_file(&candidate);
-    result
+    Ok(candidate)
 }
 
 async fn check_config(binary: &Path, config: &Path) -> Result<(), SupervisorError> {
@@ -139,27 +161,15 @@ pub async fn start(
         );
     }
 
-    let clash_port = allocate_clash_port(port)?;
-    let secret = random_secret();
-    let generated = config_gen::generate_with_selection(
-        config,
-        nodes,
-        ipv6_available,
-        clash_port,
-        &secret,
-        &paths.cache_file(),
-        preferred,
-    )?;
-    fsutil::ensure_private_dir(&paths.runtime_dir)?;
-    let runtime_config = paths.runtime_config();
-    let candidate = runtime_config.with_extension("json.candidate");
-    let generated = serde_json::to_string_pretty(&generated)?;
-    fsutil::write_private_file(&candidate, generated.as_bytes())?;
+    let (generated, clash_port, secret) =
+        build_generated(paths, config, nodes, ipv6_available, preferred)?;
+    let candidate = write_candidate(paths, &generated, "json.candidate")?;
 
     if let Err(err) = check_config(&binary, &candidate).await {
         let _ = std::fs::remove_file(&candidate);
         return Err(err);
     }
+    let runtime_config = paths.runtime_config();
     if let Err(err) = std::fs::rename(&candidate, &runtime_config) {
         let _ = std::fs::remove_file(&candidate);
         return Err(SupervisorError::Io(err));

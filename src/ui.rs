@@ -849,13 +849,10 @@ fn setting_content(view: &View, item: SettingsItem) -> (&'static str, String, bo
             text.common_off
         }
     };
-    let (label, value) = match item {
-        SettingsItem::Language => (text.settings_language, view.language_label().to_string()),
-        SettingsItem::Port => (text.settings_port, view.config.port.to_string()),
-        SettingsItem::AllowLan => (
-            text.settings_allow_lan,
-            on_off(view.config.allow_lan).to_string(),
-        ),
+    let value = match item {
+        SettingsItem::Language => view.language_label().to_string(),
+        SettingsItem::Port => view.config.port.to_string(),
+        SettingsItem::AllowLan => on_off(view.config.allow_lan).to_string(),
         SettingsItem::LanAuth => {
             let username = if view.config.lan_username.is_empty() {
                 text.settings_unset.to_string()
@@ -867,38 +864,30 @@ fn setting_content(view: &View, item: SettingsItem) -> (&'static str, String, bo
             } else {
                 text.settings_unset.to_string()
             };
-            (text.settings_lan_auth, format!("{username} / {password}"))
+            format!("{username} / {password}")
         }
-        SettingsItem::DnsServers => (
-            text.settings_dns_servers,
-            view.config.dns_servers.join(", "),
-        ),
-        SettingsItem::TestUrl => (text.settings_test_url, view.config.test_url.clone()),
-        SettingsItem::KeywordsInclude => (
-            text.settings_keywords_include,
+        SettingsItem::DnsServers => view.config.dns_servers.join(", "),
+        SettingsItem::TestUrl => view.config.test_url.clone(),
+        SettingsItem::KeywordsInclude => {
             if view.config.keywords_include.is_empty() {
                 text.settings_keywords_all.to_string()
             } else {
                 view.config.keywords_include.join(", ")
-            },
-        ),
-        SettingsItem::KeywordsExclude => (
-            text.settings_keywords_exclude,
+            }
+        }
+        SettingsItem::KeywordsExclude => {
             if view.config.keywords_exclude.is_empty() {
                 text.settings_keywords_none.to_string()
             } else {
                 view.config.keywords_exclude.join(", ")
-            },
-        ),
-        SettingsItem::AppLogLevel => (
-            text.settings_app_log_level,
-            view.config.app_log_level.label().to_string(),
-        ),
-        SettingsItem::BinaryInfo => (text.settings_binary_info, binary_status_text(view)),
-        SettingsItem::ConfigPath => (text.settings_config_path, view.config_path.clone()),
-        SettingsItem::LogFile => (text.settings_log_file, view.log_file.display().to_string()),
+            }
+        }
+        SettingsItem::AppLogLevel => view.config.app_log_level.label().to_string(),
+        SettingsItem::BinaryInfo => binary_status_text(view),
+        SettingsItem::ConfigPath => view.config_path.clone(),
+        SettingsItem::LogFile => view.log_file.display().to_string(),
     };
-    (label, value, item.read_only())
+    (item.label(text), value, item.read_only())
 }
 
 fn settings_lines(

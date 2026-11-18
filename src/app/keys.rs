@@ -1,6 +1,6 @@
 use super::*;
 use crate::logging::LogLine;
-use crate::state::{KeywordField, OverlayKind, SettingsItem, MAIN_PAGES};
+use crate::state::{KeywordField, OverlayKind, SettingsAction, SettingsItem, MAIN_PAGES};
 use std::time::{Duration, Instant};
 
 impl App {
@@ -549,16 +549,7 @@ impl App {
         self.subscription_state
             .subscriptions
             .retain(|runtime| runtime.config.id != id);
-        self.metrics_state.nodes = merge_nodes(&self.subscription_state.subscriptions);
-        self.ui_state.last_node_sort = None;
-        self.prune_node_state();
-        self.sync_preferred_node();
-        self.ui_state.selected = self.ui_state.selected.min(
-            self.subscription_state
-                .subscriptions
-                .len()
-                .saturating_sub(1),
-        );
+        self.recompute_nodes();
         self.save_subscription_cache();
         self.refresh_last_error_from_subscriptions();
         self.notify(self.text().msg_subscription_deleted);
@@ -803,9 +794,7 @@ impl App {
             } else {
                 self.subscription_state.subscriptions.push(placeholder);
             }
-            self.metrics_state.nodes = merge_nodes(&self.subscription_state.subscriptions);
-            self.ui_state.last_node_sort = None;
-            self.sync_preferred_node();
+            self.recompute_nodes();
             self.save_subscription_cache();
             self.refresh_last_error_from_subscriptions();
             if was_enabled {
@@ -837,21 +826,19 @@ impl App {
         let Some(item) = items.get(self.ui_state.selected).copied() else {
             return;
         };
-        if item.read_only() {
-            let value = self.setting_value(item);
-            self.broadcast(ServerMsg::Copy { text: value });
-            self.notify(self.text().settings_copied);
-            return;
-        }
-        match item {
-            SettingsItem::Language => self.toggle_language(),
-            SettingsItem::AllowLan => self.toggle_allow_lan(),
-            SettingsItem::LanAuth => self.open_settings_form(),
-            SettingsItem::KeywordsInclude => self.open_keyword_form(KeywordField::Include),
-            SettingsItem::KeywordsExclude => self.open_keyword_form(KeywordField::Exclude),
-            SettingsItem::AppLogLevel => self.cycle_app_log_level(),
-            SettingsItem::BinaryInfo => self.open_setup_overlay(),
-            _ => {}
+        match item.action() {
+            SettingsAction::CopyValue => {
+                let value = self.setting_value(item);
+                self.broadcast(ServerMsg::Copy { text: value });
+                self.notify(self.text().settings_copied);
+            }
+            SettingsAction::ToggleLanguage => self.toggle_language(),
+            SettingsAction::ToggleAllowLan => self.toggle_allow_lan(),
+            SettingsAction::EditLanAuth => self.open_settings_form(),
+            SettingsAction::EditKeywordsInclude => self.open_keyword_form(KeywordField::Include),
+            SettingsAction::EditKeywordsExclude => self.open_keyword_form(KeywordField::Exclude),
+            SettingsAction::CycleAppLogLevel => self.cycle_app_log_level(),
+            SettingsAction::OpenBinary => self.open_setup_overlay(),
         }
     }
 
