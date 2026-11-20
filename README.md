@@ -23,8 +23,9 @@ English | [中文](#dfrelay-zh)
   with level and app/sing-box source filters, and a sing-box management popup.
 - Headless daemon for systemd/launchd, with foreground `dfr serve`; the TUI is a
   client and never owns the daemon lifecycle.
-- Low memory footprint: about 31 MB resident excluding the TUI (`dfr` 3–4 MB,
-  sing-box 26–28 MB).
+- Low memory footprint: typically about 31 MB resident excluding the TUI
+  (`dfr` 3–4 MB, sing-box 26–28 MB); actual usage varies by platform and node
+  count.
 - sing-box updates stay manual through its info popup; DFRelay itself has no
   in-app update check. Re-run `install.sh` to upgrade `dfr`.
 
@@ -255,7 +256,7 @@ DFRelay 是一个面向 Linux、macOS 与 Android Termux（arm64）的终端 TUI
 - TUI 展示网速、连接数、当前节点、本机/代理 IP，支持按级别与 app/sing-box
   来源过滤日志，并提供 sing-box 管理弹窗。
 - 无界面 daemon 可由 systemd/launchd 托管；TUI 只是客户端，不负责 daemon 生命周期。
-- 内存占用低：常驻约 31 MB（不含 TUI，`dfr` 3–4 MB、sing-box 26–28 MB）。
+- 内存占用低：常驻通常约 31 MB（不含 TUI，`dfr` 3–4 MB、sing-box 26–28 MB）；实际随平台与节点数变化。
 - sing-box 更新仍由信息弹窗手动触发；DFRelay 自身不提供应用内更新检查，
   升级时重新执行 `install.sh` 覆盖安装。
 
