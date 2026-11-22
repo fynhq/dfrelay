@@ -209,11 +209,7 @@ impl App {
         {
             return;
         }
-        if self
-            .health
-            .last_metrics_at
-            .is_none_or(|at| at.elapsed() > HEALTH_PROBE_STALE)
-        {
+        if !self.metrics_api_fresh() {
             return;
         }
         let idle = self

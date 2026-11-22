@@ -33,6 +33,20 @@ fn setting_index(app: &App, item: SettingsItem) -> usize {
         .unwrap()
 }
 
+async fn attach_client(app: &mut App, id: u64, viewer: bool) -> mpsc::UnboundedReceiver<ServerMsg> {
+    let (tx, rx) = crate::ipc::ClientTx::test_channel();
+    let (accept, accept_rx) = tokio::sync::oneshot::channel();
+    app.handle_event(AppEvent::ClientAttached {
+        id,
+        viewer,
+        tx,
+        accept,
+    })
+    .await;
+    assert!(accept_rx.await.expect("client acceptance result"));
+    rx
+}
+
 fn node(name: &str) -> Node {
     Node::new(
         name.to_string(),
@@ -408,14 +422,7 @@ async fn restart_in_progress_blocks_keys_except_detach() {
     app.ui_state.page = Page::Nodes;
     app.ui_state.selected = 0;
     app.proxy_runtime.restart_in_progress = true;
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 11,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 11, true).await;
 
     app.handle_key(key(KeyCode::Char('j'))).await;
     assert_eq!(app.ui_state.selected, 0);
@@ -432,14 +439,7 @@ async fn restart_in_progress_blocks_keys_except_detach() {
 #[tokio::test]
 async fn connections_enter_copies_the_selected_target() {
     let (mut app, _dir) = test_app().await;
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 1,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 1, true).await;
     app.ui_state.page = Page::Connections;
     app.metrics_state
         .metrics
@@ -454,6 +454,8 @@ async fn connections_enter_copies_the_selected_target() {
             download: 2,
             duration_secs: None,
         });
+    app.metrics_state.metrics.total_connections = 1;
+    app.remember_connection_cursor();
     app.ui_state.selected = 0;
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(
@@ -472,14 +474,7 @@ async fn connections_enter_copies_the_selected_target() {
 #[tokio::test]
 async fn setup_copies_the_binary_path() {
     let (mut app, _dir) = test_app().await;
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 1,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 1, true).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     let expected = app.paths.binary().display().to_string();
     app.handle_key(key(KeyCode::Char('p'))).await;
@@ -815,14 +810,7 @@ async fn settings_jk_selects_and_enter_toggles_or_edits() {
 #[tokio::test]
 async fn test_url_is_read_only_and_copyable() {
     let (mut app, _dir) = test_app().await;
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 1,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 1, true).await;
     app.ui_state.page = Page::Settings;
     app.ui_state.selected = setting_index(&app, SettingsItem::TestUrl);
     let expected = app.config.test_url.clone();
@@ -844,14 +832,7 @@ async fn test_url_is_read_only_and_copyable() {
 #[tokio::test]
 async fn settings_read_only_item_copies_its_value() {
     let (mut app, _dir) = test_app().await;
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 1,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 1, true).await;
     app.ui_state.page = Page::Settings;
     app.ui_state.selected = setting_index(&app, SettingsItem::ConfigPath);
     let expected = app.paths.config_file.display().to_string();
@@ -873,14 +854,7 @@ async fn settings_read_only_item_copies_its_value() {
 #[tokio::test]
 async fn port_and_dns_are_read_only_and_copyable() {
     let (mut app, _dir) = test_app().await;
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 1,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 1, true).await;
     app.ui_state.page = Page::Settings;
     for (item, expected) in [
         (SettingsItem::Port, "12000".to_string()),
@@ -982,28 +956,14 @@ async fn singbox_log_level_is_read_only_on_setup() {
 #[tokio::test]
 async fn q_detaches_viewers_without_stopping_daemon() {
     let (mut app, _dir) = test_app().await;
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 7,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 7, true).await;
     app.handle_key(key(KeyCode::Char('q'))).await;
     assert!(drain_until_detach(&mut rx));
     assert!(!app.should_quit);
     assert!(app.clients.is_empty());
     assert!(!app.has_viewer());
 
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 8,
-        viewer: true,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 8, true).await;
     app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
         .await;
     assert!(drain_until_detach(&mut rx));
@@ -1012,7 +972,7 @@ async fn q_detaches_viewers_without_stopping_daemon() {
     assert!(!app.has_viewer());
 }
 
-fn drain_until_detach(rx: &mut mpsc::Receiver<ServerMsg>) -> bool {
+fn drain_until_detach(rx: &mut mpsc::UnboundedReceiver<ServerMsg>) -> bool {
     while let Ok(message) = rx.try_recv() {
         if matches!(message, ServerMsg::Detach) {
             return true;
@@ -1032,14 +992,7 @@ async fn status_request_reports_mode_and_proxy_state() {
         target: None,
         uid: crate::service::current_uid(),
     });
-    let (tx, mut rx) = mpsc::channel(VIEW_QUEUE_LIMIT);
-    app.handle_event(AppEvent::ClientAttached {
-        id: 9,
-        viewer: false,
-        tx,
-        accept: tokio::sync::oneshot::channel().0,
-    })
-    .await;
+    let mut rx = attach_client(&mut app, 9, false).await;
     app.handle_event(AppEvent::StatusRequest { client_id: 9 })
         .await;
     let Ok(ServerMsg::Status(status)) = rx.try_recv() else {
@@ -1683,9 +1636,11 @@ async fn view_does_not_expose_secrets_or_unused_config_fields() {
 #[tokio::test]
 async fn metrics_node_delays_feed_the_nodes_view() {
     let (mut app, _dir) = test_app().await;
-    let mut metrics = MetricsSnapshot::default();
-    metrics.node_delays.insert("n1".to_string(), 42);
-    app.handle_event(AppEvent::Metrics(metrics)).await;
+    let mut snapshot = ProxiesSnapshot::default();
+    snapshot.node_delays.insert("n1".to_string(), 42);
+    let epoch = app.proxy_runtime.epoch;
+    app.handle_event(AppEvent::Proxies { epoch, snapshot })
+        .await;
     assert_eq!(app.metrics_state.node_delays.get("n1"), Some(&42));
     assert!(
         app.metrics_state.metrics.node_delays.is_empty(),
@@ -1701,25 +1656,38 @@ async fn new_connection_ids_only_flag_new_traffic() {
         id: id.to_string(),
         ..Default::default()
     };
-    app.handle_event(AppEvent::Metrics(MetricsSnapshot {
-        connections: vec![connection("a")],
-        ..Default::default()
-    }))
+    let epoch = app.proxy_runtime.epoch;
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: ConnectionsSnapshot {
+            total_connections: 1,
+            connections: vec![connection("a")],
+            ..Default::default()
+        },
+    })
     .await;
     assert!(app.health.fast_probe_pending);
 
     app.health.fast_probe_pending = false;
-    app.handle_event(AppEvent::Metrics(MetricsSnapshot {
-        connections: vec![connection("a")],
-        ..Default::default()
-    }))
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: ConnectionsSnapshot {
+            total_connections: 1,
+            connections: vec![connection("a")],
+            ..Default::default()
+        },
+    })
     .await;
     assert!(!app.health.fast_probe_pending);
 
-    app.handle_event(AppEvent::Metrics(MetricsSnapshot {
-        connections: vec![connection("a"), connection("b")],
-        ..Default::default()
-    }))
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: ConnectionsSnapshot {
+            total_connections: 2,
+            connections: vec![connection("a"), connection("b")],
+            ..Default::default()
+        },
+    })
     .await;
     assert!(app.health.fast_probe_pending);
 }
@@ -1733,16 +1701,23 @@ async fn connection_ids_beyond_the_cap_do_not_rearm_fast_probes() {
             ..Default::default()
         })
         .collect();
-    let metrics = MetricsSnapshot {
-        connections: connections.clone(),
+    let snapshot = ConnectionsSnapshot {
+        total_connections: connections.len(),
+        connections,
         ..Default::default()
     };
+    let epoch = app.proxy_runtime.epoch;
 
-    app.handle_event(AppEvent::Metrics(metrics.clone())).await;
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: snapshot.clone(),
+    })
+    .await;
     assert!(app.health.fast_probe_pending);
 
     app.health.fast_probe_pending = false;
-    app.handle_event(AppEvent::Metrics(metrics)).await;
+    app.handle_event(AppEvent::Connections { epoch, snapshot })
+        .await;
     assert!(
         !app.health.fast_probe_pending,
         "connections beyond the id cap must not look new on every poll"
@@ -1947,30 +1922,230 @@ async fn health_probe_failures_are_counted_per_selected_node() {
 #[tokio::test]
 async fn only_new_proxy_connections_keep_health_probing_active() {
     let (mut app, _dir) = test_app().await;
-    let mut metrics = MetricsSnapshot::default();
-    metrics
-        .connections
-        .push(crate::singbox::clash::ConnectionInfo {
+    let snapshot = ConnectionsSnapshot {
+        total_connections: 1,
+        connections: vec![crate::singbox::clash::ConnectionInfo {
             id: "c1".to_string(),
             ..Default::default()
-        });
-    app.handle_event(AppEvent::Metrics(metrics.clone())).await;
+        }],
+        ..Default::default()
+    };
+    let epoch = app.proxy_runtime.epoch;
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: snapshot.clone(),
+    })
+    .await;
     let first = app.health.last_activity.expect("first connection");
 
     app.health.last_activity = Some(Instant::now() - Duration::from_secs(10));
     let stale = app.health.last_activity.unwrap();
-    app.handle_event(AppEvent::Metrics(metrics)).await;
+    app.handle_event(AppEvent::Connections { epoch, snapshot })
+        .await;
     assert_eq!(app.health.last_activity, Some(stale));
 
-    let mut next = MetricsSnapshot::default();
-    next.connections
-        .push(crate::singbox::clash::ConnectionInfo {
+    let next = ConnectionsSnapshot {
+        total_connections: 1,
+        connections: vec![crate::singbox::clash::ConnectionInfo {
             id: "c2".to_string(),
             ..Default::default()
-        });
-    app.handle_event(AppEvent::Metrics(next)).await;
+        }],
+        ..Default::default()
+    };
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: next,
+    })
+    .await;
     assert!(app.health.last_activity.expect("new connection") > stale);
     assert!(app.health.last_activity.expect("new connection") >= first);
+}
+
+#[test]
+fn daemon_panic_exits_with_an_error() {
+    assert!(daemon_exit_result(None).is_ok());
+    let error = daemon_exit_result(Some("boom")).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert!(error.to_string().contains("boom"));
+}
+
+#[tokio::test]
+async fn metrics_endpoints_have_independent_freshness_and_epochs() {
+    let (mut app, _dir) = test_app().await;
+    let epoch = app.proxy_runtime.epoch;
+    assert!(!app.metrics_api_fresh());
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: ConnectionsSnapshot::default(),
+    })
+    .await;
+    assert!(!app.metrics_api_fresh(), "proxies must still be fresh");
+
+    app.handle_event(AppEvent::Proxies {
+        epoch: epoch.wrapping_add(1),
+        snapshot: ProxiesSnapshot::default(),
+    })
+    .await;
+    assert!(
+        !app.metrics_api_fresh(),
+        "stale proxy snapshots are ignored"
+    );
+
+    app.handle_event(AppEvent::Proxies {
+        epoch,
+        snapshot: ProxiesSnapshot::default(),
+    })
+    .await;
+    assert!(app.metrics_api_fresh());
+}
+
+#[tokio::test]
+async fn connections_cursor_follows_id_and_disappears_with_the_connection() {
+    let (mut app, _dir) = test_app().await;
+    app.ui_state.page = Page::Connections;
+    let connection = |id: &str| crate::singbox::clash::ConnectionInfo {
+        id: id.to_string(),
+        host: format!("{id}.example.com"),
+        destination_port: "443".to_string(),
+        ..Default::default()
+    };
+    let epoch = app.proxy_runtime.epoch;
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: ConnectionsSnapshot {
+            total_connections: 2,
+            connections: vec![connection("a"), connection("b")],
+            ..Default::default()
+        },
+    })
+    .await;
+    app.ui_state.selected = 1;
+    app.remember_connection_cursor();
+
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: ConnectionsSnapshot {
+            total_connections: 2,
+            connections: vec![connection("b"), connection("a")],
+            ..Default::default()
+        },
+    })
+    .await;
+    assert_eq!(app.ui_state.selected, 0);
+    assert_eq!(
+        app.metrics_state.connection_cursor,
+        Some(Some("b".to_string()))
+    );
+
+    app.handle_event(AppEvent::Connections {
+        epoch,
+        snapshot: ConnectionsSnapshot {
+            total_connections: 1,
+            connections: vec![connection("a")],
+            ..Default::default()
+        },
+    })
+    .await;
+    assert_eq!(app.metrics_state.connection_cursor, Some(None));
+    app.ui_state.message = None;
+    app.copy_connection_target();
+    assert!(app.ui_state.message.is_none());
+}
+
+#[tokio::test]
+async fn auto_selection_commits_preferred_state_only_after_success() {
+    let (mut app, _dir) = test_app().await;
+    app.selection_state.preferred_node = Some("manual".to_string());
+    app.handle_event(AppEvent::AutoSelected).await;
+    assert!(app.selection_state.preferred_node.is_none());
+    assert_eq!(
+        app.health.pending_switch_reason.as_ref().map(|item| item.0),
+        Some("manual")
+    );
+}
+
+#[tokio::test]
+async fn sixth_switch_pauses_health_immediately() {
+    let (mut app, _dir) = test_app().await;
+    for _ in 0..AUTO_SWITCH_BUDGET.saturating_sub(1) {
+        app.record_auto_switch();
+    }
+    app.record_auto_switch();
+    assert!(app.enforce_switch_budget_after_record());
+    assert!(app.health.pause_until.is_some());
+    assert!(app.health.auto_switch_times.is_empty());
+}
+
+#[tokio::test]
+async fn health_recovery_does_not_clear_unrelated_errors() {
+    let (mut app, _dir) = test_app().await;
+    app.ui_state.last_error = Some("subscription failed".to_string());
+    app.clear_health_error();
+    assert_eq!(
+        app.ui_state.last_error.as_deref(),
+        Some("subscription failed")
+    );
+    app.ui_state.last_error = Some(app.text().msg_health_no_nodes.to_string());
+    app.clear_health_error();
+    assert!(app.ui_state.last_error.is_none());
+}
+
+#[tokio::test]
+async fn stale_delay_events_do_not_clear_new_test_state() {
+    let (mut app, _dir) = test_app().await;
+    app.proxy_runtime.epoch = 2;
+    app.metrics_state.delay_testing.insert("n1".to_string());
+    app.handle_event(AppEvent::NodeDelay {
+        epoch: 1,
+        tag: "n1".to_string(),
+        delay: None,
+        failed: true,
+        clear_testing: true,
+    })
+    .await;
+    assert!(app.metrics_state.delay_testing.contains("n1"));
+}
+
+#[tokio::test]
+async fn unavailable_recovery_probes_do_not_report_all_nodes_failed() {
+    let (mut app, _dir) = test_app().await;
+    app.proxy_runtime.status = ProxyStatus::Running;
+    app.recovery_found_no_target(false);
+    assert!(app.ui_state.last_error.is_none());
+    assert!(app.health.pause_until.is_none());
+    assert_eq!(app.stats.recovery_no_healthy, 0);
+
+    app.recovery_found_no_target(true);
+    assert_eq!(
+        app.ui_state.last_error.as_deref(),
+        Some(app.text().msg_health_no_nodes)
+    );
+    assert_eq!(app.stats.recovery_no_healthy, 1);
+}
+
+#[tokio::test]
+async fn unavailable_delay_results_do_not_penalize_quality() {
+    let (mut app, _dir) = test_app().await;
+    app.record_delay_measurement("n1".to_string(), Some(100), false);
+    let before = app.health.quality.score("n1", None);
+    app.record_delay_measurement("n1".to_string(), None, false);
+    assert_eq!(app.health.quality.score("n1", None), before);
+    app.record_delay_measurement("n1".to_string(), None, true);
+    assert!(app.health.quality.score("n1", None) > before);
+}
+
+#[tokio::test]
+async fn start_plan_detects_config_and_node_changes() {
+    let (mut app, _dir) = test_app().await;
+    app.metrics_state.nodes = vec![node("one")];
+    let plan = app.current_start_plan();
+    assert_eq!(plan, app.current_start_plan());
+
+    app.config.port += 1;
+    assert_ne!(plan, app.current_start_plan());
+    app.config.port -= 1;
+    app.metrics_state.nodes = vec![node("two")];
+    assert_ne!(plan, app.current_start_plan());
 }
 
 #[tokio::test]
@@ -2098,7 +2273,9 @@ async fn recovery_applied_requires_current_generation_and_running_proxy() {
         .selection_generation
         .load(std::sync::atomic::Ordering::Relaxed);
 
+    let epoch = app.proxy_runtime.epoch;
     app.handle_event(AppEvent::RecoveryApplied {
+        epoch,
         target: RecoveryTarget::Node("n1".to_string()),
         trigger: "n0".to_string(),
         generation: generation.wrapping_add(1),
@@ -2108,6 +2285,7 @@ async fn recovery_applied_requires_current_generation_and_running_proxy() {
     assert_eq!(app.health.failures, 3);
 
     app.handle_event(AppEvent::RecoveryApplied {
+        epoch,
         target: RecoveryTarget::Node("n1".to_string()),
         trigger: "n0".to_string(),
         generation,
@@ -2356,6 +2534,7 @@ async fn view_scopes_heavy_lists_to_the_active_page() {
             download: 2,
             duration_secs: None,
         });
+    app.metrics_state.metrics.total_connections = 1;
 
     app.ui_state.page = Page::Dashboard;
     let view = app.view();

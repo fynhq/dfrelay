@@ -30,7 +30,111 @@ pub struct RunningProxy {
     pub port: u16,
     pub ipv6: bool,
     pub lan_auth: Option<(String, String)>,
+    signal: ChildSignal,
     log_tasks: Vec<JoinHandle<()>>,
+}
+
+struct ChildSignal {
+    pid: u32,
+    #[cfg(target_os = "linux")]
+    pidfd: std::os::fd::RawFd,
+}
+
+impl ChildSignal {
+    fn new(pid: u32) -> Self {
+        #[cfg(target_os = "linux")]
+        let pidfd = {
+            if pid == 0 {
+                -1
+            } else {
+                // SAFETY: pidfd_open only observes the existing child pid and allocates no memory.
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) }
+                    as std::os::fd::RawFd;
+                if fd >= 0 {
+                    // SAFETY: fd is a descriptor owned by this process; fcntl does not retain it.
+                    unsafe {
+                        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    }
+                }
+                fd
+            }
+        };
+        Self {
+            pid,
+            #[cfg(target_os = "linux")]
+            pidfd,
+        }
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if self.pidfd >= 0 {
+            // SAFETY: pidfd refers to the spawned child and the null siginfo pointer is allowed.
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.pidfd,
+                    libc::SIGTERM,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            };
+            if result == 0 {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(err);
+        }
+        if self.pid == 0 {
+            return Ok(());
+        }
+        // SAFETY: kill has no memory-safety preconditions. Without pidfd this retains the
+        // documented pid-reuse window on non-Linux platforms.
+        let result = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) };
+        if result == 0 {
+            Ok(())
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ChildSignal {
+    fn drop(&mut self) {
+        if self.pidfd >= 0 {
+            // SAFETY: pidfd is owned by this value and is not used after close.
+            unsafe {
+                libc::close(self.pidfd);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_parent_death_signal(command: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: this closure runs in the forked child before exec and only invokes
+    // async-signal-safe syscalls/getpid; it allocates no heap memory.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -188,7 +292,8 @@ pub async fn start(
             listen_v4, port, clash_port
         ),
     );
-    let mut child = Command::new(&binary)
+    let mut command = Command::new(&binary);
+    command
         .args(["run", "-c"])
         .arg(&runtime_config)
         .arg("-D")
@@ -196,9 +301,12 @@ pub async fn start(
         .env("NO_COLOR", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    #[cfg(target_os = "linux")]
+    configure_parent_death_signal(&mut command);
+    let mut child = command.spawn()?;
     let pid = child.id().unwrap_or(0);
+    let signal = ChildSignal::new(pid);
     let mut log_tasks = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         log_tasks.push(spawn_log_reader(stdout, logger.clone()));
@@ -230,17 +338,19 @@ pub async fn start(
         lan_auth: config
             .lan_auth()
             .map(|(username, password)| (username.to_string(), password.to_string())),
+        signal,
         log_tasks,
     })
 }
 
 pub async fn stop(mut proxy: RunningProxy, logger: &Logger) {
     let already_exited = matches!(proxy.child.try_wait(), Ok(Some(_)));
-    #[cfg(unix)]
-    if !already_exited && proxy.pid != 0 {
-        // SAFETY: pid is the live child's non-zero id; kill has no memory-safety preconditions. Pid reuse before the call remains a logic risk.
-        unsafe {
-            libc::kill(proxy.pid as i32, libc::SIGTERM);
+    if !already_exited {
+        if let Err(err) = proxy.signal.terminate() {
+            logger.app(
+                LogLevel::Warn,
+                format!("send SIGTERM to sing-box failed: {err}"),
+            );
         }
     }
     let waited = tokio::time::timeout(Duration::from_secs(5), proxy.child.wait()).await;

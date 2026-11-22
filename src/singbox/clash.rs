@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::tags;
 
+pub const MAX_CONNECTION_ROWS: usize = 1000;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectionInfo {
     pub id: String,
@@ -54,6 +56,8 @@ pub struct MetricsSnapshot {
     pub upload_total: u64,
     pub download_total: u64,
     pub connections: Vec<ConnectionInfo>,
+    #[serde(default)]
+    pub total_connections: usize,
     pub selection: ProxySelection,
     pub node_delays: HashMap<String, u64>,
 }
@@ -63,6 +67,7 @@ pub struct ConnectionsSnapshot {
     pub upload_total: u64,
     pub download_total: u64,
     pub connections: Vec<ConnectionInfo>,
+    pub total_connections: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -210,14 +215,17 @@ struct ConnectionsResponse {
 
 impl ConnectionsResponse {
     fn into_snapshot(self) -> ConnectionsSnapshot {
+        let total_connections = self.connections.len();
         ConnectionsSnapshot {
             upload_total: self.upload_total,
             download_total: self.download_total,
             connections: self
                 .connections
                 .into_iter()
+                .take(MAX_CONNECTION_ROWS)
                 .map(RawConnection::into_info)
                 .collect(),
+            total_connections,
         }
     }
 }
@@ -457,6 +465,7 @@ mod tests {
         let proxies = proxies.into_snapshot();
         assert_eq!(connections.upload_total, 100);
         assert_eq!(connections.download_total, 200);
+        assert_eq!(connections.total_connections, 2);
         assert_eq!(connections.connections.len(), 2);
         assert_eq!(connections.connections[0].destination_ip, "2001:db8::1");
         let duration = connections.connections[0]
@@ -470,6 +479,18 @@ mod tests {
         assert_eq!(proxies.node_delays.get("n-1a2b3c4d"), Some(&88));
         assert!(!proxies.node_delays.contains_key("n-dead"));
         assert_eq!(proxies.node_delays.get("auto"), Some(&42));
+    }
+
+    #[test]
+    fn connection_snapshot_keeps_the_total_but_caps_the_payload() {
+        let connections: Vec<_> = (0..MAX_CONNECTION_ROWS + 3)
+            .map(|index| json!({ "id": format!("c{index}") }))
+            .collect();
+        let response: ConnectionsResponse =
+            serde_json::from_value(json!({ "connections": connections })).unwrap();
+        let snapshot = response.into_snapshot();
+        assert_eq!(snapshot.total_connections, MAX_CONNECTION_ROWS + 3);
+        assert_eq!(snapshot.connections.len(), MAX_CONNECTION_ROWS);
     }
 
     #[test]

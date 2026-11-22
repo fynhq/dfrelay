@@ -18,7 +18,9 @@ use crate::logging::{LogLevel, LogSource, LogTimestamp, Logger};
 use crate::netinfo;
 use crate::service::ServiceIdentity;
 use crate::singbox::binary::{is_newer_version, BinaryManager, BinaryMetadata};
-use crate::singbox::clash::{ClashClient, ClashError, MetricsSnapshot, ProxySelection};
+use crate::singbox::clash::{
+    ClashClient, ClashError, ConnectionsSnapshot, MetricsSnapshot, ProxiesSnapshot,
+};
 use crate::singbox::supervisor::{self, RunningProxy};
 use crate::singbox::tags;
 use crate::state::{
@@ -44,7 +46,7 @@ mod updates;
 use binary_state::BinaryState;
 use health::HealthState;
 use metrics_state::MetricsState;
-use proxy::ProxyRuntime;
+use proxy::{ProxyRuntime, StartPlan};
 use quality::QualityBook;
 use selection_state::{PendingSelection, SelectionState};
 use subscriptions::SubscriptionState;
@@ -59,6 +61,7 @@ const HEALTH_ACTIVE_WINDOW: Duration = Duration::from_secs(120);
 const HEALTH_IDLE_PROBE_INTERVAL: Duration = Duration::from_secs(120);
 const HEALTH_FAST_PROBE_GAP: Duration = Duration::from_secs(1);
 const HEALTH_PROBE_STALE: Duration = Duration::from_secs(5);
+const PROXIES_STALE: Duration = Duration::from_secs(10);
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const HEALTH_FAILURE_THRESHOLD: u32 = 3;
 const HEALTH_RECOVERY_COOLDOWN: Duration = Duration::from_secs(120);
@@ -86,7 +89,6 @@ const EVENT_QUEUE_WARN_DEPTH: usize = 64;
 const EVENT_QUEUE_LOG_INTERVAL: Duration = Duration::from_secs(300);
 pub const MAX_LIST_ROWS: usize = 200;
 pub const TOAST_TTL: Duration = Duration::from_secs(3);
-pub const VIEW_QUEUE_LIMIT: usize = 2;
 pub const MAX_CLIENTS: usize = 16;
 const MAX_HEALTH_CONNECTION_IDS: usize = 8192;
 
@@ -95,6 +97,16 @@ fn connection_id_hash(id: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut hasher);
     hasher.finish()
+}
+
+fn daemon_exit_result(panic_message: Option<&str>) -> io::Result<()> {
+    if let Some(message) = panic_message {
+        Err(io::Error::other(format!(
+            "daemon event loop panicked: {message}"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -143,6 +155,12 @@ pub enum HealthOutcome {
 pub(crate) enum RecoveryTarget {
     Auto,
     Node(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionNotice {
+    Node,
+    Auto,
 }
 
 fn health_outcome(result: &Result<u64, ClashError>) -> HealthOutcome {
@@ -229,7 +247,10 @@ pub enum AppEvent {
         task: BackgroundTask,
         message: String,
     },
-    PreflightDone(Result<(), String>),
+    PreflightDone {
+        plan: Box<StartPlan>,
+        result: Result<(), String>,
+    },
     Subscriptions {
         seq: u64,
         runtimes: Vec<SubscriptionRuntime>,
@@ -240,10 +261,24 @@ pub enum AppEvent {
     },
     DownloadDone(Result<BinaryMetadata, String>),
     InstallDone(Result<BinaryMetadata, String>),
-    ProxyStarted(Result<RunningProxy, String>),
-    ProxyStopped,
-    Metrics(MetricsSnapshot),
+    ProxyStarted {
+        epoch: u64,
+        plan: Box<StartPlan>,
+        result: Result<RunningProxy, String>,
+    },
+    ProxyStopped {
+        epoch: u64,
+    },
+    Connections {
+        epoch: u64,
+        snapshot: ConnectionsSnapshot,
+    },
+    Proxies {
+        epoch: u64,
+        snapshot: ProxiesSnapshot,
+    },
     ProxyIps {
+        epoch: u64,
         ips: Vec<String>,
         errors: Vec<String>,
     },
@@ -253,22 +288,31 @@ pub enum AppEvent {
         outcome: HealthOutcome,
     },
     RecoveryProbe {
+        epoch: u64,
         generation: u64,
         trigger: String,
         healthy: Vec<(String, u64)>,
+        had_node_failure: bool,
     },
     RecoveryApplied {
+        epoch: u64,
         target: RecoveryTarget,
         trigger: String,
         generation: u64,
     },
     NodeDelay {
+        epoch: u64,
         tag: String,
         delay: Option<u64>,
+        failed: bool,
+        clear_testing: bool,
+    },
+    NodeDelaySweepDone {
+        epoch: u64,
     },
     NodeSelected(String),
+    AutoSelected,
     SelectionApplied,
-    NodeDelaySweepDone,
     DashboardViewport(usize),
     HelpViewport(usize),
     LogDetailViewport(usize),
@@ -279,7 +323,7 @@ pub enum AppEvent {
     ClientAttached {
         id: u64,
         viewer: bool,
-        tx: mpsc::Sender<ServerMsg>,
+        tx: ipc::ClientTx,
         accept: tokio::sync::oneshot::Sender<bool>,
     },
     ClientDetached(u64),
@@ -298,7 +342,7 @@ pub enum AppEvent {
 
 struct ClientHandle {
     viewer: bool,
-    tx: mpsc::Sender<ServerMsg>,
+    tx: ipc::ClientTx,
 }
 
 pub struct App {
@@ -525,7 +569,7 @@ impl App {
         } else {
             Vec::new()
         };
-        let connection_count = self.metrics_state.metrics.connections.len();
+        let connection_count = self.metrics_state.metrics.total_connections;
         let metrics = MetricsSnapshot {
             upload_total: self.metrics_state.metrics.upload_total,
             download_total: self.metrics_state.metrics.download_total,
@@ -534,6 +578,7 @@ impl App {
             } else {
                 Vec::new()
             },
+            total_connections: connection_count,
             selection: self.metrics_state.metrics.selection.clone(),
             node_delays: HashMap::new(),
         };
@@ -566,10 +611,7 @@ impl App {
             status: self.proxy_runtime.status.clone(),
             metrics_stale: self.proxy_runtime.status == ProxyStatus::Running
                 && self.proxy_runtime.proxy.is_some()
-                && self
-                    .health
-                    .last_metrics_at
-                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(5)),
+                && !self.metrics_api_fresh(),
             nodes: if show_nodes {
                 self.metrics_state
                     .nodes
@@ -711,8 +753,10 @@ impl App {
             }
         })
         .await;
-        if let Err(payload) = loop_result {
-            let message = crate::guard::panic_message(payload.as_ref());
+        let panic_message = loop_result
+            .err()
+            .map(|payload| crate::guard::panic_message(payload.as_ref()));
+        if let Some(message) = panic_message.as_deref() {
             self.logger.app(
                 LogLevel::Error,
                 format!("daemon event loop panicked: {message}"),
@@ -723,23 +767,72 @@ impl App {
         if let Some(task) = self.proxy_runtime.metrics_task.take() {
             task.abort();
         }
-        if let Some(proxy) = self.proxy_runtime.proxy.take() {
+        if let Some(mut task) = self.proxy_runtime.start_task.take() {
+            if tokio::time::timeout(Duration::from_secs(25), &mut task)
+                .await
+                .is_err()
+            {
+                self.logger.app(
+                    LogLevel::Error,
+                    "proxy start task did not finish during shutdown; aborting",
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        let mut completed_start = None;
+        while let Ok(event) = self.events_rx.try_recv() {
+            if let AppEvent::ProxyStarted {
+                epoch,
+                result: Ok(proxy),
+                ..
+            } = event
+            {
+                if epoch == self.proxy_runtime.epoch {
+                    completed_start = Some(proxy);
+                }
+            }
+        }
+        if let Some(proxy) = self.proxy_runtime.proxy.take().or(completed_start) {
             let logger = self.logger.clone();
-            let _ = tokio::time::timeout(Duration::from_secs(6), supervisor::stop(proxy, &logger))
-                .await;
+            if tokio::time::timeout(Duration::from_secs(6), supervisor::stop(proxy, &logger))
+                .await
+                .is_err()
+            {
+                self.logger.app(
+                    LogLevel::Error,
+                    "sing-box stop timed out during daemon shutdown",
+                );
+            }
+        }
+        if let Some(mut task) = self.proxy_runtime.stop_task.take() {
+            if tokio::time::timeout(Duration::from_secs(10), &mut task)
+                .await
+                .is_err()
+            {
+                self.logger.app(
+                    LogLevel::Error,
+                    "proxy stop task did not finish during shutdown; aborting",
+                );
+                task.abort();
+                let _ = task.await;
+            }
         }
         let _ = std::fs::remove_file(&socket_path);
-        Ok(())
+        daemon_exit_result(panic_message.as_deref())
     }
 
     async fn handle_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::Key(key) => self.handle_key(key).await,
+            AppEvent::Key(key) => {
+                self.handle_key(key).await;
+                self.remember_connection_cursor();
+            }
             AppEvent::BackgroundPanic { task, message } => {
                 self.on_background_panic(task, message);
             }
-            AppEvent::PreflightDone(result) => {
-                self.finish_restart_after_preflight(result);
+            AppEvent::PreflightDone { plan, result } => {
+                self.finish_restart_after_preflight(*plan, result);
             }
             AppEvent::Subscriptions { seq, runtimes } => {
                 self.subscription_state.refreshing_subscriptions = false;
@@ -937,65 +1030,105 @@ impl App {
                     }
                 }
             }
-            AppEvent::ProxyStarted(result) => match result {
-                Ok(proxy) => {
-                    let clash = proxy.clash.clone();
-                    let ipv6 = proxy.ipv6;
-                    self.proxy_runtime.proxy = Some(proxy);
-                    self.proxy_runtime.status = ProxyStatus::Running;
-                    self.proxy_runtime.restart_in_progress = false;
-                    self.selection_state.pending_auto_start = false;
-                    self.proxy_runtime.started_at = Some(Instant::now());
-                    self.proxy_runtime.restart_at = None;
-                    self.proxy_runtime.stable_reset_at =
-                        Some(Instant::now() + Duration::from_secs(60));
-                    self.metrics_state.last_totals = None;
-                    self.metrics_state.up_speed = 0.0;
-                    self.metrics_state.down_speed = 0.0;
-                    self.ui_state.last_error = None;
-                    self.reset_health_state();
-                    self.metrics_state.proxy_ip_backoff_secs = 5;
-                    self.metrics_state.proxy_ip_failures = 0;
-                    self.start_metrics(clash.port, clash.secret.clone());
-                    self.apply_pending_selection();
-                    self.reconcile_subscription_apply_after_start();
-                    self.refresh_proxy_ips();
-                    if self.ui_state.page == Page::Nodes {
-                        self.maybe_test_node_delays(false);
+            AppEvent::ProxyStarted {
+                epoch,
+                plan,
+                result,
+            } => {
+                self.proxy_runtime.start_task = None;
+                if epoch != self.proxy_runtime.epoch {
+                    return;
+                }
+                match result {
+                    Ok(proxy) => {
+                        let clash = proxy.clash.clone();
+                        let ipv6 = proxy.ipv6;
+                        self.proxy_runtime.proxy = Some(proxy);
+                        self.proxy_runtime.status = ProxyStatus::Running;
+                        self.proxy_runtime.restart_in_progress = false;
+                        self.selection_state.pending_auto_start = false;
+                        self.proxy_runtime.started_at = Some(Instant::now());
+                        self.proxy_runtime.restart_at = None;
+                        self.proxy_runtime.stable_reset_at =
+                            Some(Instant::now() + Duration::from_secs(60));
+                        self.proxy_runtime.last_running_plan = Some(*plan);
+                        self.proxy_runtime.pending_restart_plan = None;
+                        self.proxy_runtime.restart_fallback_plan = None;
+                        self.metrics_state.last_totals = None;
+                        self.metrics_state.up_speed = 0.0;
+                        self.metrics_state.down_speed = 0.0;
+                        self.ui_state.last_error = None;
+                        self.reset_health_state();
+                        self.metrics_state.proxy_ip_backoff_secs = 5;
+                        self.metrics_state.proxy_ip_failures = 0;
+                        self.start_metrics(epoch, clash.port, clash.secret.clone());
+                        self.apply_pending_selection();
+                        self.reconcile_subscription_apply_after_start();
+                        self.refresh_proxy_ips();
+                        if self.ui_state.page == Page::Nodes {
+                            self.maybe_test_node_delays(false);
+                        }
+                        let message = if self.config.enable_ipv6 && !ipv6 {
+                            format!(
+                                "{} · {}",
+                                self.text().msg_singbox_started,
+                                self.text().msg_ipv6_fallback
+                            )
+                        } else {
+                            self.text().msg_singbox_started.to_string()
+                        };
+                        self.notify(message);
+                        self.ack_pending_start(true, "proxy started");
+                        self.logger.app(
+                            LogLevel::Info,
+                            format!("sing-box running (pid {})", self.proxy_pid()),
+                        );
                     }
-                    let message = if self.config.enable_ipv6 && !ipv6 {
-                        format!(
-                            "{} · {}",
-                            self.text().msg_singbox_started,
-                            self.text().msg_ipv6_fallback
-                        )
-                    } else {
-                        self.text().msg_singbox_started.to_string()
-                    };
-                    self.notify(message);
-                    self.ack_pending_start(true, "proxy started");
-                    self.logger.app(
-                        LogLevel::Info,
-                        format!("sing-box running (pid {})", self.proxy_pid()),
-                    );
+                    Err(err) => {
+                        self.logger
+                            .app(LogLevel::Error, format!("sing-box start failed: {err}"));
+                        let fallback = self.proxy_runtime.restart_fallback_plan.take();
+                        if let Some(fallback) =
+                            fallback.filter(|fallback| fallback != plan.as_ref())
+                        {
+                            self.proxy_runtime.status = ProxyStatus::Failed;
+                            self.proxy_runtime.restart_in_progress = true;
+                            self.logger.app(
+                                LogLevel::Warn,
+                                "new configuration failed to start; restoring the previous runtime plan",
+                            );
+                            match self.start_proxy_with_plan(fallback, None) {
+                                Ok(()) => return,
+                                Err(fallback_err) => {
+                                    self.logger.app(
+                                        LogLevel::Error,
+                                        format!(
+                                            "previous runtime plan also failed: {fallback_err}"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        self.proxy_runtime.status = ProxyStatus::Failed;
+                        self.proxy_runtime.restart_in_progress = false;
+                        self.proxy_runtime.runtime_has_auto = false;
+                        self.selection_state.pending_auto_start = false;
+                        self.proxy_runtime.proxy_node_tags.clear();
+                        self.proxy_runtime.proxy_auto_tags.clear();
+                        self.proxy_runtime.proxy_node_names.clear();
+                        self.proxy_runtime.stable_reset_at = None;
+                        self.ui_state.last_error = Some(err);
+                        let detail = self.ui_state.last_error.clone().unwrap_or_default();
+                        self.ack_pending_start(false, format!("proxy start failed: {detail}"));
+                        self.schedule_restart();
+                    }
                 }
-                Err(err) => {
-                    self.proxy_runtime.status = ProxyStatus::Failed;
-                    self.proxy_runtime.restart_in_progress = false;
-                    self.proxy_runtime.runtime_has_auto = false;
-                    self.selection_state.pending_auto_start = false;
-                    self.proxy_runtime.proxy_node_tags.clear();
-                    self.proxy_runtime.proxy_auto_tags.clear();
-                    self.proxy_runtime.proxy_node_names.clear();
-                    self.proxy_runtime.stable_reset_at = None;
-                    self.ui_state.last_error = Some(err);
-                    self.logger.app(LogLevel::Error, "sing-box start failed");
-                    let detail = self.ui_state.last_error.clone().unwrap_or_default();
-                    self.ack_pending_start(false, format!("proxy start failed: {detail}"));
-                    self.schedule_restart();
+            }
+            AppEvent::ProxyStopped { epoch } => {
+                self.proxy_runtime.stop_task = None;
+                if epoch != self.proxy_runtime.epoch {
+                    return;
                 }
-            },
-            AppEvent::ProxyStopped => {
                 self.proxy_runtime.status = ProxyStatus::Stopped;
                 self.proxy_runtime.runtime_has_auto = false;
                 self.selection_state.pending_auto_start = false;
@@ -1008,30 +1141,55 @@ impl App {
                 self.proxy_runtime.stable_reset_at = None;
                 self.ui_state.restart_confirm = false;
                 self.reset_metrics();
-                if self.proxy_runtime.restart_after_stop {
-                    self.proxy_runtime.restart_after_stop = false;
-                    if self.start_proxy().is_err() {
+                let restart_plan = if self.proxy_runtime.restart_after_stop {
+                    self.proxy_runtime.pending_restart_plan.take()
+                } else {
+                    self.proxy_runtime.pending_restart_plan = None;
+                    None
+                };
+                self.proxy_runtime.restart_after_stop = false;
+                if let Some(plan) = restart_plan {
+                    let fallback = self
+                        .proxy_runtime
+                        .last_running_plan
+                        .clone()
+                        .filter(|fallback| fallback != &plan);
+                    if let Err(err) = self.start_proxy_with_plan(plan, fallback.clone()) {
+                        self.logger.app(
+                            LogLevel::Error,
+                            format!("restart plan failed validation: {err}"),
+                        );
+                        if let Some(fallback) = fallback {
+                            if self.start_proxy_with_plan(fallback, None).is_ok() {
+                                return;
+                            }
+                        }
                         self.proxy_runtime.restart_in_progress = false;
+                        self.ui_state.last_error = Some(err);
+                        self.schedule_restart();
                     }
                 } else {
                     self.proxy_runtime.restart_in_progress = false;
                 }
             }
-            AppEvent::Metrics(mut metrics) => {
+            AppEvent::Connections { epoch, snapshot } => {
+                if epoch != self.proxy_runtime.epoch {
+                    return;
+                }
                 let now = Instant::now();
                 if let Some((up, down, at)) = self.metrics_state.last_totals {
                     let seconds = now.duration_since(at).as_secs_f64();
                     if seconds >= 0.2 {
                         self.metrics_state.up_speed =
-                            metrics.upload_total.saturating_sub(up) as f64 / seconds;
+                            snapshot.upload_total.saturating_sub(up) as f64 / seconds;
                         self.metrics_state.down_speed =
-                            metrics.download_total.saturating_sub(down) as f64 / seconds;
+                            snapshot.download_total.saturating_sub(down) as f64 / seconds;
                     }
                 }
                 self.metrics_state.last_totals =
-                    Some((metrics.upload_total, metrics.download_total, now));
-                self.health.last_metrics_at = Some(now);
-                let connection_ids = metrics
+                    Some((snapshot.upload_total, snapshot.download_total, now));
+                self.health.last_connections_at = Some(now);
+                let connection_ids = snapshot
                     .connections
                     .iter()
                     .take(MAX_HEALTH_CONNECTION_IDS)
@@ -1050,14 +1208,26 @@ impl App {
                     self.health.last_activity = Some(now);
                     self.health.fast_probe_pending = true;
                 }
-                for (tag, delay) in metrics.node_delays.drain() {
-                    self.metrics_state.node_delays.insert(tag, delay);
-                }
-                self.metrics_state.metrics = metrics;
-                if self.metrics_state.metrics.connections.is_empty() {
+                self.metrics_state.metrics.upload_total = snapshot.upload_total;
+                self.metrics_state.metrics.download_total = snapshot.download_total;
+                self.metrics_state.metrics.connections = snapshot.connections;
+                self.metrics_state.metrics.total_connections = snapshot.total_connections;
+                self.reindex_connection_selection();
+                if snapshot.total_connections == 0 {
                     self.metrics_state.idle_since.get_or_insert(now);
                 } else {
                     self.metrics_state.idle_since = None;
+                }
+            }
+            AppEvent::Proxies { epoch, snapshot } => {
+                if epoch != self.proxy_runtime.epoch {
+                    return;
+                }
+                let now = Instant::now();
+                self.health.last_proxies_at = Some(now);
+                self.metrics_state.metrics.selection = snapshot.selection;
+                for (tag, delay) in snapshot.node_delays {
+                    self.metrics_state.node_delays.insert(tag, delay);
                 }
                 self.observe_selection_change(now);
                 self.sort_nodes_if_visible();
@@ -1089,11 +1259,7 @@ impl App {
                         self.health.no_node_level = 0;
                         self.health.failures = 0;
                         self.health.failure_tag = None;
-                        if self.ui_state.last_error.as_deref()
-                            == Some(self.text().msg_health_no_nodes)
-                        {
-                            self.ui_state.last_error = None;
-                        }
+                        self.clear_health_error();
                         if recovered {
                             self.logger.app(
                                 LogLevel::Info,
@@ -1141,11 +1307,13 @@ impl App {
                 }
             }
             AppEvent::RecoveryProbe {
+                epoch,
                 generation,
                 trigger,
                 healthy,
+                had_node_failure,
             } => {
-                if generation != self.health.generation {
+                if epoch != self.proxy_runtime.epoch || generation != self.health.generation {
                     return;
                 }
                 self.health.recovery_in_flight = false;
@@ -1169,7 +1337,7 @@ impl App {
                     &healthy,
                     &self.health.quality,
                 ) else {
-                    self.on_no_healthy_nodes();
+                    self.recovery_found_no_target(had_node_failure);
                     return;
                 };
                 let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
@@ -1194,6 +1362,7 @@ impl App {
                     match select_with_generation(client, &tag, &token, generation, 0).await {
                         Some(Ok(())) => {
                             let _ = tx.send(AppEvent::RecoveryApplied {
+                                epoch,
                                 target,
                                 trigger,
                                 generation,
@@ -1207,20 +1376,23 @@ impl App {
                 });
             }
             AppEvent::RecoveryApplied {
+                epoch,
                 target,
                 trigger,
                 generation,
             } => {
-                if generation
-                    != self
-                        .selection_state
-                        .selection_generation
-                        .load(Ordering::Relaxed)
+                if epoch != self.proxy_runtime.epoch
+                    || generation
+                        != self
+                            .selection_state
+                            .selection_generation
+                            .load(Ordering::Relaxed)
                 {
                     return;
                 }
                 if self.proxy_runtime.status != ProxyStatus::Running
                     || self.proxy_runtime.proxy.is_none()
+                    || self.health_target().as_deref() != Some(trigger.as_str())
                 {
                     return;
                 }
@@ -1243,13 +1415,13 @@ impl App {
                 };
                 self.selection_state.pending_selection = None;
                 self.stats.recovery_selected = self.stats.recovery_selected.saturating_add(1);
-                self.record_auto_switch();
                 self.set_switch_reason("recovery");
                 self.health.failures = 0;
                 self.health.failure_tag = None;
                 self.health.no_node_level = 0;
                 self.health.pause_until = None;
-                self.ui_state.last_error = None;
+                self.clear_health_error();
+                self.record_auto_switch();
                 self.logger.app(
                     LogLevel::Warn,
                     format!("health failover: {trigger} -> {tag}"),
@@ -1261,9 +1433,18 @@ impl App {
                     }
                 };
                 self.notify(label);
+                if self.enforce_switch_budget_after_record() {
+                    self.logger.app(
+                        LogLevel::Warn,
+                        "health failover budget reached; automatic recovery paused",
+                    );
+                }
                 self.request_metrics_refresh();
             }
-            AppEvent::ProxyIps { ips, errors } => {
+            AppEvent::ProxyIps { epoch, ips, errors } => {
+                if epoch != self.proxy_runtime.epoch {
+                    return;
+                }
                 self.metrics_state.proxy_ips_in_flight = false;
                 if self.proxy_runtime.proxy.is_none() {
                     return;
@@ -1290,18 +1471,23 @@ impl App {
                     self.metrics_state.proxy_ip_failures = 0;
                 }
             }
-            AppEvent::NodeDelay { tag, delay } => {
-                self.metrics_state.delay_testing.remove(&tag);
+            AppEvent::NodeDelay {
+                epoch,
+                tag,
+                delay,
+                failed,
+                clear_testing,
+            } => {
+                if epoch != self.proxy_runtime.epoch {
+                    return;
+                }
+                if clear_testing {
+                    self.metrics_state.delay_testing.remove(&tag);
+                }
                 if self.proxy_runtime.proxy.is_none() {
                     return;
                 }
-                if let Some(delay) = delay.filter(|delay| *delay > 0) {
-                    self.health.quality.record_success(&tag, delay);
-                    self.metrics_state.node_delays.insert(tag, delay);
-                    self.sort_nodes_if_visible();
-                } else {
-                    self.health.quality.record_failure(&tag);
-                }
+                self.record_delay_measurement(tag, delay, failed);
             }
             AppEvent::NodeSelected(tag) => {
                 if self.metrics_state.nodes.iter().any(|node| node.tag == tag) {
@@ -1313,8 +1499,16 @@ impl App {
                     self.selection_state.preferred_node = Some(tag);
                 }
             }
+            AppEvent::AutoSelected => {
+                self.selection_state.preferred_node = None;
+                self.selection_state.pending_selection = None;
+                self.set_switch_reason("manual");
+            }
             AppEvent::SelectionApplied => self.request_metrics_refresh(),
-            AppEvent::NodeDelaySweepDone => {
+            AppEvent::NodeDelaySweepDone { epoch } => {
+                if epoch != self.proxy_runtime.epoch {
+                    return;
+                }
                 self.metrics_state.delay_sweep_running = false;
                 self.metrics_state.delay_testing.clear();
                 self.metrics_state.last_delay_sweep = Some(Instant::now());
@@ -1400,7 +1594,10 @@ impl App {
                     let _ = accept.send(false);
                 } else {
                     self.clients.insert(id, ClientHandle { viewer, tx });
-                    let _ = accept.send(true);
+                    if accept.send(true).is_err() {
+                        self.clients.remove(&id);
+                        return;
+                    }
                     if viewer {
                         self.metrics_state
                             .viewer_active
@@ -1410,6 +1607,7 @@ impl App {
                             self.ui_state.selected = self.log_count().saturating_sub(1);
                         }
                         self.sort_nodes_if_visible();
+                        self.remember_connection_cursor();
                         self.broadcast_view();
                     }
                 }
@@ -1617,9 +1815,9 @@ impl App {
         if !self.has_viewer() {
             return;
         }
-        let view = Box::new(self.view());
+        let view = Arc::new(self.view());
         for client in self.clients.values().filter(|client| client.viewer) {
-            let _ = client.tx.try_send(ServerMsg::View(view.clone()));
+            client.tx.send_view(view.clone());
         }
     }
 
@@ -1656,6 +1854,7 @@ impl App {
                 self.schedule_subscription_retry();
             }
             BackgroundTask::ProxyStart => {
+                self.proxy_runtime.start_task = None;
                 self.proxy_runtime.restart_in_progress = false;
                 self.proxy_runtime.status = ProxyStatus::Failed;
                 self.selection_state.pending_auto_start = false;
@@ -1663,9 +1862,11 @@ impl App {
                 self.schedule_restart();
             }
             BackgroundTask::ProxyStop => {
+                self.proxy_runtime.stop_task = None;
                 self.proxy_runtime.restart_in_progress = false;
                 self.proxy_runtime.status = ProxyStatus::Stopped;
                 self.proxy_runtime.restart_after_stop = false;
+                self.proxy_runtime.pending_restart_plan = None;
             }
             BackgroundTask::ProxyIps => self.metrics_state.proxy_ips_in_flight = false,
             BackgroundTask::DelaySweep => self.metrics_state.delay_sweep_running = false,
@@ -1871,6 +2072,35 @@ impl App {
         self.begin_restart()
     }
 
+    fn current_start_plan(&self) -> StartPlan {
+        StartPlan {
+            config: self.config.clone(),
+            nodes: self.metrics_state.nodes.clone(),
+            preferred: self.selection_state.preferred_node.clone(),
+            binary_identity: self.binary_identity(),
+        }
+    }
+
+    fn binary_identity(&self) -> Option<String> {
+        let path = self.binary_manager.locate()?;
+        let file = std::fs::metadata(&path).ok()?;
+        let modified = file
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let metadata = self.binary_manager.metadata();
+        let version = metadata
+            .as_ref()
+            .map(|metadata| metadata.version.clone())
+            .unwrap_or_else(|| "-".to_string());
+        let digest = metadata
+            .and_then(|metadata| metadata.sha256)
+            .unwrap_or_default();
+        Some(format!("{version}:{digest}:{}:{modified}", file.len()))
+    }
+
     fn begin_restart(&mut self) -> bool {
         if self.proxy_runtime.preflight_in_flight || self.proxy_runtime.restart_in_progress {
             return false;
@@ -1882,29 +2112,52 @@ impl App {
         self.proxy_runtime.restart_in_progress = true;
         self.notify(self.text().msg_restarting);
         let paths = self.paths.clone();
-        let config = self.config.clone();
-        let nodes = self.metrics_state.nodes.clone();
-        let preferred = self.selection_state.preferred_node.clone();
+        let plan = self.current_start_plan();
+        let preflight_plan = plan.clone();
         let tx = self.events_tx.clone();
         self.spawn_guarded(BackgroundTask::Preflight, async move {
-            let result = supervisor::preflight(&paths, &config, &nodes, preferred.as_deref())
-                .await
-                .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::PreflightDone(result));
+            let result = supervisor::preflight(
+                &paths,
+                &preflight_plan.config,
+                &preflight_plan.nodes,
+                preflight_plan.preferred.as_deref(),
+            )
+            .await
+            .map_err(|err| err.to_string());
+            let _ = tx.send(AppEvent::PreflightDone {
+                plan: Box::new(plan),
+                result,
+            });
         });
         true
     }
 
-    fn finish_restart_after_preflight(&mut self, result: Result<(), String>) {
+    fn finish_restart_after_preflight(&mut self, plan: StartPlan, result: Result<(), String>) {
         self.proxy_runtime.preflight_in_flight = false;
         match result {
             Ok(()) => {
+                if plan != self.current_start_plan() {
+                    self.proxy_runtime.restart_in_progress = false;
+                    self.logger.app(
+                        LogLevel::Info,
+                        "restart preflight invalidated by a state change; revalidating",
+                    );
+                    if self.proxy_runtime.proxy.is_some()
+                        || self.proxy_runtime.status == ProxyStatus::Running
+                    {
+                        self.begin_restart();
+                    } else {
+                        let _ = self.start_proxy();
+                    }
+                    return;
+                }
                 if self.proxy_runtime.proxy.is_some() {
                     self.proxy_runtime.restart_after_stop = true;
+                    self.proxy_runtime.pending_restart_plan = Some(plan);
                     self.stop_proxy();
                 } else {
                     self.proxy_runtime.restart_in_progress = false;
-                    let _ = self.start_proxy();
+                    let _ = self.start_proxy_with_plan(plan, None);
                 }
             }
             Err(err) => {
@@ -1920,6 +2173,15 @@ impl App {
     }
 
     fn start_proxy(&mut self) -> Result<(), String> {
+        let plan = self.current_start_plan();
+        self.start_proxy_with_plan(plan, None)
+    }
+
+    fn start_proxy_with_plan(
+        &mut self,
+        plan: StartPlan,
+        fallback: Option<StartPlan>,
+    ) -> Result<(), String> {
         if self.proxy_busy() {
             return Err(self.text().msg_proxy_busy.to_string());
         }
@@ -1928,51 +2190,58 @@ impl App {
             self.ui_state.last_error = Some(self.text().msg_singbox_missing.to_string());
             return Err(self.text().msg_singbox_missing.to_string());
         }
-        if self.metrics_state.nodes.is_empty() {
+        if plan.nodes.is_empty() {
             self.ui_state.last_error = Some(self.text().no_nodes.to_string());
             self.switch_page(Page::Subscriptions);
             return Err(self.text().no_nodes.to_string());
         }
-        let filtered = self.auto_candidate_tags();
+        let filtered = crate::selection::filter_node_tags(
+            &plan.nodes,
+            &plan.config.keywords_include,
+            &plan.config.keywords_exclude,
+        );
         if filtered.is_empty() {
             self.ui_state.last_error = Some(self.text().no_matching_nodes.to_string());
             return Err(self.text().no_matching_nodes.to_string());
         }
         self.proxy_runtime.runtime_has_auto = filtered.len() >= 2;
-        self.proxy_runtime.proxy_auto_tags = filtered.iter().cloned().collect();
-        let mut preferred = self.selection_state.preferred_node.clone();
+        self.proxy_runtime.proxy_auto_tags = filtered.into_iter().collect();
+        let mut preferred = plan.preferred.clone();
         if let Some(tag) = preferred.as_deref() {
-            if !self.metrics_state.nodes.iter().any(|node| node.tag == tag) {
+            if !plan.nodes.iter().any(|node| node.tag == tag) {
                 preferred = None;
-                self.selection_state.preferred_node = None;
-                self.selection_state.pending_selection = None;
-                self.notify(self.text().msg_preferred_missing);
             }
         }
-        self.proxy_runtime.proxy_node_tags = self
-            .metrics_state
-            .nodes
-            .iter()
-            .map(|node| node.tag.clone())
-            .collect();
-        self.proxy_runtime.proxy_node_names = self
-            .metrics_state
+        self.proxy_runtime.proxy_node_tags =
+            plan.nodes.iter().map(|node| node.tag.clone()).collect();
+        self.proxy_runtime.proxy_node_names = plan
             .nodes
             .iter()
             .map(|node| (node.tag.clone(), node.name.clone()))
             .collect();
         self.proxy_runtime.status = ProxyStatus::Starting;
+        self.proxy_runtime.epoch = self.proxy_runtime.epoch.wrapping_add(1);
+        let epoch = self.proxy_runtime.epoch;
+        self.proxy_runtime.restart_fallback_plan = fallback;
         let paths = self.paths.clone();
-        let config = self.config.clone();
-        let nodes = self.metrics_state.nodes.clone();
+        let config = plan.config.clone();
+        let nodes = plan.nodes.clone();
         let logger = self.logger.clone();
         let tx = self.events_tx.clone();
-        self.spawn_guarded(BackgroundTask::ProxyStart, async move {
+        let start_plan = plan.clone();
+        let task = self.spawn_guarded_handle(BackgroundTask::ProxyStart, async move {
             let result = supervisor::start(&paths, &config, &nodes, &logger, preferred.as_deref())
                 .await
                 .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::ProxyStarted(result));
+            let _ = tx.send(AppEvent::ProxyStarted {
+                epoch,
+                plan: Box::new(start_plan),
+                result,
+            });
         });
+        if let Some(previous) = self.proxy_runtime.start_task.replace(task) {
+            previous.abort();
+        }
         Ok(())
     }
 
@@ -2010,20 +2279,28 @@ impl App {
         self.proxy_runtime.restart_attempts = 0;
         self.proxy_runtime.stable_reset_at = None;
         self.reset_metrics();
+        self.selection_state
+            .selection_generation
+            .fetch_add(1, Ordering::Relaxed);
+        self.proxy_runtime.epoch = self.proxy_runtime.epoch.wrapping_add(1);
+        let epoch = self.proxy_runtime.epoch;
         if let Some(proxy) = self.proxy_runtime.proxy.take() {
             self.proxy_runtime.status = ProxyStatus::Stopping;
             let logger = self.logger.clone();
             let tx = self.events_tx.clone();
-            self.spawn_guarded(BackgroundTask::ProxyStop, async move {
+            let task = self.spawn_guarded_handle(BackgroundTask::ProxyStop, async move {
                 supervisor::stop(proxy, &logger).await;
-                let _ = tx.send(AppEvent::ProxyStopped);
+                let _ = tx.send(AppEvent::ProxyStopped { epoch });
             });
+            if let Some(previous) = self.proxy_runtime.stop_task.replace(task) {
+                previous.abort();
+            }
         } else {
             self.proxy_runtime.status = ProxyStatus::Stopped;
         }
     }
 
-    fn start_metrics(&mut self, port: u16, secret: String) {
+    fn start_metrics(&mut self, epoch: u64, port: u16, secret: String) {
         if let Some(task) = self.proxy_runtime.metrics_task.take() {
             task.abort();
         }
@@ -2040,16 +2317,22 @@ impl App {
         self.proxy_runtime.metrics_task = Some(self.spawn_guarded_handle(
             BackgroundTask::Metrics,
             async move {
-                let mut selection = ProxySelection::default();
-                let mut pending_node_delays = HashMap::new();
                 let mut next_proxies = Instant::now();
                 let mut last_connection_error: Option<String> = None;
                 let mut last_proxy_error: Option<String> = None;
                 loop {
-                    let connections = match client.connections().await {
+                    let mut interval = Duration::from_secs(1);
+                    match client.connections().await {
                         Ok(snapshot) => {
                             last_connection_error = None;
-                            Some(snapshot)
+                            if snapshot.total_connections == 0
+                                && !viewer_active.load(Ordering::Relaxed)
+                            {
+                                interval = IDLE_METRICS_INTERVAL;
+                            }
+                            if tx.send(AppEvent::Connections { epoch, snapshot }).is_err() {
+                                break;
+                            }
                         }
                         Err(err) => {
                             report_clash_error(
@@ -2058,17 +2341,17 @@ impl App {
                                 &mut last_connection_error,
                                 err,
                             );
-                            None
                         }
-                    };
+                    }
                     if Instant::now() >= next_proxies
                         || proxies_refresh.swap(false, Ordering::Relaxed)
                     {
                         match client.proxies().await {
                             Ok(snapshot) => {
-                                selection = snapshot.selection;
-                                pending_node_delays = snapshot.node_delays;
                                 last_proxy_error = None;
+                                if tx.send(AppEvent::Proxies { epoch, snapshot }).is_err() {
+                                    break;
+                                }
                             }
                             Err(err) => {
                                 report_clash_error(
@@ -2080,23 +2363,6 @@ impl App {
                             }
                         }
                         next_proxies = Instant::now() + PROXIES_REFRESH_INTERVAL;
-                    }
-                    let mut interval = Duration::from_secs(1);
-                    if let Some(connections) = connections {
-                        let idle = connections.connections.is_empty();
-                        let metrics = MetricsSnapshot {
-                            upload_total: connections.upload_total,
-                            download_total: connections.download_total,
-                            connections: connections.connections,
-                            selection: selection.clone(),
-                            node_delays: std::mem::take(&mut pending_node_delays),
-                        };
-                        if tx.send(AppEvent::Metrics(metrics)).is_err() {
-                            break;
-                        }
-                        if idle && !viewer_active.load(Ordering::Relaxed) {
-                            interval = IDLE_METRICS_INTERVAL;
-                        }
                     }
                     tokio::select! {
                         _ = tokio::time::sleep(interval) => {}
@@ -2113,6 +2379,7 @@ impl App {
         }
         self.metrics_state.proxy_ips_in_flight = true;
         self.metrics_state.last_proxy_ips = Instant::now();
+        let epoch = self.proxy_runtime.epoch;
         let tx = self.events_tx.clone();
         let v4_url = self.config.proxy_ip_v4_url.clone();
         let v6_url = self.config.proxy_ip_v6_url.clone();
@@ -2152,7 +2419,7 @@ impl App {
                 Ok(ip) => ips.push(format!("v6 {ip}")),
                 Err(err) => errors.push(format!("v6 {err}")),
             }
-            let _ = tx.send(AppEvent::ProxyIps { ips, errors });
+            let _ = tx.send(AppEvent::ProxyIps { epoch, ips, errors });
         });
     }
 
@@ -2161,7 +2428,7 @@ impl App {
         target: String,
         label: String,
         retry: bool,
-        emit_node_selected: bool,
+        notice: Option<SelectionNotice>,
     ) {
         let Some(proxy) = self.proxy_runtime.proxy.as_ref() else {
             return;
@@ -2177,8 +2444,14 @@ impl App {
             let retries = if retry { 19 } else { 0 };
             match select_with_generation(client, &target, &token, generation, retries).await {
                 Some(Ok(())) => {
-                    if emit_node_selected {
-                        let _ = tx.send(AppEvent::NodeSelected(target));
+                    match notice {
+                        Some(SelectionNotice::Node) => {
+                            let _ = tx.send(AppEvent::NodeSelected(target));
+                        }
+                        Some(SelectionNotice::Auto) => {
+                            let _ = tx.send(AppEvent::AutoSelected);
+                        }
+                        None => {}
                     }
                     let _ = tx.send(AppEvent::Info(label));
                     let _ = tx.send(AppEvent::SelectionApplied);
@@ -2237,14 +2510,14 @@ impl App {
         self.request_metrics_refresh();
         self.notify(format!("{}: {name}", self.text().msg_node_selected));
         let label = format!("{}: {name}", self.text().msg_node_selected);
-        self.spawn_selection_put(tag, label, false, true);
+        self.spawn_selection_put(tag, label, false, Some(SelectionNotice::Node));
     }
 
     fn apply_pending_selection(&mut self) {
         let Some(pending) = self.selection_state.pending_selection.take() else {
             return;
         };
-        let (target, label) = match pending {
+        let (target, label, notice) = match pending {
             PendingSelection::Auto => {
                 let Some(mut target) = self.auto_selection_target() else {
                     let message = self.text().no_matching_nodes.to_string();
@@ -2258,7 +2531,11 @@ impl App {
                         .cloned()
                         .unwrap_or(target);
                 }
-                (target, self.text().msg_auto_enabled.to_string())
+                (
+                    target,
+                    self.text().msg_auto_enabled.to_string(),
+                    SelectionNotice::Auto,
+                )
             }
             PendingSelection::Node(tag) => {
                 let name = self
@@ -2268,11 +2545,15 @@ impl App {
                     .find(|node| node.tag == tag)
                     .map(|node| node.name.clone())
                     .unwrap_or_else(|| tag.clone());
-                (tag, format!("{}: {name}", self.text().msg_node_selected))
+                (
+                    tag,
+                    format!("{}: {name}", self.text().msg_node_selected),
+                    SelectionNotice::Node,
+                )
             }
         };
         self.request_metrics_refresh();
-        self.spawn_selection_put(target, label, true, false);
+        self.spawn_selection_put(target, label, true, Some(notice));
     }
 
     fn test_node_delay(&mut self) {
@@ -2285,21 +2566,35 @@ impl App {
         };
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
         let tag = node.tag.clone();
-        self.metrics_state.delay_testing.insert(tag.clone());
+        if !self.metrics_state.delay_testing.insert(tag.clone()) {
+            return;
+        }
+        let epoch = self.proxy_runtime.epoch;
         let test_url = self.config.test_url.clone();
         let label = self.text().msg_node_delay;
         let tx = self.events_tx.clone();
         self.spawn_guarded(BackgroundTask::DelayTest, async move {
-            match client.delay(&tag, &test_url).await {
+            let result = client.delay(&tag, &test_url).await;
+            let failed = matches!(health_outcome(&result), HealthOutcome::Failed);
+            match result {
                 Ok(delay) => {
                     let _ = tx.send(AppEvent::NodeDelay {
+                        epoch,
                         tag: tag.clone(),
                         delay: Some(delay),
+                        failed: false,
+                        clear_testing: true,
                     });
                     let _ = tx.send(AppEvent::Info(format!("{label}: {tag} {delay} ms")));
                 }
                 Err(err) => {
-                    let _ = tx.send(AppEvent::NodeDelay { tag, delay: None });
+                    let _ = tx.send(AppEvent::NodeDelay {
+                        epoch,
+                        tag,
+                        delay: None,
+                        failed,
+                        clear_testing: true,
+                    });
                     let _ = tx.send(AppEvent::Error(err.to_string()));
                 }
             }
@@ -2307,7 +2602,10 @@ impl App {
     }
 
     fn maybe_test_node_delays(&mut self, force: bool) {
-        if self.proxy_runtime.proxy.is_none() || self.metrics_state.delay_sweep_running {
+        if self.proxy_runtime.proxy.is_none()
+            || self.metrics_state.delay_sweep_running
+            || !self.metrics_state.delay_testing.is_empty()
+        {
             return;
         }
         if !force
@@ -2335,6 +2633,7 @@ impl App {
         let client = ClashClient::new(proxy.clash.port, proxy.clash.secret.clone());
         let test_url = self.config.test_url.clone();
         let tx = self.events_tx.clone();
+        let epoch = self.proxy_runtime.epoch;
         self.metrics_state.delay_sweep_running = true;
         self.metrics_state.last_delay_sweep = Some(Instant::now());
         self.metrics_state.delay_testing = tags.iter().cloned().collect();
@@ -2345,17 +2644,24 @@ impl App {
                     let client = client.clone();
                     let test_url = test_url.clone();
                     tasks.spawn(async move {
-                        let delay = client.delay(&tag, &test_url).await.ok();
-                        (tag, delay)
+                        let result = client.delay(&tag, &test_url).await;
+                        let failed = matches!(health_outcome(&result), HealthOutcome::Failed);
+                        (tag, result.ok(), failed)
                     });
                 }
                 while let Some(result) = tasks.join_next().await {
-                    if let Ok((tag, delay)) = result {
-                        let _ = tx.send(AppEvent::NodeDelay { tag, delay });
+                    if let Ok((tag, delay, failed)) = result {
+                        let _ = tx.send(AppEvent::NodeDelay {
+                            epoch,
+                            tag,
+                            delay,
+                            failed,
+                            clear_testing: true,
+                        });
                     }
                 }
             }
-            let _ = tx.send(AppEvent::NodeDelaySweepDone);
+            let _ = tx.send(AppEvent::NodeDelaySweepDone { epoch });
         });
     }
 
@@ -2445,13 +2751,21 @@ impl App {
         if self.proxy_runtime.proxy.is_none() {
             return;
         }
-        self.selection_state.preferred_node = None;
         self.selection_state.pending_selection = None;
         self.invalidate_health_tasks();
         self.request_metrics_refresh();
-        self.set_switch_reason("manual");
         let label = self.text().msg_auto_enabled.to_string();
-        self.spawn_selection_put(target, label, false, false);
+        self.spawn_selection_put(target, label, false, Some(SelectionNotice::Auto));
+    }
+
+    fn record_delay_measurement(&mut self, tag: String, delay: Option<u64>, failed: bool) {
+        if let Some(delay) = delay.filter(|delay| *delay > 0) {
+            self.health.quality.record_success(&tag, delay);
+            self.metrics_state.node_delays.insert(tag, delay);
+            self.sort_nodes_if_visible();
+        } else if failed {
+            self.health.quality.record_failure(&tag);
+        }
     }
 
     fn reset_metrics(&mut self) {
@@ -2466,6 +2780,7 @@ impl App {
         self.metrics_state.proxy_ip_backoff_secs = 5;
         self.metrics_state.node_delays.clear();
         self.metrics_state.delay_testing.clear();
+        self.metrics_state.connection_cursor = None;
         self.metrics_state.delay_sweep_running = false;
         self.metrics_state.last_delay_sweep = None;
         self.subscription_state.pending_refresh_apply = None;

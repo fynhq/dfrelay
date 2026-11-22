@@ -13,7 +13,8 @@ pub(super) struct HealthState {
     pub(super) last_probe: Option<Instant>,
     pub(super) last_activity: Option<Instant>,
     pub(super) connection_ids: HashSet<u64>,
-    pub(super) last_metrics_at: Option<Instant>,
+    pub(super) last_connections_at: Option<Instant>,
+    pub(super) last_proxies_at: Option<Instant>,
     pub(super) recovery_in_flight: bool,
     pub(super) last_recovery: Option<Instant>,
     pub(super) pause_until: Option<Instant>,
@@ -46,6 +47,16 @@ impl App {
             .then(|| tag.to_string())
     }
 
+    pub(super) fn metrics_api_fresh(&self) -> bool {
+        self.health
+            .last_connections_at
+            .is_some_and(|at| at.elapsed() <= HEALTH_PROBE_STALE)
+            && self
+                .health
+                .last_proxies_at
+                .is_some_and(|at| at.elapsed() <= PROXIES_STALE)
+    }
+
     pub(super) fn maybe_probe_health(&mut self) {
         if self.proxy_runtime.proxy.is_none()
             || self.proxy_runtime.status != ProxyStatus::Running
@@ -60,11 +71,7 @@ impl App {
             return;
         }
         let now = Instant::now();
-        if self
-            .health
-            .last_metrics_at
-            .is_none_or(|at| at.elapsed() > HEALTH_PROBE_STALE)
-        {
+        if !self.metrics_api_fresh() {
             return;
         }
         let Some(tag) = self.health_target() else {
@@ -126,6 +133,12 @@ impl App {
         self.health.failure_tag = None;
     }
 
+    pub(super) fn clear_health_error(&mut self) {
+        if self.ui_state.last_error.as_deref() == Some(self.text().msg_health_no_nodes) {
+            self.ui_state.last_error = None;
+        }
+    }
+
     pub(super) fn probe_targets(&self) -> Vec<String> {
         let mut targets = vec![self.config.test_url.clone()];
         if !targets.iter().any(|target| target == FALLBACK_TEST_URL) {
@@ -164,7 +177,8 @@ impl App {
         self.health.last_probe = None;
         self.health.last_activity = None;
         self.health.connection_ids.clear();
-        self.health.last_metrics_at = None;
+        self.health.last_connections_at = None;
+        self.health.last_proxies_at = None;
         self.health.recovery_refresh_pending = false;
         self.metrics_state.idle_since = None;
         self.health.last_logged_selection = None;
@@ -223,6 +237,18 @@ impl App {
         ordered.into_iter().map(|node| node.tag.clone()).collect()
     }
 
+    pub(super) fn recovery_found_no_target(&mut self, had_node_failure: bool) {
+        if had_node_failure {
+            self.on_no_healthy_nodes();
+        } else {
+            self.stats.recovery_aborted = self.stats.recovery_aborted.saturating_add(1);
+            self.logger.app(
+                LogLevel::Warn,
+                "health failover paused: recovery probes were unavailable",
+            );
+        }
+    }
+
     pub(super) fn start_recovery(&mut self, trigger: String) {
         if self.health.recovery_in_flight
             || self.health.recovery_refresh_pending
@@ -257,29 +283,40 @@ impl App {
         let targets = self.probe_targets();
         let tx = self.events_tx.clone();
         let generation = self.health.generation;
+        let epoch = self.proxy_runtime.epoch;
         self.health.recovery_in_flight = true;
         self.notify(self.text().msg_health_recovering);
         self.spawn_guarded(BackgroundTask::Recovery, async move {
             let mut healthy = Vec::new();
+            let mut had_node_failure = false;
             for chunk in candidates.chunks(DELAY_TEST_CONCURRENCY) {
                 let mut tasks = JoinSet::new();
                 for tag in chunk.iter().cloned() {
                     let client = client.clone();
                     let targets = targets.clone();
                     tasks.spawn(async move {
-                        let delay = match probe_node_outcome(&client, &tag, &targets).await {
-                            HealthOutcome::Healthy(delay) => Some(delay),
-                            HealthOutcome::Failed | HealthOutcome::Unavailable => None,
-                        };
-                        (tag, delay)
+                        let (delay, failed) =
+                            match probe_node_outcome(&client, &tag, &targets).await {
+                                HealthOutcome::Healthy(delay) => (Some(delay), false),
+                                HealthOutcome::Failed => (None, true),
+                                HealthOutcome::Unavailable => (None, false),
+                            };
+                        (tag, delay, failed)
                     });
                 }
                 while let Some(result) = tasks.join_next().await {
-                    if let Ok((tag, delay)) = result {
+                    if let Ok((tag, delay, failed)) = result {
+                        had_node_failure |= failed;
                         if let Some(delay) = delay {
                             healthy.push((tag.clone(), delay));
                         }
-                        let _ = tx.send(AppEvent::NodeDelay { tag, delay });
+                        let _ = tx.send(AppEvent::NodeDelay {
+                            epoch,
+                            tag,
+                            delay,
+                            failed,
+                            clear_testing: false,
+                        });
                     }
                 }
                 if !healthy.is_empty() {
@@ -287,9 +324,11 @@ impl App {
                 }
             }
             let _ = tx.send(AppEvent::RecoveryProbe {
+                epoch,
                 generation,
                 trigger,
                 healthy,
+                had_node_failure,
             });
         });
     }
@@ -302,14 +341,7 @@ impl App {
         self.health.auto_switch_times.push_back(Instant::now());
     }
 
-    pub(super) fn switch_budget_available(&mut self) -> bool {
-        let now = Instant::now();
-        self.health
-            .auto_switch_times
-            .retain(|at| now.saturating_duration_since(*at) < AUTO_SWITCH_WINDOW);
-        if self.health.auto_switch_times.len() < AUTO_SWITCH_BUDGET {
-            return true;
-        }
+    fn pause_for_switch_budget(&mut self, now: Instant) {
         self.health.auto_switch_times.clear();
         self.health.pause_until = Some(now + AUTO_SWITCH_PAUSE);
         self.logger.app(
@@ -320,7 +352,30 @@ impl App {
             ),
         );
         self.notify(self.text().msg_health_budget_paused);
+    }
+
+    pub(super) fn switch_budget_available(&mut self) -> bool {
+        let now = Instant::now();
+        self.health
+            .auto_switch_times
+            .retain(|at| now.saturating_duration_since(*at) < AUTO_SWITCH_WINDOW);
+        if self.health.auto_switch_times.len() < AUTO_SWITCH_BUDGET {
+            return true;
+        }
+        self.pause_for_switch_budget(now);
         false
+    }
+
+    pub(super) fn enforce_switch_budget_after_record(&mut self) -> bool {
+        let now = Instant::now();
+        self.health
+            .auto_switch_times
+            .retain(|at| now.saturating_duration_since(*at) < AUTO_SWITCH_WINDOW);
+        if self.health.auto_switch_times.len() < AUTO_SWITCH_BUDGET {
+            return false;
+        }
+        self.pause_for_switch_budget(now);
+        true
     }
 
     fn selection_state(&self) -> Option<(bool, Option<String>)> {

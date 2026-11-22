@@ -2,6 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -13,6 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::{watch, Semaphore};
 
 use crate::app::{AppEvent, BackgroundTask};
 use crate::view::{DaemonStatus, View};
@@ -25,6 +27,7 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_LINE_BYTES: usize = 1024 * 1024;
+const MAX_INBOUND_MESSAGES_PER_SECOND: usize = 120;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,14 +138,63 @@ pub struct Ack {
     pub message: String,
 }
 
+#[derive(Clone)]
+pub struct ClientTx {
+    control: mpsc::UnboundedSender<ServerMsg>,
+    view: watch::Sender<Option<Arc<View>>>,
+}
+
+impl ClientTx {
+    fn new() -> (
+        Self,
+        mpsc::UnboundedReceiver<ServerMsg>,
+        watch::Receiver<Option<Arc<View>>>,
+    ) {
+        let (control, control_rx) = mpsc::unbounded_channel();
+        let (view, view_rx) = watch::channel(None);
+        (Self { control, view }, control_rx, view_rx)
+    }
+
+    pub fn try_send(&self, message: ServerMsg) -> Result<(), ()> {
+        match message {
+            ServerMsg::View(view) => {
+                self.view.send_replace(Some(Arc::from(view)));
+                Ok(())
+            }
+            message => self.control.send(message).map_err(|_| ()),
+        }
+    }
+
+    pub fn send_view(&self, view: Arc<View>) {
+        self.view.send_replace(Some(view));
+    }
+
+    #[cfg(test)]
+    fn send(&self, message: ServerMsg) -> Result<(), ()> {
+        self.try_send(message)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, mpsc::UnboundedReceiver<ServerMsg>) {
+        let (control, rx) = mpsc::unbounded_channel();
+        let (view, _) = watch::channel(None);
+        (Self { control, view }, rx)
+    }
+}
+
 pub fn spawn_listener(listener: UnixListener, events_tx: UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
+        let slots = Arc::new(Semaphore::new(crate::app::MAX_CLIENTS + 8));
         loop {
             match crate::guard::CatchUnwind::new(listener.accept()).await {
                 Ok(Ok((stream, _))) => {
+                    let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
+                        continue;
+                    };
                     let events_tx = events_tx.clone();
                     let id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if crate::guard::CatchUnwind::new(handle_client(
                             stream,
                             events_tx.clone(),
@@ -224,12 +276,13 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
         },
         _ => return,
     };
-    let (out_tx, out_rx) = mpsc::channel(crate::app::VIEW_QUEUE_LIMIT);
+    let (client_tx, control_rx, view_rx) = ClientTx::new();
     let write_events = events_tx.clone();
     tokio::spawn(async move {
         if crate::guard::CatchUnwind::new(write_client(
             write_half,
-            out_rx,
+            control_rx,
+            view_rx,
             write_events.clone(),
             id,
         ))
@@ -244,7 +297,7 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
         .send(AppEvent::ClientAttached {
             id,
             viewer,
-            tx: out_tx,
+            tx: client_tx,
             accept: accept_tx,
         })
         .is_err()
@@ -253,8 +306,13 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
     }
     match tokio::time::timeout(HELLO_TIMEOUT, accept_rx).await {
         Ok(Ok(true)) => {}
-        _ => return,
+        _ => {
+            let _ = events_tx.send(AppEvent::ClientDetached(id));
+            return;
+        }
     }
+    let mut rate_window = std::time::Instant::now();
+    let mut rate_count = 0usize;
     loop {
         let next = if viewer {
             next_line_limited(&mut reader, MAX_LINE_BYTES).await
@@ -272,6 +330,14 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
         let Ok(Some(line)) = next else {
             break;
         };
+        if rate_window.elapsed() >= Duration::from_secs(1) {
+            rate_window = std::time::Instant::now();
+            rate_count = 0;
+        }
+        if rate_count >= MAX_INBOUND_MESSAGES_PER_SECOND {
+            continue;
+        }
+        rate_count += 1;
         let Ok(message) = serde_json::from_str::<ClientMsg>(&line) else {
             continue;
         };
@@ -306,11 +372,28 @@ async fn handle_client(stream: UnixStream, events_tx: UnboundedSender<AppEvent>,
 
 async fn write_client(
     mut write: OwnedWriteHalf,
-    mut rx: mpsc::Receiver<ServerMsg>,
+    mut control: mpsc::UnboundedReceiver<ServerMsg>,
+    mut view: watch::Receiver<Option<Arc<View>>>,
     events_tx: UnboundedSender<AppEvent>,
     id: u64,
 ) {
-    while let Some(message) = rx.recv().await {
+    loop {
+        let message = tokio::select! {
+            biased;
+            message = control.recv() => match message {
+                Some(message) => message,
+                None => break,
+            },
+            changed = view.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let Some(frame) = view.borrow_and_update().as_ref().cloned() else {
+                    continue;
+                };
+                ServerMsg::View(Box::new((*frame).clone()))
+            }
+        };
         let Ok(mut line) = serde_json::to_vec(&message) else {
             continue;
         };
@@ -823,7 +906,6 @@ mod tests {
         tx.send(ServerMsg::Copy {
             text: "copied".into(),
         })
-        .await
         .unwrap();
         let line = read_line(&mut lines).await;
         assert!(matches!(
@@ -883,7 +965,7 @@ mod tests {
             _ => panic!("expected second ClientAttached"),
         };
         accept.send(false).unwrap();
-        second_tx.send(ServerMsg::Busy).await.unwrap();
+        second_tx.send(ServerMsg::Busy).unwrap();
         let line = read_line(&mut second_lines).await;
         assert!(matches!(
             serde_json::from_str::<ServerMsg>(&line).unwrap(),
@@ -893,9 +975,75 @@ mod tests {
 
         drop(first_write);
         drop(first_lines);
+        loop {
+            match next_event(&mut events).await {
+                AppEvent::ClientDetached(id) if id == first_id => break,
+                AppEvent::ClientDetached(id) => assert_eq!(id, second_id),
+                _ => panic!("expected first ClientDetached"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_messages_preserve_order_and_count() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (server_read, server_write) = server.into_split();
+        let (control, control_rx) = mpsc::unbounded_channel();
+        let (view, view_rx) = watch::channel(None);
+        let tx = ClientTx { control, view };
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let writer = tokio::spawn(write_client(
+            server_write,
+            control_rx,
+            view_rx,
+            events_tx.clone(),
+            7,
+        ));
+        let (client_read, _client_write) = client.into_split();
+        let mut lines = BufReader::new(client_read).lines();
+
+        for index in 0..64 {
+            tx.send(ServerMsg::Copy {
+                text: format!("copy-{index}"),
+            })
+            .unwrap();
+        }
+        tx.send(ServerMsg::Detach).unwrap();
+        for index in 0..64 {
+            let line = read_line(&mut lines).await;
+            assert!(matches!(
+                serde_json::from_str::<ServerMsg>(&line).unwrap(),
+                ServerMsg::Copy { text } if text == format!("copy-{index}")
+            ));
+        }
+        let line = read_line(&mut lines).await;
+        assert!(matches!(
+            serde_json::from_str::<ServerMsg>(&line).unwrap(),
+            ServerMsg::Detach
+        ));
+        drop(tx);
+        writer.await.unwrap();
+        drop(server_read);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_accept_requests_detach() {
+        let (_dir, path, mut events) = test_listener().await;
+        let stream = UnixStream::connect(&path).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let _lines = BufReader::new(read).lines();
+        hello(&mut write, true, PROTOCOL_VERSION).await;
+
+        let (id, _tx, accept) = match next_event(&mut events).await {
+            AppEvent::ClientAttached { id, tx, accept, .. } => (id, tx, accept),
+            _ => panic!("expected ClientAttached"),
+        };
+        drop(accept);
         match next_event(&mut events).await {
-            AppEvent::ClientDetached(id) => assert_eq!(id, first_id),
-            _ => panic!("expected first ClientDetached"),
+            AppEvent::ClientDetached(detached) => assert_eq!(detached, id),
+            _ => panic!("expected ClientDetached"),
         }
     }
 
@@ -938,7 +1086,6 @@ mod tests {
             current_node: Some("node".into()),
             version: "1.0.0".into(),
         })))
-        .await
         .unwrap();
         let line = read_line(&mut lines).await;
         match serde_json::from_str::<ServerMsg>(&line).unwrap() {

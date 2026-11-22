@@ -255,14 +255,16 @@ impl App {
     }
 
     pub(super) fn copy_connection_target(&mut self) {
-        let selected = self.ui_state.selected.min(
-            self.metrics_state
-                .metrics
-                .connections
-                .len()
-                .saturating_sub(1),
-        );
-        let Some(connection) = self.metrics_state.metrics.connections.get(selected) else {
+        let Some(Some(cursor)) = self.metrics_state.connection_cursor.as_ref() else {
+            return;
+        };
+        let Some(connection) = self
+            .metrics_state
+            .metrics
+            .connections
+            .iter()
+            .find(|connection| connection.id == *cursor)
+        else {
             return;
         };
         let Some(target) = connection.target() else {
@@ -270,6 +272,65 @@ impl App {
         };
         self.broadcast(ServerMsg::Copy { text: target });
         self.notify(self.text().settings_copied);
+    }
+
+    pub(super) fn remember_connection_cursor(&mut self) {
+        if self.ui_state.page != Page::Connections {
+            return;
+        }
+        self.metrics_state.connection_cursor = Some(
+            self.metrics_state
+                .metrics
+                .connections
+                .get(self.ui_state.selected)
+                .map(|connection| connection.id.clone()),
+        );
+    }
+
+    pub(super) fn reindex_connection_selection(&mut self) {
+        if self.ui_state.page != Page::Connections {
+            return;
+        }
+        match self.metrics_state.connection_cursor.clone() {
+            None => {
+                self.metrics_state.connection_cursor = Some(
+                    self.metrics_state
+                        .metrics
+                        .connections
+                        .get(self.ui_state.selected)
+                        .map(|connection| connection.id.clone()),
+                );
+            }
+            Some(Some(cursor)) => {
+                if let Some(index) = self
+                    .metrics_state
+                    .metrics
+                    .connections
+                    .iter()
+                    .position(|connection| connection.id == cursor)
+                {
+                    self.ui_state.selected = index;
+                } else {
+                    self.metrics_state.connection_cursor = Some(None);
+                    self.ui_state.selected = self.ui_state.selected.min(
+                        self.metrics_state
+                            .metrics
+                            .connections
+                            .len()
+                            .saturating_sub(1),
+                    );
+                }
+            }
+            Some(None) => {
+                self.ui_state.selected = self.ui_state.selected.min(
+                    self.metrics_state
+                        .metrics
+                        .connections
+                        .len()
+                        .saturating_sub(1),
+                );
+            }
+        }
     }
 
     pub(super) fn open_log_detail(&mut self) {
