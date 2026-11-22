@@ -1054,8 +1054,14 @@ fn setup_content_lines(
         lines.extend(setup_lines(label, value, label_width, value_width));
     }
     let muted = Style::default().fg(palette.muted());
-    lines.push(Line::from(Span::styled(text.setup_formats, muted)));
-    lines.push(Line::from(Span::styled(text.setup_checksum, muted)));
+    // Pre-wrap fixed text so one logical line equals one rendered row and the
+    // scroll offset computed from candidate lines stays accurate.
+    for chunk in wrap_display_text(text.setup_formats, inner_width) {
+        lines.push(Line::from(Span::styled(chunk, muted)));
+    }
+    for chunk in wrap_display_text(text.setup_checksum, inner_width) {
+        lines.push(Line::from(Span::styled(chunk, muted)));
+    }
     if view.setup.installing {
         lines.push(animated_status_line(
             text.setup_installing,
@@ -1081,16 +1087,20 @@ fn setup_content_lines(
             true,
         ));
     } else {
-        lines.push(Line::from(Span::styled(
-            text.setup_install_hint,
-            Style::default().fg(Color::Yellow),
-        )));
+        for chunk in wrap_display_text(text.setup_install_hint, inner_width) {
+            lines.push(Line::from(Span::styled(
+                chunk,
+                Style::default().fg(Color::Yellow),
+            )));
+        }
     }
     if let Some(message) = &view.setup.message {
-        lines.push(Line::from(Span::styled(
-            message.clone(),
-            Style::default().fg(Color::Red),
-        )));
+        for chunk in wrap_display_text(message, inner_width) {
+            lines.push(Line::from(Span::styled(
+                chunk,
+                Style::default().fg(Color::Red),
+            )));
+        }
     }
     lines.push(Line::from(""));
     let candidate_start = lines.len();
@@ -1159,7 +1169,6 @@ fn render_setup_popup(
     let title = format!("{}  {}", text.setup_title, text.setup_key_hints);
     let paragraph = Paragraph::new(lines)
         .block(titled_block(title))
-        .wrap(Wrap { trim: false })
         .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0));
     frame.render_widget(paragraph, popup);
 }
@@ -1248,6 +1257,12 @@ struct InputField<'a> {
     label_style: Style,
 }
 
+fn cursor_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn input_lines(field: InputField<'_>, width: usize) -> Vec<Line<'static>> {
     let InputField {
         marker,
@@ -1277,9 +1292,7 @@ fn input_lines(field: InputField<'_>, width: usize) -> Vec<Line<'static>> {
     chunks.push((start, chars.len()));
 
     let marker_style = field_marker_style(focused);
-    let cursor_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let caret_style = cursor_style();
     let mut caret_placed = false;
     let mut lines = Vec::new();
     for (line_index, (start, end)) in chunks.iter().copied().enumerate() {
@@ -1299,16 +1312,18 @@ fn input_lines(field: InputField<'_>, width: usize) -> Vec<Line<'static>> {
                 if !text.is_empty() {
                     spans.push(Span::styled(std::mem::take(&mut text), Style::default()));
                 }
-                spans.push(Span::styled("▏", cursor_style));
+                spans.push(Span::styled("▏", caret_style));
                 caret_placed = true;
             }
             text.push(*ch);
         }
-        if focused && !caret_placed && cursor == end {
+        // A caret at a chunk boundary belongs to the next chunk; only the final
+        // chunk may render it at its end.
+        if focused && !caret_placed && cursor == end && line_index + 1 == chunks.len() {
             if !text.is_empty() {
                 spans.push(Span::styled(std::mem::take(&mut text), Style::default()));
             }
-            spans.push(Span::styled("▏", cursor_style));
+            spans.push(Span::styled("▏", caret_style));
             caret_placed = true;
         }
         if !text.is_empty() {
@@ -1349,13 +1364,6 @@ fn popup_height(area: Rect, lines: &[Line<'static>]) -> u16 {
     u16::try_from(height).unwrap_or(u16::MAX).min(area.height)
 }
 
-fn render_popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>, width: u16) {
-    let height = popup_height(area, &lines);
-    let popup = centered_rect(area, width, height);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(popup_paragraph(title, lines), popup);
-}
-
 fn active_label_style() -> Style {
     Style::default()
         .fg(Color::Cyan)
@@ -1390,28 +1398,30 @@ fn field_marker_style(focused: bool) -> Style {
     }
 }
 
-fn push_edit_feedback(
-    lines: &mut Vec<Line<'static>>,
-    error: Option<&str>,
-    hint: &str,
-    inner_width: usize,
-    palette: Palette,
-) {
-    lines.push(Line::from(""));
-    if let Some(error) = error {
-        for chunk in wrap_display_text(error, inner_width) {
-            lines.push(Line::from(Span::styled(
-                chunk,
-                Style::default().fg(Color::Red),
-            )));
-        }
-    }
-    for chunk in wrap_display_text(hint, inner_width) {
-        lines.push(Line::from(Span::styled(
-            chunk,
-            Style::default().fg(palette.muted()),
-        )));
-    }
+fn edit_error_lines(error: Option<&str>, inner_width: usize) -> Vec<Line<'static>> {
+    let Some(error) = error else {
+        return Vec::new();
+    };
+    wrap_display_text(error, inner_width)
+        .into_iter()
+        .map(|chunk| Line::from(Span::styled(chunk, Style::default().fg(Color::Red))))
+        .collect()
+}
+
+fn edit_hint_lines(hint: &str, inner_width: usize, palette: Palette) -> Vec<Line<'static>> {
+    wrap_display_text(hint, inner_width)
+        .into_iter()
+        .map(|chunk| Line::from(Span::styled(chunk, Style::default().fg(palette.muted()))))
+        .collect()
+}
+
+fn caret_line(lines: &[Line<'static>]) -> Option<usize> {
+    let caret_style = cursor_style();
+    lines.iter().position(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref() == "▏" && span.style == caret_style)
+    })
 }
 
 fn render_overlay(frame: &mut Frame, view: &View, area: Rect, tick: u64, palette: Palette) {
@@ -1432,7 +1442,7 @@ fn render_overlay(frame: &mut Frame, view: &View, area: Rect, tick: u64, palette
 fn render_edit_form(frame: &mut Frame, text: &Text, form: &EditForm, area: Rect, palette: Palette) {
     let width = popup_width(area, 12, 44, 88);
     let inner_width = width.saturating_sub(4) as usize;
-    let mut lines = match form {
+    let body = match form {
         EditForm::Subscription(form) => subscription_form_lines(text, form, inner_width, palette),
         EditForm::Keyword(form) => keyword_form_lines(text, form, inner_width),
         EditForm::Settings(form) => settings_form_lines(text, form, inner_width, palette),
@@ -1442,8 +1452,61 @@ fn render_edit_form(frame: &mut Frame, text: &Text, form: &EditForm, area: Rect,
         EditForm::Keyword(form) => form.error.as_deref(),
         EditForm::Settings(form) => form.error.as_deref(),
     };
-    push_edit_feedback(&mut lines, error, form.hint(text), inner_width, palette);
-    render_popup(frame, area, form.title(text), lines, width);
+    let error_lines = edit_error_lines(error, inner_width);
+    let hint_lines = edit_hint_lines(form.hint(text), inner_width, palette);
+
+    let desired_height = body.len() + error_lines.len() + hint_lines.len() + 3;
+    let height = u16::try_from(desired_height)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let popup = centered_rect(area, width, height);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(popup_paragraph(form.title(text), Vec::new()), popup);
+
+    let inner = Rect {
+        x: popup.x.saturating_add(2),
+        y: popup.y.saturating_add(1),
+        width: popup.width.saturating_sub(4),
+        height: popup.height.saturating_sub(2),
+    };
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // Keep a fixed feedback block (error plus hint) at the bottom and scroll
+    // only the fields, capping the error so the hint and focus stay visible.
+    let inner_height = inner.height as usize;
+    let hint_height = hint_lines.len().min(inner_height);
+    let half_body = (inner_height / 2).max(1);
+    let min_body = body.len().min(half_body).min(inner_height);
+    let error_capacity = inner_height
+        .saturating_sub(hint_height + 1 + min_body)
+        .min(error_lines.len());
+    let feedback_height = (hint_height + 1 + error_capacity).min(inner_height);
+    let body_height = inner_height - feedback_height;
+    let focus_line = caret_line(&body).unwrap_or_else(|| body.len().saturating_sub(1));
+    let max_offset = body.len().saturating_sub(body_height.max(1));
+    let offset = focus_line
+        .saturating_sub(body_height.saturating_sub(1))
+        .min(max_offset);
+
+    let body_area = Rect {
+        height: u16::try_from(body_height).unwrap_or(u16::MAX),
+        ..inner
+    };
+    let feedback_area = Rect {
+        y: inner.y.saturating_add(body_area.height),
+        height: u16::try_from(feedback_height).unwrap_or(u16::MAX),
+        ..inner
+    };
+    let body = Paragraph::new(body).scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0));
+    frame.render_widget(body, body_area);
+    if feedback_height > 0 {
+        let mut feedback = vec![Line::from("")];
+        feedback.extend(error_lines.into_iter().take(error_capacity));
+        feedback.extend(hint_lines);
+        frame.render_widget(Paragraph::new(feedback), feedback_area);
+    }
 }
 
 fn subscription_form_lines(

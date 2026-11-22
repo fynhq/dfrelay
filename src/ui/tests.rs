@@ -5,8 +5,8 @@ use crate::config::{Config, Paths};
 use crate::i18n::Lang;
 use crate::logging::{LogLevel, LogTimestamp, Logger};
 use crate::state::{
-    settings_items, EditForm, KeywordField, KeywordForm, LineInput, Overlay, SettingsForm,
-    SettingsItem, SubscriptionForm,
+    settings_items, EditForm, KeywordField, KeywordForm, LineInput, Overlay, SettingsField,
+    SettingsForm, SettingsItem, SubscriptionForm,
 };
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -57,6 +57,20 @@ fn rendered_rows(view: &View, width: u16, height: u16) -> Vec<Vec<String>> {
         .chunks(width as usize)
         .map(|row| row.iter().map(|cell| cell.symbol().to_string()).collect())
         .collect()
+}
+
+fn assert_minimal_overlay_contains(app: &App, needles: &[&str]) {
+    let content = rendered_with_width(app, 60, 16);
+    let compact: String = content
+        .chars()
+        .filter(|ch| {
+            !ch.is_whitespace() && !matches!(ch, '│' | '┌' | '┐' | '└' | '┘' | '─' | '├' | '┤')
+        })
+        .collect();
+    for needle in needles {
+        let needle: String = needle.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(compact.contains(&needle), "missing {needle:?} in {compact}");
+    }
 }
 
 #[test]
@@ -1244,6 +1258,31 @@ async fn setup_scrolls_the_selected_candidate_into_view() {
     assert!(content.contains("cand-29"), "{content}");
 }
 
+#[tokio::test]
+async fn setup_wrapped_message_keeps_the_last_candidate_visible_at_sixty_columns() {
+    let (mut app, _dir) = test_app(Lang::En).await;
+    app.binary_state.setup.message = Some(format!("install failed: {}", "detail ".repeat(80)));
+    app.binary_state.setup.candidates = (0..30)
+        .map(|index| crate::singbox::binary::InboxCandidate {
+            path: std::path::PathBuf::from(format!("/inbox/cand-{index}")),
+            label: format!("cand-{index:02}"),
+            has_checksum: true,
+        })
+        .collect();
+    app.ui_state.overlay = Some(Overlay::Setup { selected: 29 });
+
+    let rows = rendered_rows(&app.view(), 60, 20);
+    let selected = rows
+        .iter()
+        .find(|row| row.concat().contains("cand-29"))
+        .expect("selected candidate must stay visible after a wrapped message");
+    assert!(
+        selected.iter().any(|cell| cell.as_str() == "▸"),
+        "{:?}",
+        selected.concat()
+    );
+}
+
 #[test]
 fn visible_row_range_follows_the_selection() {
     assert_eq!(visible_row_range(250, 249, 27), (223, 250));
@@ -1589,6 +1628,75 @@ fn long_url_wraps_under_its_value_column() {
         .collect();
     assert!(all.contains("https://example.com/"));
     assert!(all.matches('▏').count() == 1);
+}
+
+fn input_line_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn caret_at_an_ascii_wrap_boundary_moves_to_the_next_chunk() {
+    let input = LineInput {
+        value: "abcdef".to_string(),
+        cursor: 3,
+    };
+    let lines = input_lines(
+        InputField {
+            marker: "▸ ",
+            label: "L",
+            label_width: 1,
+            input: &input,
+            focused: true,
+            label_style: Style::default(),
+        },
+        9,
+    );
+    assert_eq!(lines.len(), 2);
+    assert!(!input_line_text(&lines[0]).contains('▏'));
+    assert_eq!(input_line_text(&lines[1]).trim_start(), "▏def");
+
+    let end = LineInput {
+        value: "abcdef".to_string(),
+        cursor: 6,
+    };
+    let lines = input_lines(
+        InputField {
+            marker: "▸ ",
+            label: "L",
+            label_width: 1,
+            input: &end,
+            focused: true,
+            label_style: Style::default(),
+        },
+        9,
+    );
+    assert!(!input_line_text(&lines[0]).contains('▏'));
+    assert_eq!(input_line_text(&lines[1]).trim_start(), "def▏");
+}
+
+#[test]
+fn caret_at_a_cjk_wrap_boundary_moves_to_the_next_chunk() {
+    let input = LineInput {
+        value: "订阅链接".to_string(),
+        cursor: 2,
+    };
+    let lines = input_lines(
+        InputField {
+            marker: "▸ ",
+            label: "L",
+            label_width: 1,
+            input: &input,
+            focused: true,
+            label_style: Style::default(),
+        },
+        10,
+    );
+    assert_eq!(lines.len(), 2);
+    assert!(!input_line_text(&lines[0]).contains('▏'));
+    assert_eq!(input_line_text(&lines[1]).trim_start(), "▏链接");
 }
 
 #[tokio::test]
@@ -2270,6 +2378,65 @@ async fn long_edit_form_feedback_does_not_clip_the_hint() {
     let content = rendered_with_width(&app, 100, 30);
     let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(compact.contains("Esc取消"), "{compact}");
+}
+
+#[tokio::test]
+async fn minimal_terminal_edit_forms_keep_focus_error_and_hint_visible() {
+    let (mut app, _dir) = test_app(Lang::En).await;
+    app.ui_state.page = Page::Settings;
+
+    let mut subscription = SubscriptionForm::new();
+    subscription.name = LineInput::new(format!("name-{}", "n".repeat(400)));
+    subscription.url = LineInput::new(format!("https://example.com/{}", "u".repeat(200)));
+    subscription.focus = 1;
+    subscription.error = Some(format!(
+        "subscription error token: {}",
+        "invalid ".repeat(40)
+    ));
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Subscription(subscription)));
+    assert_minimal_overlay_contains(
+        &app,
+        &["▏", "subscription error token", "Enter save", "Esc cancel"],
+    );
+    if let Some(Overlay::Edit(EditForm::Subscription(form))) = app.ui_state.overlay.as_mut() {
+        form.focus = 2;
+    }
+    assert_minimal_overlay_contains(
+        &app,
+        &["Enabled", "[✓]", "subscription error token", "Esc cancel"],
+    );
+
+    let mut keyword = KeywordForm::from_config(&app.config, KeywordField::Include);
+    keyword.value = LineInput::new(format!("keyword-{}-tail-marker", "k".repeat(400)));
+    keyword.error = Some("keyword error token: cannot apply these keywords".to_string());
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Keyword(keyword)));
+    assert_minimal_overlay_contains(
+        &app,
+        &[
+            "▏",
+            "tail-marker",
+            "keyword error token",
+            "Enter save",
+            "Esc cancel",
+        ],
+    );
+
+    let mut settings = SettingsForm::new(&app.config);
+    settings.username = LineInput::new(format!("user-{}", "u".repeat(400)));
+    settings.password = LineInput::new(format!("{}secret-tail", "p".repeat(80)));
+    settings.active = SettingsField::LanPassword;
+    settings.error = Some(format!("settings error token: {}", "failure ".repeat(40)));
+    app.ui_state.overlay = Some(Overlay::Edit(EditForm::Settings(settings)));
+    assert_minimal_overlay_contains(
+        &app,
+        &[
+            "▏",
+            "secret-tail",
+            "settings error token",
+            "Enter save",
+            "Esc cancel",
+        ],
+    );
 }
 
 #[tokio::test]

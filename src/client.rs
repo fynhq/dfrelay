@@ -20,6 +20,7 @@ use ratatui::{Frame, Terminal};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
+use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::i18n::Lang;
@@ -44,6 +45,11 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         version: PROTOCOL_VERSION,
     });
     tokio::spawn(write_out(write_half, out_rx));
+
+    // Missing registrations stay inert; the TUI must still open.
+    let mut sigterm = signal(SignalKind::terminate()).ok();
+    let mut sighup = signal(SignalKind::hangup()).ok();
+    let mut sigint = signal(SignalKind::interrupt()).ok();
 
     let note = {
         enable_raw_mode()?;
@@ -185,6 +191,9 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                         InputEvent::Resize => needs_draw = true,
                     }
                 }
+                _ = wait_exit_signal(&mut sigterm, &mut sighup, &mut sigint) => {
+                    break;
+                }
                 _ = tokio::time::sleep_until(animation_deadline.unwrap_or_else(Instant::now).into()), if animation_deadline.is_some() => {
                     needs_draw = true;
                     let now = Instant::now();
@@ -206,6 +215,27 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         println!("{note}");
     }
     Ok(())
+}
+
+async fn wait_exit_signal(
+    sigterm: &mut Option<Signal>,
+    sighup: &mut Option<Signal>,
+    sigint: &mut Option<Signal>,
+) {
+    tokio::select! {
+        _ = recv_signal(sigterm) => {}
+        _ = recv_signal(sighup) => {}
+        _ = recv_signal(sigint) => {}
+    }
+}
+
+async fn recv_signal(signal: &mut Option<Signal>) {
+    match signal {
+        Some(signal) => {
+            let _ = signal.recv().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 fn copy_to_clipboard(text: &str) {
