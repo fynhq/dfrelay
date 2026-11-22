@@ -11,6 +11,8 @@ const MAX_IP_RESPONSE_BYTES: usize = 64 * 1024;
 pub enum NetInfoError {
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[error("HTTP {0}")]
+    Http(u16),
     #[error("proxy response is not an IP address")]
     InvalidIp,
     #[error("invalid proxy URL: {0}")]
@@ -192,13 +194,12 @@ pub async fn fetch_proxy_ip(url: &str, proxy_url: &str) -> Result<String, NetInf
         .proxy(proxy)
         .timeout(Duration::from_secs(8))
         .build()?;
-    let mut response = client.get(url).send().await?;
-    if !response.status().is_success() {
-        return Err(NetInfoError::InvalidProxy(format!(
-            "HTTP {}",
-            response.status()
-        )));
-    }
+    let response = client.get(url).send().await?;
+    read_proxy_ip_response(response).await
+}
+
+async fn read_proxy_ip_response(mut response: reqwest::Response) -> Result<String, NetInfoError> {
+    ensure_success(response.status())?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if bytes.len().saturating_add(chunk.len()) > MAX_IP_RESPONSE_BYTES {
@@ -206,7 +207,19 @@ pub async fn fetch_proxy_ip(url: &str, proxy_url: &str) -> Result<String, NetInf
         }
         bytes.extend_from_slice(&chunk);
     }
-    let text = String::from_utf8_lossy(&bytes);
+    parse_proxy_ip(&bytes)
+}
+
+fn ensure_success(status: reqwest::StatusCode) -> Result<(), NetInfoError> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(NetInfoError::Http(status.as_u16()))
+    }
+}
+
+fn parse_proxy_ip(bytes: &[u8]) -> Result<String, NetInfoError> {
+    let text = String::from_utf8_lossy(bytes);
     let text = text.trim();
     IpAddr::from_str(text)
         .map(|ip| ip.to_string())
@@ -311,5 +324,25 @@ mod tests {
             select_local_addresses(entries, false, Platform::Linux),
             vec!["198.51.100.20 (en0)".to_string()]
         );
+    }
+
+    #[test]
+    fn non_success_status_is_an_http_error_not_an_invalid_proxy() {
+        let err = ensure_success(reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED).unwrap_err();
+        assert!(matches!(&err, NetInfoError::Http(407)), "{err}");
+        assert!(!matches!(&err, NetInfoError::InvalidProxy(_)));
+        let err = ensure_success(reqwest::StatusCode::BAD_GATEWAY).unwrap_err();
+        assert!(matches!(&err, NetInfoError::Http(502)), "{err}");
+        assert!(ensure_success(reqwest::StatusCode::NO_CONTENT).is_ok());
+    }
+
+    #[test]
+    fn parses_ip_response_bodies() {
+        assert_eq!(parse_proxy_ip(b" 203.0.113.7 \n").unwrap(), "203.0.113.7");
+        assert_eq!(parse_proxy_ip(b"2001:db8::7").unwrap(), "2001:db8::7");
+        assert!(matches!(
+            parse_proxy_ip(b"<html>"),
+            Err(NetInfoError::InvalidIp)
+        ));
     }
 }

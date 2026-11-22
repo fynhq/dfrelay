@@ -65,10 +65,19 @@ pub enum BinaryError {
     Version(String),
     #[error("no previous sing-box binary is available")]
     NoPrevious,
+    #[error("sing-box {0} is already installed")]
+    AlreadyLatest(String),
+    #[error("rollback incomplete: {0}")]
+    RollbackIncomplete(String),
     #[error("sing-box check failed: {0}")]
     Check(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[derive(Debug)]
+struct InstallOutcome {
+    previous_archive_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -141,26 +150,40 @@ impl BinaryManager {
             })?;
         let digest = asset.digest.clone().ok_or(BinaryError::ManualRequired)?;
 
+        // RELIABILITY: the cached update state can be stale; re-check against the release
+        // we actually resolved so the same version is not reinstalled or downgraded.
+        let current = if let Some(binary) = self.locate() {
+            match self.metadata().map(|metadata| metadata.version) {
+                Some(version) => Some(version),
+                None => self.version(&binary).await.ok(),
+            }
+        } else {
+            None
+        };
+        if !release_is_newer(&asset.version, current.as_deref()) {
+            let installed = current.unwrap_or_else(|| asset.version.clone());
+            logger.app(
+                LogLevel::Warn,
+                format!("sing-box {installed} is already installed; download skipped"),
+            );
+            return Err(BinaryError::AlreadyLatest(installed));
+        }
+
         let attempts = download_attempts(&clients, &config.github_mirrors, &asset.url);
 
         for (kind, client, url) in attempts {
             logger.app(LogLevel::Info, format!("download attempt {kind}: {url}"));
-            match download_and_verify(client, &url, &digest).await {
-                Ok(bytes) => match self.install_archive(&bytes, &asset, &digest, true).await {
-                    Ok(metadata) => {
-                        logger.app(
-                            LogLevel::Info,
-                            format!("installed sing-box {} from {kind}", metadata.version),
-                        );
-                        return Ok(metadata);
-                    }
-                    Err(err) => {
-                        logger.app(
-                            LogLevel::Warn,
-                            format!("install attempt {kind} failed: {err}"),
-                        );
-                    }
-                },
+            match self
+                .attempt_install(client, &url, &digest, &asset, logger)
+                .await
+            {
+                Ok(metadata) => {
+                    logger.app(
+                        LogLevel::Info,
+                        format!("installed sing-box {} from {kind}", metadata.version),
+                    );
+                    return Ok(metadata);
+                }
                 Err(err) => {
                     logger.app(
                         LogLevel::Warn,
@@ -175,6 +198,19 @@ impl BinaryManager {
             "all automatic download attempts failed; manual inbox required",
         );
         Err(BinaryError::ManualRequired)
+    }
+
+    async fn attempt_install(
+        &self,
+        client: &Client,
+        url: &str,
+        digest: &str,
+        asset: &ReleaseAsset,
+        logger: &Logger,
+    ) -> Result<BinaryMetadata, BinaryError> {
+        let bytes = download_and_verify(client, url, digest).await?;
+        self.install_archive(&bytes, asset, digest, true, logger)
+            .await
     }
 
     pub fn scan_inbox(&self) -> Result<Vec<InboxCandidate>, BinaryError> {
@@ -237,7 +273,14 @@ impl BinaryManager {
             return Err(err);
         }
         let verified = checksum.is_some();
-        self.install_temp_binary(&temp, &actual_version, path, checksum.as_deref(), verified)?;
+        self.install_temp_binary(
+            &temp,
+            &actual_version,
+            path,
+            checksum.as_deref(),
+            verified,
+            logger,
+        )?;
         logger.app(
             LogLevel::Info,
             format!(
@@ -270,43 +313,49 @@ impl BinaryManager {
         let version = self.version(&previous).await?;
         self.check_binary(&previous).await?;
 
-        let swap = self.paths.bin_dir.join("sing-box.swap");
         let current_metadata = fs::read_to_string(self.paths.binary_metadata()).ok();
+        let saved_previous_metadata =
+            fs::read_to_string(self.paths.previous_binary_metadata()).ok();
         let previous_metadata = self.previous_metadata();
         let had_current = target.exists();
 
-        let _ = fs::remove_file(&swap);
-        if had_current {
-            fs::rename(&target, &swap)?;
+        // RELIABILITY: from here on a guard restores both binaries and both metadata files
+        // when any step fails, so a partial rollback is never reported as success.
+        let mut guard = RollbackGuard {
+            target,
+            previous,
+            swap: self.paths.bin_dir.join("sing-box.swap"),
+            version_metadata: self.paths.binary_metadata(),
+            previous_metadata: self.paths.previous_binary_metadata(),
+            saved_version_metadata: current_metadata.clone(),
+            saved_previous_metadata,
+            version_metadata_written: false,
+            previous_metadata_written: false,
+            had_current,
+            phase: SwapPhase::Pending,
+            finished: false,
+        };
+        if let Err(err) = guard.swap_binaries() {
+            return Err(guard.fail(err.into()));
         }
-        if let Err(err) = fs::rename(&previous, &target) {
-            if had_current {
-                let _ = fs::rename(&swap, &target);
-            }
-            return Err(err.into());
+
+        let write_previous = match current_metadata.as_deref() {
+            Some(text) => fsutil::write_private_atomic(&guard.previous_metadata, text.as_bytes()),
+            None => remove_file_if_exists(&guard.previous_metadata),
+        };
+        if let Err(err) = write_previous {
+            return Err(guard.fail(err.into()));
         }
-        if had_current {
-            if let Err(err) = fs::rename(&swap, &previous) {
-                let _ = fs::rename(&target, &previous);
-                let _ = fs::rename(&swap, &target);
-                return Err(err.into());
-            }
-            if let Some(text) = current_metadata.as_deref() {
-                fsutil::write_private_atomic(
-                    &self.paths.previous_binary_metadata(),
-                    text.as_bytes(),
-                )?;
-            } else {
-                let _ = fs::remove_file(self.paths.previous_binary_metadata());
-            }
-        } else {
-            let _ = fs::remove_file(self.paths.previous_binary_metadata());
-        }
+        guard.previous_metadata_written = true;
 
         let metadata = previous_metadata
             .filter(|metadata| metadata.version == version)
             .unwrap_or_else(|| self.minimal_metadata(&version));
-        self.write_metadata(&metadata)?;
+        if let Err(err) = self.write_metadata(&metadata) {
+            return Err(guard.fail(err));
+        }
+        guard.version_metadata_written = true;
+        guard.finish();
         logger.app(LogLevel::Info, format!("rolled back sing-box to {version}"));
         Ok(metadata)
     }
@@ -317,6 +366,7 @@ impl BinaryManager {
         asset: &ReleaseAsset,
         digest: &str,
         verified: bool,
+        logger: &Logger,
     ) -> Result<BinaryMetadata, BinaryError> {
         let actual = sha256_hex(bytes);
         let expected = digest.trim_start_matches("sha256:");
@@ -352,6 +402,7 @@ impl BinaryManager {
             Path::new(&asset.url),
             Some(digest),
             verified,
+            logger,
         )?;
         Ok(BinaryMetadata {
             version,
@@ -423,7 +474,8 @@ impl BinaryManager {
         source: &Path,
         sha256: Option<&str>,
         verified: bool,
-    ) -> Result<(), BinaryError> {
+        logger: &Logger,
+    ) -> Result<InstallOutcome, BinaryError> {
         let target = self.paths.binary();
         let previous = self.paths.previous_binary();
         // RELIABILITY: recover a leftover swap after a crash; exec may report ETXTBSY until forked write handles close.
@@ -464,23 +516,62 @@ impl BinaryManager {
             return Err(err);
         }
 
-        if had_target {
-            let _ = fs::remove_file(&previous);
-            if fs::rename(&staging, &previous).is_ok() {
-                match current_metadata.as_deref() {
-                    Some(text) => {
-                        let _ = fsutil::write_private_atomic(
-                            &self.paths.previous_binary_metadata(),
-                            text.as_bytes(),
-                        );
-                    }
-                    None => {
-                        let _ = fs::remove_file(self.paths.previous_binary_metadata());
-                    }
-                }
-            }
+        let previous_archive_error = if had_target {
+            self.archive_previous_binary(&staging, &previous, current_metadata.as_deref())
+        } else {
+            None
+        };
+        let outcome = InstallOutcome {
+            previous_archive_error,
+        };
+        self.log_install_outcome(&outcome, version, logger);
+        Ok(outcome)
+    }
+
+    // RELIABILITY: the new current binary stays installed even when archiving the previous
+    // one fails; the older previous binary is only replaced after its archive metadata is saved.
+    fn archive_previous_binary(
+        &self,
+        staging: &Path,
+        previous: &Path,
+        current_metadata: Option<&str>,
+    ) -> Option<String> {
+        let metadata_path = self.paths.previous_binary_metadata();
+        let saved_metadata = fs::read_to_string(&metadata_path).ok();
+        let metadata_result = match current_metadata {
+            Some(text) => fsutil::write_private_atomic(&metadata_path, text.as_bytes()),
+            None => remove_file_if_exists(&metadata_path),
+        };
+        if let Err(err) = metadata_result {
+            let _ = fs::remove_file(staging);
+            return Some(format!(
+                "cannot archive the previous sing-box metadata: {err}"
+            ));
         }
-        Ok(())
+        if let Err(err) = fs::rename(staging, previous) {
+            let restored = match saved_metadata.as_deref() {
+                Some(text) => fsutil::write_private_atomic(&metadata_path, text.as_bytes()),
+                None => remove_file_if_exists(&metadata_path),
+            };
+            let _ = fs::remove_file(staging);
+            let mut message = format!("cannot archive the previous sing-box binary: {err}");
+            if let Err(restore_err) = restored {
+                message.push_str(&format!("; previous.json restore failed: {restore_err}"));
+            }
+            return Some(message);
+        }
+        None
+    }
+
+    fn log_install_outcome(&self, outcome: &InstallOutcome, version: &str, logger: &Logger) {
+        if let Some(err) = outcome.previous_archive_error.as_deref() {
+            logger.app(
+                LogLevel::Warn,
+                format!(
+                    "sing-box {version} installed, but the previous version was not archived: {err}"
+                ),
+            );
+        }
     }
 
     fn recover_interrupted_install(&self, target: &Path, previous: &Path) {
@@ -514,6 +605,155 @@ impl BinaryManager {
                 .to_string(),
             verified: false,
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwapPhase {
+    Pending,
+    CurrentStaged,
+    HalfSwapped,
+    Complete,
+}
+
+// RELIABILITY: undo a partially applied rollback so binaries and metadata never diverge.
+struct RollbackGuard {
+    target: PathBuf,
+    previous: PathBuf,
+    swap: PathBuf,
+    version_metadata: PathBuf,
+    previous_metadata: PathBuf,
+    saved_version_metadata: Option<String>,
+    saved_previous_metadata: Option<String>,
+    version_metadata_written: bool,
+    previous_metadata_written: bool,
+    had_current: bool,
+    phase: SwapPhase,
+    finished: bool,
+}
+
+impl RollbackGuard {
+    fn swap_binaries(&mut self) -> io::Result<()> {
+        let _ = fs::remove_file(&self.swap);
+        if self.had_current {
+            fs::rename(&self.target, &self.swap)?;
+            self.phase = SwapPhase::CurrentStaged;
+        }
+        fs::rename(&self.previous, &self.target)?;
+        self.phase = if self.had_current {
+            SwapPhase::HalfSwapped
+        } else {
+            SwapPhase::Complete
+        };
+        if self.had_current {
+            fs::rename(&self.swap, &self.previous)?;
+            self.phase = SwapPhase::Complete;
+        }
+        Ok(())
+    }
+
+    fn restore_metadata(&mut self) -> io::Result<()> {
+        let mut first_error = None;
+        if self.version_metadata_written {
+            match restore_metadata_file(
+                &self.version_metadata,
+                self.saved_version_metadata.as_deref(),
+            ) {
+                Ok(()) => self.version_metadata_written = false,
+                Err(err) => first_error = Some(err),
+            }
+        }
+        if self.previous_metadata_written {
+            match restore_metadata_file(
+                &self.previous_metadata,
+                self.saved_previous_metadata.as_deref(),
+            ) {
+                Ok(()) => self.previous_metadata_written = false,
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    fn restore_binaries(&mut self) -> io::Result<()> {
+        match self.phase {
+            SwapPhase::Pending => Ok(()),
+            SwapPhase::CurrentStaged => {
+                fs::rename(&self.swap, &self.target)?;
+                self.phase = SwapPhase::Pending;
+                Ok(())
+            }
+            SwapPhase::HalfSwapped => {
+                fs::rename(&self.target, &self.previous)?;
+                self.phase = SwapPhase::CurrentStaged;
+                self.restore_binaries()
+            }
+            SwapPhase::Complete if !self.had_current => {
+                fs::rename(&self.target, &self.previous)?;
+                self.phase = SwapPhase::Pending;
+                Ok(())
+            }
+            SwapPhase::Complete => {
+                fs::rename(&self.target, &self.swap)?;
+                if let Err(err) = fs::rename(&self.previous, &self.target) {
+                    let _ = fs::rename(&self.swap, &self.target);
+                    return Err(err);
+                }
+                fs::rename(&self.swap, &self.previous)?;
+                self.phase = SwapPhase::Pending;
+                Ok(())
+            }
+        }
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        self.finished = true;
+        let metadata = self.restore_metadata();
+        let binaries = self.restore_binaries();
+        metadata.and(binaries)
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+
+    fn fail(&mut self, cause: BinaryError) -> BinaryError {
+        match self.restore() {
+            Ok(()) => cause,
+            Err(restore_err) => BinaryError::RollbackIncomplete(format!(
+                "{cause}; restoring the pre-rollback state failed: {restore_err}"
+            )),
+        }
+    }
+}
+
+impl Drop for RollbackGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.restore();
+        }
+    }
+}
+
+fn restore_metadata_file(path: &Path, snapshot: Option<&str>) -> io::Result<()> {
+    match snapshot {
+        Some(text) => fsutil::write_private_atomic(path, text.as_bytes()),
+        None => remove_file_if_exists(path),
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -881,6 +1121,10 @@ pub fn is_newer_version(latest: &str, current: &str) -> bool {
     compare_versions(latest, current) == std::cmp::Ordering::Greater
 }
 
+pub(crate) fn release_is_newer(release: &str, current: Option<&str>) -> bool {
+    current.is_none_or(|current| is_newer_version(release, current))
+}
+
 fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
     let (left_numbers, left_prerelease) = version_parts(left);
     let (right_numbers, right_prerelease) = version_parts(right);
@@ -1015,6 +1259,16 @@ mod tests {
         assert!(!is_newer_version("1.14.4-alpha.13", "1.14.4"));
         assert!(!is_newer_version("1.14.4", "1.15.0"));
         assert!(!is_newer_version("1.14.4+build", "1.14.4"));
+    }
+
+    #[test]
+    fn release_is_newer_only_for_an_actual_upgrade() {
+        assert!(release_is_newer("1.15.0", None));
+        assert!(release_is_newer("1.15.0", Some("1.14.4")));
+        assert!(release_is_newer("1.15.0", Some("1.15.0-alpha.1")));
+        assert!(!release_is_newer("1.14.4", Some("1.14.4")));
+        assert!(!release_is_newer("1.14.3", Some("1.14.4")));
+        assert!(!release_is_newer("1.14.4", Some("1.15.0")));
     }
 
     #[test]
@@ -1177,11 +1431,13 @@ mod tests {
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
         fs::write(paths.binary(), b"v1").unwrap();
         fs::create_dir(paths.binary_metadata()).unwrap();
 
         let temp = manager.write_temp_binary(b"v2").unwrap();
-        let result = manager.install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true);
+        let result =
+            manager.install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true, &logger);
 
         assert!(result.is_err());
         assert_eq!(fs::read(paths.binary()).unwrap(), b"v1");
@@ -1224,12 +1480,13 @@ mod tests {
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
         fs::write(paths.binary(), b"v1").unwrap();
         fs::write(paths.bin_dir.join("sing-box.swap"), b"v0").unwrap();
 
         let temp = manager.write_temp_binary(b"v2").unwrap();
         manager
-            .install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true)
+            .install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true, &logger)
             .unwrap();
 
         assert_eq!(fs::read(paths.binary()).unwrap(), b"v2");
@@ -1251,18 +1508,19 @@ mod tests {
         };
         paths.ensure().unwrap();
         let manager = BinaryManager::new(paths.clone());
+        let logger = Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap();
         fs::write(paths.binary(), b"v1").unwrap();
 
         let temp = manager.write_temp_binary(b"v2").unwrap();
         manager
-            .install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true)
+            .install_temp_binary(&temp, "1.15.0", Path::new("test"), None, true, &logger)
             .unwrap();
         assert_eq!(fs::read(paths.previous_binary()).unwrap(), b"v1");
         assert_eq!(fs::read(paths.binary()).unwrap(), b"v2");
 
         let temp = manager.write_temp_binary(b"v3").unwrap();
         manager
-            .install_temp_binary(&temp, "1.16.0", Path::new("test"), None, true)
+            .install_temp_binary(&temp, "1.16.0", Path::new("test"), None, true, &logger)
             .unwrap();
         assert_eq!(fs::read(paths.previous_binary()).unwrap(), b"v2");
         assert_eq!(fs::read(paths.binary()).unwrap(), b"v3");
@@ -1287,6 +1545,89 @@ mod tests {
             installed_at: "2026-11-01 00:00:00".to_string(),
             verified: true,
         }
+    }
+
+    fn test_paths(dir: &TempDir) -> Paths {
+        Paths {
+            config_file: dir.path().join("config.toml"),
+            data_dir: dir.path().to_path_buf(),
+            bin_dir: dir.path().join("bin"),
+            cache_dir: dir.path().join("cache"),
+            runtime_dir: dir.path().join("runtime"),
+            logs_dir: dir.path().join("logs"),
+            inbox_dir: dir.path().join("inbox"),
+        }
+    }
+
+    fn test_logger(paths: &Paths) -> Logger {
+        Logger::new(&paths.logs_dir, LogLevel::Info, LogLevel::Info).unwrap()
+    }
+
+    #[tokio::test]
+    async fn failed_previous_archive_keeps_the_new_current_online() {
+        let dir = TempDir::new().unwrap();
+        let paths = test_paths(&dir);
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        let logger = test_logger(&paths);
+        fs::write(paths.binary(), b"v1").unwrap();
+        fs::write(
+            paths.binary_metadata(),
+            serde_json::to_string(&test_metadata("1.14.4")).unwrap(),
+        )
+        .unwrap();
+        // A directory at the archive path makes the staging rename fail.
+        fs::create_dir(paths.previous_binary()).unwrap();
+        let script = fake_binary_script("1.15.0");
+        let bytes = zip_bytes(&[("sing-box", script.as_bytes(), None)]);
+        let archive = paths.inbox_dir.join("sing-box-1.15.0.zip");
+        fs::write(&archive, bytes).unwrap();
+
+        let metadata = manager.install_from_inbox(&archive, &logger).await.unwrap();
+
+        assert_eq!(metadata.version, "1.15.0");
+        assert_eq!(manager.version(&paths.binary()).await.unwrap(), "1.15.0");
+        assert_eq!(manager.metadata().unwrap().version, "1.15.0");
+        assert!(paths.previous_binary().is_dir());
+        assert!(logger.recent(20).iter().any(|line| {
+            line.level == LogLevel::Warn
+                && line.message.contains("was not archived")
+                && line.message.contains("previous sing-box binary")
+        }));
+    }
+
+    #[tokio::test]
+    async fn failed_previous_metadata_write_keeps_the_older_previous_binary() {
+        let dir = TempDir::new().unwrap();
+        let paths = test_paths(&dir);
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        let logger = test_logger(&paths);
+        fs::write(paths.binary(), b"v1").unwrap();
+        fs::write(paths.previous_binary(), b"v0").unwrap();
+        fs::write(
+            paths.binary_metadata(),
+            serde_json::to_string(&test_metadata("1.14.4")).unwrap(),
+        )
+        .unwrap();
+        // A directory at previous.json makes the metadata write fail before the binary rename.
+        fs::create_dir(paths.previous_binary_metadata()).unwrap();
+        let script = fake_binary_script("1.15.0");
+        let bytes = zip_bytes(&[("sing-box", script.as_bytes(), None)]);
+        let archive = paths.inbox_dir.join("sing-box-1.15.0.zip");
+        fs::write(&archive, bytes).unwrap();
+
+        let metadata = manager.install_from_inbox(&archive, &logger).await.unwrap();
+
+        assert_eq!(metadata.version, "1.15.0");
+        assert_eq!(manager.version(&paths.binary()).await.unwrap(), "1.15.0");
+        assert_eq!(fs::read(paths.previous_binary()).unwrap(), b"v0");
+        assert!(paths.previous_binary_metadata().is_dir());
+        assert!(logger.recent(20).iter().any(|line| {
+            line.level == LogLevel::Warn
+                && line.message.contains("was not archived")
+                && line.message.contains("previous sing-box metadata")
+        }));
     }
 
     #[tokio::test]
@@ -1331,6 +1672,62 @@ mod tests {
         assert_eq!(metadata.version, "1.15.0");
         assert_eq!(manager.metadata().unwrap().version, "1.15.0");
         assert_eq!(manager.previous_metadata().unwrap().version, "1.14.4");
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_binaries_when_previous_metadata_write_fails() {
+        let dir = TempDir::new().unwrap();
+        let paths = test_paths(&dir);
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        let logger = test_logger(&paths);
+        write_fake_binary(&paths.binary(), "1.15.0");
+        write_fake_binary(&paths.previous_binary(), "1.14.4");
+        fs::write(
+            paths.binary_metadata(),
+            serde_json::to_string(&test_metadata("1.15.0")).unwrap(),
+        )
+        .unwrap();
+        fs::create_dir(paths.previous_binary_metadata()).unwrap();
+
+        let err = manager.rollback(&logger).await.unwrap_err();
+        assert!(matches!(err, BinaryError::Io(_)));
+        assert_eq!(manager.version(&paths.binary()).await.unwrap(), "1.15.0");
+        assert_eq!(
+            manager.version(&paths.previous_binary()).await.unwrap(),
+            "1.14.4"
+        );
+        assert_eq!(manager.metadata().unwrap().version, "1.15.0");
+        assert!(paths.previous_binary_metadata().is_dir());
+        assert!(!paths.bin_dir.join("sing-box.swap").exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_metadata_when_version_metadata_write_fails() {
+        let dir = TempDir::new().unwrap();
+        let paths = test_paths(&dir);
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(paths.clone());
+        let logger = test_logger(&paths);
+        write_fake_binary(&paths.binary(), "1.15.0");
+        write_fake_binary(&paths.previous_binary(), "1.14.4");
+        let saved_previous_metadata = serde_json::to_string(&test_metadata("1.14.4")).unwrap();
+        fs::write(paths.previous_binary_metadata(), &saved_previous_metadata).unwrap();
+        fs::create_dir(paths.binary_metadata()).unwrap();
+
+        let err = manager.rollback(&logger).await.unwrap_err();
+        assert!(matches!(err, BinaryError::Io(_)));
+        assert_eq!(manager.version(&paths.binary()).await.unwrap(), "1.15.0");
+        assert_eq!(
+            manager.version(&paths.previous_binary()).await.unwrap(),
+            "1.14.4"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.previous_binary_metadata()).unwrap(),
+            saved_previous_metadata
+        );
+        assert!(paths.binary_metadata().is_dir());
+        assert!(!paths.bin_dir.join("sing-box.swap").exists());
     }
 
     #[tokio::test]

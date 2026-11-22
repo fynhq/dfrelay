@@ -41,7 +41,7 @@ pub(crate) fn is_go_duration(value: &str) -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub language: Lang,
@@ -104,7 +104,8 @@ impl Config {
                 Ok(config) => config,
                 Err(err) => {
                     warnings.push(format!(
-                        "parse config failed: {err}; moved invalid file to {} and using defaults",
+                        "parse config failed: {}; moved invalid file to {} and using defaults",
+                        toml_error_summary(&err, &text),
                         backup_invalid_config(path)
                             .map(|backup| backup.display().to_string())
                             .unwrap_or_else(|| "(backup failed)".to_string())
@@ -427,6 +428,44 @@ fn backup_invalid_config(path: &Path) -> Option<PathBuf> {
     Some(backup)
 }
 
+// SECURITY: never echo toml::de::Error's Display or message here; both can contain the
+// offending source line or scalar value (for example a secret). Only the category and
+// position are reported.
+fn toml_error_summary(err: &toml::de::Error, source: &str) -> String {
+    let category = toml_error_category(err.message());
+    match err.span() {
+        Some(span) => {
+            let (line, column) = line_column(source, span.start);
+            format!("{category} at line {line}, column {column}")
+        }
+        None => category.to_string(),
+    }
+}
+
+fn toml_error_category(message: &str) -> &'static str {
+    let message = message.to_ascii_lowercase();
+    if message.contains("duplicate") {
+        "duplicate key"
+    } else if message.contains("missing field") {
+        "missing field"
+    } else if message.contains("invalid type") || message.contains("invalid value") {
+        "type mismatch"
+    } else {
+        "syntax error"
+    }
+}
+
+fn line_column(source: &str, offset: usize) -> (usize, usize) {
+    let prefix = source.get(..offset.min(source.len())).unwrap_or(source);
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit('\n')
+        .next()
+        .map(|tail| tail.chars().count() + 1)
+        .unwrap_or(1);
+    (line, column)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::field_reassign_with_default)]
@@ -581,6 +620,44 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|warning| warning.contains("moved invalid file")));
+    }
+
+    #[test]
+    fn malformed_config_warnings_do_not_leak_scalar_secrets() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "lan_password = \"FAKE-SECRET-TOKEN-123\"\nport = \"FAKE-SECRET-TOKEN-456\"\n",
+        )
+        .unwrap();
+
+        let (config, warnings) = Config::load_or_default(&path);
+        assert_eq!(config.port, DEFAULT_PORT);
+        let joined = warnings.join("\n");
+        assert!(!joined.contains("FAKE-SECRET"), "{joined}");
+        assert!(
+            joined.contains("type mismatch") || joined.contains("syntax error"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn syntax_error_warnings_do_not_include_the_source_line() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "lan_password = \"FAKE-SECRET-TOKEN-123\"\nthis is not toml [[[\n",
+        )
+        .unwrap();
+
+        let (_, warnings) = Config::load_or_default(&path);
+        let joined = warnings.join("\n");
+        assert!(!joined.contains("FAKE-SECRET"), "{joined}");
+        assert!(!joined.contains("this is not toml"), "{joined}");
+        assert!(joined.contains("syntax error"), "{joined}");
+        assert!(joined.contains("line 2"), "{joined}");
     }
 
     #[test]

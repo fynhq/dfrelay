@@ -1,4 +1,10 @@
 use super::*;
+use crate::singbox::binary::is_newer_version;
+
+// Only download when no binary is installed or the resolved release is strictly newer.
+pub(super) fn download_needed(current: Option<&str>, latest: Option<&str>) -> bool {
+    current.is_none_or(|current| latest.is_some_and(|latest| is_newer_version(latest, current)))
+}
 
 impl App {
     pub(super) fn refresh_previous_binary_state(&mut self) {
@@ -82,6 +88,20 @@ impl App {
             self.notify(self.text().setup_busy);
             return;
         }
+        let current = if self.paths.binary().is_file() {
+            self.binary_state.binary_version.clone()
+        } else {
+            None
+        };
+        let latest = self.binary_state.latest_binary_version.as_deref();
+        if !download_needed(current.as_deref(), latest) {
+            self.notify(format!(
+                "{} {}",
+                self.text().setup_current_version,
+                current.as_deref().unwrap_or_default()
+            ));
+            return;
+        }
         self.binary_state.setup.downloading = true;
         self.binary_state.setup.message = None;
         let config = self.config.clone();
@@ -133,5 +153,25 @@ impl App {
                 .map_err(|err| err.to_string());
             let _ = tx.send(AppEvent::InstallDone(result));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::download_needed;
+
+    #[test]
+    fn download_is_allowed_without_a_current_version_or_for_a_newer_release() {
+        assert!(download_needed(None, None));
+        assert!(download_needed(None, Some("1.14.4")));
+        assert!(download_needed(Some("1.14.4"), Some("1.15.0")));
+        assert!(download_needed(Some("1.15.0-alpha.1"), Some("1.15.0")));
+    }
+
+    #[test]
+    fn download_is_blocked_for_the_same_or_an_older_release() {
+        assert!(!download_needed(Some("1.15.0"), Some("1.15.0")));
+        assert!(!download_needed(Some("1.15.0"), Some("1.14.4")));
+        assert!(!download_needed(Some("1.15.0"), None));
     }
 }

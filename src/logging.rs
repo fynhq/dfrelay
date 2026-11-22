@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use jiff::civil::Date;
 use jiff::{Span, ZonedDateTime};
@@ -13,6 +14,7 @@ use crate::fsutil;
 
 const MAX_BUFFER_LINES: usize = 2000;
 const RETENTION_DAYS: i64 = 7;
+const LOG_FAILURE_WARNING_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -302,13 +304,49 @@ fn level_token(token: &str) -> Option<LogLevel> {
     }
 }
 
+type LogFile = BufWriter<Box<dyn Write + Send>>;
+
 struct Inner {
     dir: PathBuf,
     date: String,
-    file: Option<BufWriter<File>>,
+    file: Option<LogFile>,
     lines: VecDeque<LogLine>,
     app_level: LogLevel,
     singbox_level: LogLevel,
+    last_warning: Option<Instant>,
+    suppressed_warnings: u64,
+}
+
+impl Inner {
+    // RELIABILITY: append a plain ASCII warning directly to the ring buffer; this never
+    // calls Logger::log and never panics when the log file itself is failing.
+    fn warn_internal(&mut self, message: &str) {
+        let now = Instant::now();
+        let suppressed_recently = self
+            .last_warning
+            .is_some_and(|last| now.saturating_duration_since(last) < LOG_FAILURE_WARNING_INTERVAL);
+        if suppressed_recently {
+            self.suppressed_warnings = self.suppressed_warnings.saturating_add(1);
+            return;
+        }
+        self.last_warning = Some(now);
+        let suppressed = std::mem::take(&mut self.suppressed_warnings);
+        let mut text = ascii_safe(message);
+        if suppressed > 0 {
+            text = format!("{text} ({suppressed} similar warnings suppressed)");
+        }
+        self.lines.push_back(LogLine {
+            timestamp: ZonedDateTime::now()
+                .strftime("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string(),
+            level: LogLevel::Warn,
+            component: Component::App,
+            message: text,
+        });
+        while self.lines.len() > MAX_BUFFER_LINES {
+            self.lines.pop_front();
+        }
+    }
 }
 
 impl Drop for Inner {
@@ -334,6 +372,8 @@ impl Logger {
             lines: VecDeque::new(),
             app_level,
             singbox_level,
+            last_warning: None,
+            suppressed_warnings: 0,
         };
         let logger = Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -367,13 +407,22 @@ impl Logger {
         let now = ZonedDateTime::now();
         let date = now.date().to_string();
         if date != inner.date || inner.file.is_none() {
-            if let Some(file) = inner.file.as_mut() {
-                let _ = file.flush();
+            if let Some(mut file) = inner.file.take() {
+                let flush_result = file.flush();
+                if let Err(err) = flush_result {
+                    inner.warn_internal(&format!("log file flush failed ({:?})", err.kind()));
+                }
             }
             inner.date = date;
-            inner.file = open_log_file(&inner.dir, &inner.date)
-                .map(BufWriter::new)
-                .ok();
+            match open_log_file(&inner.dir, &inner.date) {
+                Ok(file) => {
+                    let writer: Box<dyn Write + Send> = Box::new(file);
+                    inner.file = Some(BufWriter::new(writer));
+                }
+                Err(err) => {
+                    inner.warn_internal(&format!("log file open failed ({:?})", err.kind()));
+                }
+            }
             drop(inner);
             self.cleanup_old();
             inner = match self.inner.lock() {
@@ -390,18 +439,13 @@ impl Logger {
             message: crate::text::sanitize_owned(message),
         };
 
-        if let Some(file) = inner.file.as_mut() {
-            let _ = writeln!(
-                file,
-                "{} [{}] [{}] {}",
-                line.timestamp,
-                line.level.label(),
-                line.component.label(),
-                line.message
-            );
-            if level <= LogLevel::Warn {
-                let _ = file.flush();
-            }
+        let write_result = match inner.file.as_mut() {
+            Some(file) => write_log_line(file, &line, level <= LogLevel::Warn),
+            None => Ok(()),
+        };
+        if let Err(err) = write_result {
+            inner.file = None;
+            inner.warn_internal(&format!("log file write failed ({:?})", err.kind()));
         }
         inner.lines.push_back(line);
         while inner.lines.len() > MAX_BUFFER_LINES {
@@ -468,8 +512,13 @@ impl Logger {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(file) = inner.file.as_mut() {
-            let _ = file.flush();
+        let result = match inner.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        };
+        if let Err(err) = result {
+            inner.file = None;
+            inner.warn_internal(&format!("log file flush failed ({:?})", err.kind()));
         }
     }
 
@@ -503,10 +552,24 @@ impl Logger {
         else {
             return;
         };
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                self.internal_warning(&format!("log cleanup read failed ({:?})", err.kind()));
+                return;
+            }
         };
-        for entry in entries.flatten() {
+        let mut warning = None;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warning.get_or_insert_with(|| {
+                        format!("log cleanup entry failed ({:?})", err.kind())
+                    });
+                    continue;
+                }
+            };
             let name = entry.file_name();
             let Some(name) = name.to_str() else {
                 continue;
@@ -521,14 +584,57 @@ impl Logger {
                 continue;
             };
             if date < cutoff {
-                let _ = fs::remove_file(entry.path());
+                if let Err(err) = fs::remove_file(entry.path()) {
+                    warning.get_or_insert_with(|| {
+                        format!("log cleanup remove failed ({:?})", err.kind())
+                    });
+                }
             }
         }
+        if let Some(warning) = warning {
+            self.internal_warning(&warning);
+        }
+    }
+
+    fn internal_warning(&self, message: &str) {
+        let mut inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.warn_internal(message);
     }
 }
 
 fn today() -> String {
     ZonedDateTime::now().date().to_string()
+}
+
+fn ascii_safe(message: &str) -> String {
+    message
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_graphic() || ch == ' ' {
+                ch
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
+fn write_log_line(file: &mut LogFile, line: &LogLine, flush: bool) -> std::io::Result<()> {
+    writeln!(
+        file,
+        "{} [{}] [{}] {}",
+        line.timestamp,
+        line.level.label(),
+        line.component.label(),
+        line.message
+    )?;
+    if flush {
+        file.flush()?;
+    }
+    Ok(())
 }
 
 fn open_log_file(dir: &Path, date: &str) -> std::io::Result<File> {
@@ -716,5 +822,116 @@ mod tests {
             assert_eq!(parsed.0, level, "{line}");
             assert_eq!(parsed.1, message, "{line}");
         }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("injected flush failure"))
+        }
+    }
+
+    fn inject_file(logger: &Logger, writer: impl Write + Send + 'static) {
+        let mut inner = logger.inner.lock().unwrap();
+        inner.date = today();
+        let writer: Box<dyn Write + Send> = Box::new(writer);
+        inner.file = Some(BufWriter::new(writer));
+    }
+
+    #[test]
+    fn write_failures_are_reported_in_the_buffer() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
+        inject_file(&logger, FailingWriter);
+        // Exceed the BufWriter capacity so the injected write error surfaces immediately.
+        logger.app(LogLevel::Info, "x".repeat(16 * 1024));
+
+        let warning = logger
+            .recent(10)
+            .into_iter()
+            .find(|line| line.level == LogLevel::Warn)
+            .expect("warning line");
+        assert!(warning.message.contains("log file write failed"));
+        assert!(warning
+            .message
+            .chars()
+            .all(|ch| ch.is_ascii_graphic() || ch == ' '));
+    }
+
+    #[test]
+    fn flush_failures_are_reported_in_the_buffer() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
+        inject_file(&logger, FailingWriter);
+        logger.flush();
+
+        let warning = logger
+            .recent(10)
+            .into_iter()
+            .find(|line| line.level == LogLevel::Warn)
+            .expect("warning line");
+        assert!(warning.message.contains("log file flush failed"));
+    }
+
+    #[test]
+    fn cleanup_failures_are_reported_in_the_buffer() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        logger.inner.lock().unwrap().dir = blocked;
+        logger.cleanup_old();
+
+        let warning = logger
+            .recent(10)
+            .into_iter()
+            .find(|line| line.level == LogLevel::Warn)
+            .expect("warning line");
+        assert!(warning.message.contains("log cleanup read failed"));
+    }
+
+    #[test]
+    fn open_failures_are_reported_and_rate_limited() {
+        let dir = TempDir::new().unwrap();
+        let logger = Logger::new(dir.path(), LogLevel::Info, LogLevel::Info).unwrap();
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        logger.inner.lock().unwrap().dir = blocked;
+
+        logger.app(LogLevel::Info, "one");
+        logger.app(LogLevel::Info, "two");
+        logger.app(LogLevel::Info, "three");
+        let warnings: Vec<_> = logger
+            .recent(10)
+            .into_iter()
+            .filter(|line| line.level == LogLevel::Warn)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].message.contains("log file open failed"));
+
+        logger.inner.lock().unwrap().last_warning = None;
+        logger.app(LogLevel::Info, "four");
+        let warnings: Vec<_> = logger
+            .recent(10)
+            .into_iter()
+            .filter(|line| line.level == LogLevel::Warn)
+            .collect();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[1].message.contains("similar warnings suppressed"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn failure_warning_text_is_ascii_safe() {
+        let text = ascii_safe("bad \u{1b}[31m路径\nline");
+        assert!(text.chars().all(|ch| ch.is_ascii_graphic() || ch == ' '));
+        assert!(!text.contains('\x1b'));
     }
 }

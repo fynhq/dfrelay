@@ -219,8 +219,13 @@ system-wide LaunchDaemon in `/Library/LaunchDaemons` is not controlled by
   traffic encryption.
 - Private, link-local, ULA, and local-only targets bypass the proxy by default.
 - Subscription URLs and node credentials are treated as secrets; configuration,
-  cache, and logs use private permissions. DFRelay does not change system DNS or
-  configure a system proxy.
+  cache, and logs use private permissions. Configuration parse errors report only
+  the category and position, never the source line. DFRelay does not change system
+  DNS or configure a system proxy.
+- The daemon periodically requests a third-party IP echo endpoint through the
+  local proxy to display the exit IP on startup, then every few minutes. The
+  endpoint is configurable in `config.toml`; the lookup cannot currently be
+  disabled.
 
 ## Third-party software
 
@@ -434,8 +439,10 @@ DFRelay 自动控制。
 - 代理默认只监听回环；局域网访问需显式开启，开启后监听 IPv4 `0.0.0.0`。同时设置
   局域网用户名和密码后启用 HTTP/SOCKS 认证；认证只做访问控制，不加密流量。
 - 私有、链路本地、ULA 等目标默认直连。
-- 订阅 URL 与节点凭据按密钥处理；配置、缓存、日志使用私有权限。DFRelay 不修改系统
-  DNS，也不自动设置系统代理。
+- 订阅 URL 与节点凭据按密钥处理；配置、缓存、日志使用私有权限。配置解析错误只报告
+  类别与位置，不记录源码行。DFRelay 不修改系统 DNS，也不自动设置系统代理。
+- daemon 会经本地代理定期请求第三方 IP 回显服务，用于启动时及之后每隔数分钟显示出口
+  IP；回显地址可在 `config.toml` 修改，当前不能关闭查询。
 
 ## 第三方软件
 

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +8,10 @@ use crate::fsutil;
 
 const MARKER_FILE: &str = "service.json";
 const MARKER_VERSION: u32 = 1;
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+const SERVICE_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -401,10 +406,9 @@ fn parse_launchd_state(text: &str) -> (bool, Option<u32>) {
 #[cfg(target_os = "macos")]
 fn probe_launchd(identity: &ServiceIdentity) -> Result<ProbeState, ServiceError> {
     let job = format!("gui/{}/{}", identity.uid, identity.unit);
-    let output = Command::new("/bin/launchctl")
-        .arg("print")
-        .arg(&job)
-        .output()
+    let mut command = Command::new("/bin/launchctl");
+    command.arg("print").arg(&job);
+    let output = run_output_with_timeout(&mut command, SERVICE_PROBE_TIMEOUT)
         .map_err(|err| ServiceError::Probe(format!("run launchctl print failed: {err}")))?;
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout);
@@ -592,7 +596,8 @@ fn systemctl_path() -> Result<PathBuf, ServiceError> {
 #[cfg(target_os = "linux")]
 fn probe_systemd(identity: &ServiceIdentity) -> Result<ProbeState, ServiceError> {
     let systemctl = systemctl_path()?;
-    let output = Command::new(systemctl)
+    let mut command = Command::new(systemctl);
+    command
         .args([
             "--user",
             "show",
@@ -601,8 +606,8 @@ fn probe_systemd(identity: &ServiceIdentity) -> Result<ProbeState, ServiceError>
             "--property=ActiveState",
             "--property=MainPID",
         ])
-        .arg(&identity.unit)
-        .output()
+        .arg(&identity.unit);
+    let output = run_output_with_timeout(&mut command, SERVICE_PROBE_TIMEOUT)
         .map_err(|err| ServiceError::Probe(format!("run systemctl show failed: {err}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -700,11 +705,40 @@ fn run_systemctl(identity: &ServiceIdentity, verb: &str) -> Result<(), ServiceEr
     run_command(command, &format!("systemctl --user {verb}"))
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn run_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child.wait_with_output().map_err(|err| err.to_string());
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("timed out after {}s", timeout.as_secs()));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err.to_string());
+            }
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_command(mut command: Command, label: &str) -> Result<(), ServiceError> {
-    let output = command
-        .output()
-        .map_err(|err| ServiceError::Command(format!("{label} failed to start: {err}")))?;
+    let output = run_output_with_timeout(&mut command, SERVICE_ACTION_TIMEOUT)
+        .map_err(|err| ServiceError::Command(format!("{label} failed: {err}")))?;
     if output.status.success() {
         return Ok(());
     }
@@ -750,6 +784,27 @@ mod tests {
             assert_eq!(manager.as_str(), value);
         }
         assert_eq!(ServiceManager::parse("launchd"), None);
+    }
+
+    #[test]
+    fn service_command_timeout_kills_the_helper() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 5"]);
+        let started = std::time::Instant::now();
+        let err = run_output_with_timeout(&mut command, Duration::from_millis(100))
+            .expect_err("sleep must time out");
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_command_captures_success_output() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf ready"]);
+        let output = run_output_with_timeout(&mut command, Duration::from_secs(2)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ready");
     }
 
     #[test]
