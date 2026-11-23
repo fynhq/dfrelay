@@ -259,19 +259,7 @@ impl BinaryManager {
                 });
             }
         }
-        let binary = extract_binary_bytes(path, &bytes)?;
-        let temp = self.write_temp_binary(&binary)?;
-        let actual_version = match self.version(&temp).await {
-            Ok(version) => version,
-            Err(err) => {
-                let _ = fs::remove_file(&temp);
-                return Err(err);
-            }
-        };
-        if let Err(err) = self.check_existing_config(&temp).await {
-            let _ = fs::remove_file(&temp);
-            return Err(err);
-        }
+        let (temp, actual_version) = self.prepare_temp_binary(path, &bytes).await?;
         let verified = checksum.is_some();
         self.install_temp_binary(
             &temp,
@@ -376,19 +364,9 @@ impl BinaryManager {
                 actual,
             });
         }
-        let binary = extract_binary_bytes(Path::new(&asset.name), bytes)?;
-        let temp = self.write_temp_binary(&binary)?;
-        let version = match self.version(&temp).await {
-            Ok(version) => version,
-            Err(err) => {
-                let _ = fs::remove_file(&temp);
-                return Err(err);
-            }
-        };
-        if let Err(err) = self.check_existing_config(&temp).await {
-            let _ = fs::remove_file(&temp);
-            return Err(err);
-        }
+        let (temp, version) = self
+            .prepare_temp_binary(Path::new(&asset.name), bytes)
+            .await?;
         if version != asset.version {
             let _ = fs::remove_file(&temp);
             return Err(BinaryError::VersionMismatch {
@@ -415,6 +393,27 @@ impl BinaryManager {
         })
     }
 
+    async fn prepare_temp_binary(
+        &self,
+        name: &Path,
+        bytes: &[u8],
+    ) -> Result<(PathBuf, String), BinaryError> {
+        let binary = extract_binary_bytes(name, bytes)?;
+        let temp = self.write_temp_binary(&binary)?;
+        let version = match self.version(&temp).await {
+            Ok(version) => version,
+            Err(err) => {
+                let _ = fs::remove_file(&temp);
+                return Err(err);
+            }
+        };
+        if let Err(err) = self.check_existing_config(&temp).await {
+            let _ = fs::remove_file(&temp);
+            return Err(err);
+        }
+        Ok((temp, version))
+    }
+
     async fn check_existing_config(&self, binary: &Path) -> Result<(), BinaryError> {
         let runtime = self.paths.runtime_config();
         if runtime.is_file() {
@@ -439,19 +438,9 @@ impl BinaryManager {
     }
 
     async fn check_config_file(&self, binary: &Path, config: &Path) -> Result<(), BinaryError> {
-        let mut command = tokio::process::Command::new(binary);
-        command.args(["check", "-c"]).arg(config).kill_on_drop(true);
-        let output = tokio::time::timeout(CHECK_TIMEOUT, output_with_retry(&mut command)).await;
-        let output = output
-            .map_err(|_| BinaryError::Check("timed out".to_string()))?
-            .map_err(BinaryError::Io)?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(BinaryError::Check(
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ))
-        }
+        run_cli_check(binary, config, CHECK_TIMEOUT)
+            .await
+            .map_err(BinaryError::Check)
     }
 
     fn write_temp_binary(&self, bytes: &[u8]) -> Result<PathBuf, BinaryError> {
@@ -840,6 +829,24 @@ async fn output_with_retry(
             }
             result => return result,
         }
+    }
+}
+
+pub(crate) async fn run_cli_check(
+    binary: &Path,
+    config: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut command = tokio::process::Command::new(binary);
+    command.args(["check", "-c"]).arg(config).kill_on_drop(true);
+    let output = tokio::time::timeout(timeout, output_with_retry(&mut command))
+        .await
+        .map_err(|_| "timed out".to_string())?
+        .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 

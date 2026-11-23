@@ -212,24 +212,9 @@ fn write_candidate(
 }
 
 async fn check_config(binary: &Path, config: &Path) -> Result<(), SupervisorError> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        Command::new(binary)
-            .args(["check", "-c"])
-            .arg(config)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| SupervisorError::Check("timeout".to_string()))?
-    .map_err(SupervisorError::Io)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(SupervisorError::Check(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
-    }
+    crate::singbox::binary::run_cli_check(binary, config, Duration::from_secs(15))
+        .await
+        .map_err(SupervisorError::Check)
 }
 
 pub async fn start(
