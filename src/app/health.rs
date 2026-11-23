@@ -524,8 +524,9 @@ impl App {
         if self.proxy_runtime.proxy.is_some() && self.proxy_runtime.status == ProxyStatus::Running {
             self.selection_state.preferred_node = None;
             self.selection_state.pending_selection = None;
-            self.perform_restart();
-            self.notify(self.text().msg_health_restarting);
+            if self.perform_restart() {
+                self.notify(self.text().msg_health_restarting);
+            }
         } else {
             self.notify(self.text().msg_health_new_nodes);
         }

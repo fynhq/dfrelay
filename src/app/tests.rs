@@ -2188,6 +2188,70 @@ async fn start_plan_detects_config_and_node_changes() {
 }
 
 #[tokio::test]
+async fn start_plan_ignores_node_display_order() {
+    let (mut app, _dir) = test_app().await;
+    app.metrics_state.nodes = vec![tagged_node("A", "n1"), tagged_node("B", "n2")];
+    let plan = app.current_start_plan();
+    app.metrics_state.nodes.reverse();
+    assert_eq!(plan, app.current_start_plan());
+}
+
+#[tokio::test]
+async fn preflight_revalidation_is_bounded() {
+    let (mut app, _dir) = test_app().await;
+    app.proxy_runtime.status = ProxyStatus::Running;
+    app.metrics_state.nodes = vec![node("one")];
+    let stale = app.current_start_plan();
+    app.metrics_state.nodes = vec![node("two")];
+    for expected in 1..=MAX_PREFLIGHT_REVALIDATIONS {
+        app.handle_event(AppEvent::PreflightDone {
+            plan: Box::new(stale.clone()),
+            result: Ok(()),
+        })
+        .await;
+        assert_eq!(app.proxy_runtime.preflight_revalidations, expected);
+        assert!(app.proxy_runtime.preflight_in_flight);
+    }
+    assert!(app.proxy_runtime.preflight_force);
+    app.handle_event(AppEvent::PreflightDone {
+        plan: Box::new(stale.clone()),
+        result: Ok(()),
+    })
+    .await;
+    assert_eq!(app.proxy_runtime.preflight_revalidations, 0);
+    assert!(!app.proxy_runtime.preflight_force);
+    assert!(!app.proxy_runtime.restart_in_progress);
+}
+
+#[tokio::test]
+async fn stale_proxy_events_keep_current_task_handles() {
+    let (mut app, _dir) = test_app().await;
+    app.proxy_runtime.epoch = 5;
+    app.proxy_runtime.start_task = Some(tokio::spawn(async {}));
+    app.proxy_runtime.stop_task = Some(tokio::spawn(async {}));
+    app.handle_event(AppEvent::ProxyStarted {
+        epoch: 4,
+        plan: Box::new(app.current_start_plan()),
+        result: Err("stale".to_string()),
+    })
+    .await;
+    app.handle_event(AppEvent::ProxyStopped { epoch: 4 }).await;
+    assert!(app.proxy_runtime.start_task.is_some());
+    assert!(app.proxy_runtime.stop_task.is_some());
+
+    app.handle_event(AppEvent::ProxyStopped { epoch: 5 }).await;
+    assert!(app.proxy_runtime.stop_task.is_none());
+    app.proxy_runtime.start_task = Some(tokio::spawn(async {}));
+    app.handle_event(AppEvent::ProxyStarted {
+        epoch: 5,
+        plan: Box::new(app.current_start_plan()),
+        result: Err("failed".to_string()),
+    })
+    .await;
+    assert!(app.proxy_runtime.start_task.is_none());
+}
+
+#[tokio::test]
 async fn stale_health_probe_events_are_ignored() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Running;

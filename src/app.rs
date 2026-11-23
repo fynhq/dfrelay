@@ -54,6 +54,7 @@ use ui_state::{NodeSort, UiState};
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const RESTART_DELAYS: [u64; MAX_RESTART_ATTEMPTS as usize] = [1, 2, 5, 10, 30];
+const MAX_PREFLIGHT_REVALIDATIONS: u32 = 3;
 const DELAY_TEST_CONCURRENCY: usize = 4;
 const DELAY_SWEEP_COOLDOWN: Duration = Duration::from_secs(300);
 const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(10);
@@ -216,7 +217,9 @@ async fn select_with_generation(
             Err(_) if attempt < retries => {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            Err(err) => return Some(Err(err)),
+            Err(err) => {
+                return (token.load(Ordering::Relaxed) == generation).then_some(Err(err));
+            }
         }
     }
     None
@@ -727,7 +730,8 @@ impl App {
         spawn_signal_handler(self.events_tx.clone());
         let _ = self.events_tx.send(AppEvent::AutoStart);
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
-        let mut last_publish = Instant::now() - PUBLISH_INTERVAL;
+        let now = Instant::now();
+        let mut last_publish = now.checked_sub(PUBLISH_INTERVAL).unwrap_or(now);
         let loop_result = crate::guard::CatchUnwind::new(async {
             loop {
                 let queued = self.events_rx.len();
@@ -1044,10 +1048,12 @@ impl App {
                 plan,
                 result,
             } => {
-                self.proxy_runtime.start_task = None;
                 if epoch != self.proxy_runtime.epoch {
                     return;
                 }
+                self.proxy_runtime.start_task = None;
+                self.proxy_runtime.preflight_revalidations = 0;
+                self.proxy_runtime.preflight_force = false;
                 match result {
                     Ok(proxy) => {
                         let clash = proxy.clash.clone();
@@ -1134,10 +1140,12 @@ impl App {
                 }
             }
             AppEvent::ProxyStopped { epoch } => {
-                self.proxy_runtime.stop_task = None;
                 if epoch != self.proxy_runtime.epoch {
                     return;
                 }
+                self.proxy_runtime.stop_task = None;
+                self.proxy_runtime.preflight_revalidations = 0;
+                self.proxy_runtime.preflight_force = false;
                 self.proxy_runtime.status = ProxyStatus::Stopped;
                 self.proxy_runtime.runtime_has_auto = false;
                 self.selection_state.pending_auto_start = false;
@@ -2036,20 +2044,20 @@ impl App {
         self.ui_state.message = None;
     }
 
-    fn perform_restart(&mut self) {
+    fn perform_restart(&mut self) -> bool {
         if self.setup_busy() {
             self.notify(self.text().setup_busy);
-            return;
+            return false;
         }
         if self.proxy_busy() {
             self.notify(self.text().msg_proxy_busy);
-            return;
+            return false;
         }
         if self.proxy_runtime.status != ProxyStatus::Running || self.proxy_runtime.proxy.is_none() {
             self.notify(self.text().msg_proxy_not_running);
-            return;
+            return false;
         }
-        self.begin_restart();
+        self.begin_restart()
     }
 
     fn auto_restart_after_change(&mut self) -> bool {
@@ -2084,9 +2092,13 @@ impl App {
     }
 
     fn current_start_plan(&self) -> StartPlan {
+        // Plan equality must not depend on the UI sort order, or display re-sorts
+        // would keep invalidating restart preflights.
+        let mut nodes = self.metrics_state.nodes.clone();
+        nodes.sort_by(|left, right| left.tag.cmp(&right.tag));
         StartPlan {
             config: self.config.clone(),
-            nodes: self.metrics_state.nodes.clone(),
+            nodes,
             preferred: self.selection_state.preferred_node.clone(),
             binary_identity: self.binary_identity(),
         }
@@ -2121,6 +2133,8 @@ impl App {
         self.ui_state.subscription_delete = None;
         self.proxy_runtime.preflight_in_flight = true;
         self.proxy_runtime.restart_in_progress = true;
+        self.proxy_runtime.preflight_force =
+            self.proxy_runtime.preflight_revalidations >= MAX_PREFLIGHT_REVALIDATIONS;
         self.notify(self.text().msg_restarting);
         let paths = self.paths.clone();
         let plan = self.current_start_plan();
@@ -2147,8 +2161,9 @@ impl App {
         self.proxy_runtime.preflight_in_flight = false;
         match result {
             Ok(()) => {
-                if plan != self.current_start_plan() {
+                if !self.proxy_runtime.preflight_force && plan != self.current_start_plan() {
                     self.proxy_runtime.restart_in_progress = false;
+                    self.proxy_runtime.preflight_revalidations += 1;
                     self.logger.app(
                         LogLevel::Info,
                         "restart preflight invalidated by a state change; revalidating",
@@ -2162,6 +2177,14 @@ impl App {
                     }
                     return;
                 }
+                if self.proxy_runtime.preflight_force {
+                    self.logger.app(
+                        LogLevel::Warn,
+                        "restart preflight revalidation limit reached; applying the last preflighted plan",
+                    );
+                }
+                self.proxy_runtime.preflight_revalidations = 0;
+                self.proxy_runtime.preflight_force = false;
                 if self.proxy_runtime.proxy.is_some() {
                     self.proxy_runtime.restart_after_stop = true;
                     self.proxy_runtime.pending_restart_plan = Some(plan);
@@ -2173,6 +2196,8 @@ impl App {
             }
             Err(err) => {
                 self.proxy_runtime.restart_in_progress = false;
+                self.proxy_runtime.preflight_revalidations = 0;
+                self.proxy_runtime.preflight_force = false;
                 let message = format!("{}: {err}", self.text().msg_preflight_failed);
                 self.ui_state.last_error = Some(message.clone());
                 self.logger.app(LogLevel::Warn, message);
@@ -2294,6 +2319,8 @@ impl App {
             .selection_generation
             .fetch_add(1, Ordering::Relaxed);
         self.proxy_runtime.epoch = self.proxy_runtime.epoch.wrapping_add(1);
+        self.proxy_runtime.preflight_revalidations = 0;
+        self.proxy_runtime.preflight_force = false;
         let epoch = self.proxy_runtime.epoch;
         if let Some(proxy) = self.proxy_runtime.proxy.take() {
             self.proxy_runtime.status = ProxyStatus::Stopping;
@@ -2864,8 +2891,14 @@ impl App {
         }
         let mut crashed = None;
         if let Some(proxy) = self.proxy_runtime.proxy.as_mut() {
-            if let Ok(Some(status)) = proxy.child.try_wait() {
-                crashed = Some(status);
+            match proxy.child.try_wait() {
+                Ok(Some(status)) => crashed = Some(status.to_string()),
+                Ok(None) => {}
+                Err(err) => {
+                    self.logger
+                        .app(LogLevel::Warn, format!("sing-box wait failed: {err}"));
+                    crashed = Some(format!("wait error: {err}"));
+                }
             }
         }
         if let Some(status) = crashed {

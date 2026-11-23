@@ -242,10 +242,23 @@ impl App {
         self.close_overlay();
         self.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
         self.binary_state.setup.pending_install = None;
-        self.binary_state.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
-        self.binary_state.setup.message = None;
+        self.refresh_inbox_candidates();
         self.refresh_previous_binary_state();
         self.maybe_check_binary_update();
+    }
+
+    fn refresh_inbox_candidates(&mut self) {
+        match self.binary_manager.scan_inbox() {
+            Ok(candidates) => {
+                self.binary_state.setup.candidates = candidates;
+                self.binary_state.setup.message = None;
+            }
+            Err(err) => {
+                self.binary_state.setup.candidates = Vec::new();
+                self.binary_state.setup.message =
+                    Some(format!("{}: {err}", self.text().setup_failed));
+            }
+        }
     }
 
     pub(super) fn copy_binary_path(&mut self) {
@@ -658,11 +671,10 @@ impl App {
     }
 
     pub(super) fn rescan_inbox(&mut self) {
-        self.binary_state.setup.candidates = self.binary_manager.scan_inbox().unwrap_or_default();
+        self.refresh_inbox_candidates();
         if let Some(Overlay::Setup { selected }) = self.ui_state.overlay.as_mut() {
             *selected = 0;
         }
-        self.binary_state.setup.message = None;
     }
 
     pub(super) async fn handle_setup_overlay_key(&mut self, key: KeyEvent) {
