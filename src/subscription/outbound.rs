@@ -98,11 +98,8 @@ pub(super) fn parse_port_ranges(value: &str) -> Result<Vec<String>, String> {
         if ranges.len() >= MAX_RANGES {
             return Err("port list too long".to_string());
         }
-        ranges.push(if lo == hi {
-            lo.to_string()
-        } else {
-            format!("{lo}:{hi}")
-        });
+        // sing-box requires lo:hi range entries; a bare port is rejected by check.
+        ranges.push(format!("{lo}:{hi}"));
     }
     if ranges.is_empty() {
         return Err("invalid port list".to_string());

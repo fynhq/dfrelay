@@ -997,7 +997,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mport.outbound.value()["server_port"], 443);
-        assert_eq!(mport.outbound.value()["server_ports"][0], "443");
+        assert_eq!(mport.outbound.value()["server_ports"][0], "443:443");
         assert_eq!(mport.outbound.value()["server_ports"][1], "8443:9000");
 
         let authority = parse_uri("hysteria2://pass@example.com:443,8443-9000#h", "test").unwrap();
@@ -1006,7 +1006,7 @@ mod tests {
 
         let ipv6 = parse_uri("hysteria2://pass@[::1]:443,8443#h", "test").unwrap();
         assert_eq!(ipv6.server, "::1");
-        assert_eq!(ipv6.outbound.value()["server_ports"][1], "8443");
+        assert_eq!(ipv6.outbound.value()["server_ports"][1], "8443:8443");
 
         assert!(parse_uri("hysteria2://pass@example.com:443?mport=0#h", "test").is_err());
         assert!(parse_uri("hysteria2://pass@example.com:443?mport=9000-8000#h", "test").is_err());

@@ -938,7 +938,7 @@ proxies:
         let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
         assert_eq!(unsupported.len(), 0);
         let outbound = nodes[0].outbound.value();
-        assert_eq!(outbound["server_ports"][0], "443");
+        assert_eq!(outbound["server_ports"][0], "443:443");
         assert_eq!(outbound["server_ports"][1], "8443:9000");
         assert_eq!(outbound["hop_interval"], "15s");
     }
