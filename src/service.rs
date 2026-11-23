@@ -741,13 +741,20 @@ fn run_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<O
             }
         }
     };
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
-    status.map(|status| Output {
-        status,
-        stdout,
-        stderr,
-    })
+    // On the timeout/error path the killed helper may have left a child
+    // holding the pipe; do not block on the drain threads there.
+    match status {
+        Ok(status) => {
+            let stdout = stdout_reader.join().unwrap_or_default();
+            let stderr = stderr_reader.join().unwrap_or_default();
+            Ok(Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
