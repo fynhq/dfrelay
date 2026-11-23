@@ -2,8 +2,10 @@ use serde_json::{json, Map, Value};
 
 use super::model::Node;
 use super::outbound::{
-    ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_supported_network,
-    ensure_tuic_congestion, ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
+    ensure_hysteria2_obfs, ensure_reality_public_key, ensure_reality_short_id,
+    ensure_shadowsocks_method, ensure_supported_network, ensure_tuic_congestion,
+    ensure_tuic_udp_relay_mode, ensure_uuid, ensure_vless_flow, ensure_vmess_security,
+    parse_port_ranges,
 };
 use crate::config::is_go_duration;
 
@@ -118,6 +120,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             if uuid.is_empty() {
                 return Err("vmess missing uuid".to_string());
             }
+            ensure_uuid(uuid)?;
             let alter_id = yaml_u16(proxy, "alterId").unwrap_or(0);
             let security = yaml_str(proxy, "cipher")
                 .filter(|value| !value.is_empty())
@@ -132,7 +135,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             if alter_id > 0 {
                 value.insert("alter_id".into(), json!(alter_id));
             }
-            attach_transport_tls(proxy, &network, &mut value);
+            attach_transport_tls(proxy, &network, &mut value)?;
             ("vmess", Value::Object(value))
         }
         "vless" => {
@@ -140,6 +143,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             if uuid.is_empty() {
                 return Err("vless missing uuid".to_string());
             }
+            ensure_uuid(uuid)?;
             let mut value = Map::new();
             value.insert("type".into(), json!("vless"));
             value.insert("server".into(), json!(server));
@@ -149,7 +153,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
                 ensure_vless_flow(flow)?;
                 value.insert("flow".into(), json!(flow));
             }
-            attach_transport_tls(proxy, &network, &mut value);
+            attach_transport_tls(proxy, &network, &mut value)?;
             ("vless", Value::Object(value))
         }
         "trojan" => {
@@ -163,7 +167,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             value.insert("server_port".into(), json!(port));
             value.insert("password".into(), json!(password));
             attach_transport(proxy, &network, &mut value);
-            value.insert("tls".into(), tls_value(proxy, true));
+            value.insert("tls".into(), tls_value(proxy, true)?);
             ("trojan", Value::Object(value))
         }
         "hysteria2" | "hy2" => {
@@ -185,7 +189,11 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
                 }
                 value.insert("obfs".into(), Value::Object(obfs_value));
             }
-            value.insert("tls".into(), tls_value(proxy, true));
+            if let Some(ports) = yaml_str(proxy, "ports").filter(|value| !value.is_empty()) {
+                value.insert("server_ports".into(), json!(parse_port_ranges(ports)?));
+            }
+            insert_duration(proxy, "hop-interval", "hop_interval", &mut value);
+            value.insert("tls".into(), tls_value(proxy, true)?);
             ("hysteria2", Value::Object(value))
         }
         "tuic" => {
@@ -194,6 +202,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             if uuid.is_empty() || password.is_empty() {
                 return Err("tuic missing uuid or password".to_string());
             }
+            ensure_uuid(uuid)?;
             let mut value = Map::new();
             value.insert("type".into(), json!("tuic"));
             value.insert("server".into(), json!(server));
@@ -211,7 +220,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
                 ensure_tuic_udp_relay_mode(mode)?;
                 value.insert("udp_relay_mode".into(), json!(mode));
             }
-            value.insert("tls".into(), tls_value(proxy, true));
+            value.insert("tls".into(), tls_value(proxy, true)?);
             ("tuic", Value::Object(value))
         }
         "http" => {
@@ -221,7 +230,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             value.insert("server_port".into(), json!(port));
             add_auth(proxy, &mut value);
             if tls_enabled(proxy) {
-                value.insert("tls".into(), tls_value(proxy, true));
+                value.insert("tls".into(), tls_value(proxy, true)?);
             }
             ("http", Value::Object(value))
         }
@@ -263,7 +272,7 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
             if let Some(min) = yaml_u64(proxy, "min-idle-session") {
                 value.insert("min_idle_session".into(), json!(min));
             }
-            value.insert("tls".into(), tls_value(proxy, true));
+            value.insert("tls".into(), tls_value(proxy, true)?);
             ("anytls", Value::Object(value))
         }
         other => return Err(format!("unsupported protocol: {other}")),
@@ -279,12 +288,17 @@ fn parse_proxy(proxy: &Mapping, source: &str) -> Result<Node, String> {
     ))
 }
 
-fn attach_transport_tls(proxy: &Mapping, network: &str, outbound: &mut Map<String, Value>) {
+fn attach_transport_tls(
+    proxy: &Mapping,
+    network: &str,
+    outbound: &mut Map<String, Value>,
+) -> Result<(), String> {
     attach_transport(proxy, network, outbound);
     let enabled = tls_enabled(proxy) || yaml_get(proxy, "reality-opts").is_some();
     if enabled || network == "ws" || network == "grpc" {
-        outbound.insert("tls".into(), tls_value(proxy, enabled));
+        outbound.insert("tls".into(), tls_value(proxy, enabled)?);
     }
+    Ok(())
 }
 
 fn attach_transport(proxy: &Mapping, network: &str, outbound: &mut Map<String, Value>) {
@@ -362,7 +376,7 @@ fn tls_enabled(proxy: &Mapping) -> bool {
     }
 }
 
-fn tls_value(proxy: &Mapping, enabled: bool) -> Value {
+fn tls_value(proxy: &Mapping, enabled: bool) -> Result<Value, String> {
     let server_name = yaml_str(proxy, "servername")
         .or_else(|| yaml_str(proxy, "sni"))
         .or_else(|| yaml_str(proxy, "host"));
@@ -379,15 +393,24 @@ fn tls_value(proxy: &Mapping, enabled: bool) -> Value {
         _ => Vec::new(),
     };
     let fingerprint = yaml_str(proxy, "client-fingerprint");
-    let reality = yaml_get(proxy, "reality-opts").and_then(|reality| {
-        let mapping = reality.as_object()?;
-        let public_key = mapping.get("public-key").and_then(Value::as_str)?;
-        let short_id = mapping
-            .get("short-id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        Some((public_key, short_id))
-    });
+    let reality = match yaml_get(proxy, "reality-opts") {
+        Some(reality) => {
+            let mapping = reality.as_object().ok_or("reality-opts is not a mapping")?;
+            let public_key = mapping
+                .get("public-key")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or("reality-opts missing public-key")?;
+            ensure_reality_public_key(public_key)?;
+            let short_id = mapping
+                .get("short-id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            ensure_reality_short_id(short_id)?;
+            Some((public_key, short_id))
+        }
+        None => None,
+    };
     super::outbound::tls_value(enabled, server_name, insecure, &alpn, fingerprint, reality)
 }
 
@@ -509,13 +532,13 @@ proxies:
     type: vmess
     server: example.com
     port: 443
-    uuid: uuid
+    uuid: 11111111-1111-1111-1111-111111111111
     cipher: rc4
   - name: bad-vless-flow
     type: vless
     server: example.com
     port: 443
-    uuid: uuid
+    uuid: 11111111-1111-1111-1111-111111111111
     flow: xtls-rprx-origin
   - name: bad-hy2-obfs
     type: hysteria2
@@ -824,14 +847,14 @@ proxies:
     tls: true
     servername: example.com
     reality-opts:
-      public-key: abc
+      public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0
       short-id: "1234"
 "#;
         let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
         assert_eq!(nodes.len(), 1);
         assert_eq!(
             nodes[0].outbound.value()["tls"]["reality"]["public_key"],
-            "abc"
+            "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0"
         );
         assert_eq!(unsupported.len(), 1);
         assert!(
@@ -839,5 +862,84 @@ proxies:
             "{}",
             unsupported[0].1
         );
+    }
+
+    #[test]
+    fn clash_reality_defaults_fingerprint_to_chrome() {
+        let yaml = r#"
+proxies:
+  - name: no fp
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    tls: true
+    reality-opts:
+      public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0
+  - name: legacy fp
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    tls: true
+    client-fingerprint: chrome_pq
+    reality-opts:
+      public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert_eq!(unsupported.len(), 0);
+        assert_eq!(nodes.len(), 2);
+        for node in &nodes {
+            assert_eq!(
+                node.outbound.value()["tls"]["utls"]["fingerprint"],
+                "chrome"
+            );
+        }
+    }
+
+    #[test]
+    fn clash_rejects_invalid_reality_key_and_uuid() {
+        let yaml = r#"
+proxies:
+  - name: bad key
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    tls: true
+    reality-opts:
+      public-key: abc
+  - name: bad uuid
+    type: vmess
+    server: example.com
+    port: 443
+    uuid: uuid
+    cipher: auto
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert!(nodes.is_empty());
+        assert_eq!(unsupported.len(), 2);
+        assert!(unsupported[0].1.contains("public key"));
+        assert!(unsupported[1].1.contains("uuid"));
+    }
+
+    #[test]
+    fn clash_hysteria2_maps_ports_and_hop_interval() {
+        let yaml = r#"
+proxies:
+  - name: hopping
+    type: hysteria2
+    server: example.com
+    port: 443
+    password: secret
+    ports: "443,8443-9000"
+    hop-interval: 15
+"#;
+        let (nodes, unsupported) = parse_clash(yaml, "test").unwrap();
+        assert_eq!(unsupported.len(), 0);
+        let outbound = nodes[0].outbound.value();
+        assert_eq!(outbound["server_ports"][0], "443");
+        assert_eq!(outbound["server_ports"][1], "8443:9000");
+        assert_eq!(outbound["hop_interval"], "15s");
     }
 }

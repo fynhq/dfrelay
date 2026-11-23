@@ -4,7 +4,7 @@ use serde_json::Value;
 use super::model::Node;
 use super::outbound::{
     ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_tuic_congestion,
-    ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
+    ensure_tuic_udp_relay_mode, ensure_uuid, ensure_vless_flow, ensure_vmess_security,
 };
 use super::parse_clash::{parse_clash_document, parse_yaml_value};
 use super::parse_uri::{decode_base64_text, parse_uri_list};
@@ -230,7 +230,7 @@ fn validate_sing_box_node(
             require("password")?;
         }
         "vmess" => {
-            require("uuid")?;
+            ensure_uuid(require("uuid")?)?;
             if let Some(security) = object
                 .get("security")
                 .and_then(Value::as_str)
@@ -240,7 +240,7 @@ fn validate_sing_box_node(
             }
         }
         "vless" => {
-            require("uuid")?;
+            ensure_uuid(require("uuid")?)?;
             if let Some(flow) = object
                 .get("flow")
                 .and_then(Value::as_str)
@@ -264,7 +264,7 @@ fn validate_sing_box_node(
             }
         }
         "tuic" => {
-            require("uuid")?;
+            ensure_uuid(require("uuid")?)?;
             require("password")?;
             if let Some(congestion) = object
                 .get("congestion_control")
@@ -282,7 +282,7 @@ fn validate_sing_box_node(
             }
         }
         "shadowtls" => {
-            require("password")?;
+            return Err("shadowtls requires a shadowsocks detour; not supported".to_string());
         }
         "ssh" => {
             require("user")?;
@@ -438,11 +438,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_standalone_shadowtls_and_invalid_uuid() {
+        let body = serde_json::json!({
+            "outbounds": [
+                { "type": "shadowtls", "tag": "st", "server": "example.com",
+                  "server_port": 443, "password": "p" },
+                { "type": "vless", "tag": "bad", "server": "example.com",
+                  "server_port": 443, "uuid": "u" }
+            ]
+        })
+        .to_string();
+        let outcome = detect_and_parse(&body, "test").unwrap();
+        assert!(outcome.nodes.is_empty());
+        assert_eq!(outcome.unsupported.len(), 2);
+        assert!(outcome.unsupported[0].reason.contains("shadowtls"));
+        assert!(outcome.unsupported[1].reason.contains("uuid"));
+    }
+
+    #[test]
     fn strips_nested_dial_detour() {
         let body = serde_json::json!({
             "outbounds": [{
                 "type": "vless", "tag": "n1", "server": "example.com",
-                "server_port": 443, "uuid": "u",
+                "server_port": 443, "uuid": "11111111-1111-1111-1111-111111111111",
                 "dial": { "detour": "direct", "bind_interface": "eth0" }
             }]
         })

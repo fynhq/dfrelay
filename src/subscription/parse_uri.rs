@@ -7,8 +7,10 @@ use url::Url;
 
 use super::model::Node;
 use super::outbound::{
-    ensure_hysteria2_obfs, ensure_shadowsocks_method, ensure_supported_network,
-    ensure_tuic_congestion, ensure_tuic_udp_relay_mode, ensure_vless_flow, ensure_vmess_security,
+    ensure_hysteria2_obfs, ensure_reality_public_key, ensure_reality_short_id,
+    ensure_shadowsocks_method, ensure_supported_network, ensure_tuic_congestion,
+    ensure_tuic_udp_relay_mode, ensure_uuid, ensure_vless_flow, ensure_vmess_security,
+    parse_port_ranges,
 };
 
 pub type UriParseOutput = (Vec<Node>, Vec<(String, String)>);
@@ -166,6 +168,7 @@ fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
     if uuid.is_empty() {
         return Err("vmess missing id".to_string());
     }
+    ensure_uuid(uuid)?;
     let name = string_field(object, "ps")
         .map(str::to_string)
         .unwrap_or_else(|| format!("{server}:{port}"));
@@ -189,6 +192,11 @@ fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
     let sni = string_field(object, "sni").filter(|s| !s.is_empty());
     let host = string_field(object, "host").filter(|s| !s.is_empty());
     let path = string_field(object, "path").filter(|s| !s.is_empty());
+    let fingerprint = string_field(object, "fp").filter(|s| !s.is_empty());
+    let alpn = string_field(object, "alpn")
+        .map(super::outbound::split_alpn_list)
+        .unwrap_or_default();
+    let insecure = bool_field(object, "allowInsecure");
 
     let mut outbound = Map::new();
     outbound.insert("type".into(), json!("vmess"));
@@ -205,7 +213,7 @@ fn parse_vmess(uri: &str, source: &str) -> Result<Node, String> {
     if tls_enabled {
         outbound.insert(
             "tls".into(),
-            tls_value(true, sni.or(host), false, &[], None, None),
+            tls_value(true, sni.or(host), insecure, &alpn, fingerprint, None)?,
         );
     }
 
@@ -225,6 +233,7 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
     if uuid.is_empty() {
         return Err("vless missing uuid".to_string());
     }
+    ensure_uuid(&uuid)?;
     let server = normalize_host(url.host_str().ok_or("vless missing host")?);
     let port = port_or(url.port(), 443)?;
     let query = query_map(&url);
@@ -279,13 +288,15 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
         .filter(|s| !s.is_empty());
 
     let reality = if security.eq_ignore_ascii_case("reality") {
-        Some((
-            query
-                .get("pbk")
-                .map(String::as_str)
-                .ok_or("vless reality missing public key")?,
-            query.get("sid").map(String::as_str).unwrap_or(""),
-        ))
+        let public_key = query
+            .get("pbk")
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or("vless reality missing public key")?;
+        ensure_reality_public_key(public_key)?;
+        let short_id = query.get("sid").map(String::as_str).unwrap_or("");
+        ensure_reality_short_id(short_id)?;
+        Some((public_key, short_id))
     } else {
         None
     };
@@ -304,7 +315,7 @@ fn parse_vless(uri: &str, source: &str) -> Result<Node, String> {
     if tls_enabled {
         outbound.insert(
             "tls".into(),
-            tls_value(true, sni.or(host), insecure, &alpn, fingerprint, reality),
+            tls_value(true, sni.or(host), insecure, &alpn, fingerprint, reality)?,
         );
     }
     let name = fragment_name(&url, &server, port);
@@ -374,7 +385,7 @@ fn parse_trojan(uri: &str, source: &str) -> Result<Node, String> {
     }
     outbound.insert(
         "tls".into(),
-        tls_value(true, sni.or(host), insecure, &alpn, None, None),
+        tls_value(true, sni.or(host), insecure, &alpn, None, None)?,
     );
 
     let name = fragment_name(&url, &server, port);
@@ -389,7 +400,8 @@ fn parse_trojan(uri: &str, source: &str) -> Result<Node, String> {
 }
 
 fn parse_hysteria2(uri: &str, source: &str) -> Result<Node, String> {
-    let url = Url::parse(uri).map_err(|e| format!("invalid hysteria2 URI: {e}"))?;
+    let (uri, authority_ports) = split_hysteria2_ports(uri)?;
+    let url = Url::parse(&uri).map_err(|e| format!("invalid hysteria2 URI: {e}"))?;
     let password = single_secret(&url);
     if password.is_empty() {
         return Err("hysteria2 missing password".to_string());
@@ -410,12 +422,24 @@ fn parse_hysteria2(uri: &str, source: &str) -> Result<Node, String> {
     if let Some(obfs) = obfs {
         ensure_hysteria2_obfs(obfs)?;
     }
+    let server_ports = match query
+        .get("mport")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .or(authority_ports.as_deref())
+    {
+        Some(value) => Some(parse_port_ranges(value)?),
+        None => None,
+    };
 
     let mut outbound = Map::new();
     outbound.insert("type".into(), json!("hysteria2"));
     outbound.insert("server".into(), json!(server));
     outbound.insert("server_port".into(), json!(port));
     outbound.insert("password".into(), json!(password));
+    if let Some(server_ports) = server_ports {
+        outbound.insert("server_ports".into(), json!(server_ports));
+    }
     if let Some(obfs) = obfs {
         let mut obfs_value = Map::new();
         obfs_value.insert("type".into(), json!(obfs));
@@ -426,7 +450,7 @@ fn parse_hysteria2(uri: &str, source: &str) -> Result<Node, String> {
     }
     outbound.insert(
         "tls".into(),
-        tls_value(true, sni, insecure, &alpn, None, None),
+        tls_value(true, sni, insecure, &alpn, None, None)?,
     );
 
     let name = fragment_name(&url, &server, port);
@@ -447,6 +471,7 @@ fn parse_tuic(uri: &str, source: &str) -> Result<Node, String> {
     if uuid.is_empty() || password.is_empty() {
         return Err("tuic missing uuid or password".to_string());
     }
+    ensure_uuid(&uuid)?;
     let server = normalize_host(url.host_str().ok_or("tuic missing host")?);
     let port = port_or(url.port(), 443)?;
     let query = query_map(&url);
@@ -473,7 +498,7 @@ fn parse_tuic(uri: &str, source: &str) -> Result<Node, String> {
     }
     outbound.insert(
         "tls".into(),
-        tls_value(true, sni, insecure, &alpn, None, None),
+        tls_value(true, sni, insecure, &alpn, None, None)?,
     );
 
     let name = fragment_name(&url, &server, port);
@@ -513,7 +538,7 @@ fn parse_http(uri: &str, source: &str) -> Result<Node, String> {
     if tls {
         outbound.insert(
             "tls".into(),
-            tls_value(true, sni, insecure, &alpn, None, None),
+            tls_value(true, sni, insecure, &alpn, None, None)?,
         );
     }
     let name = fragment_name(&url, &server, port);
@@ -702,7 +727,7 @@ fn tls_value(
     alpn: &[String],
     fingerprint: Option<&str>,
     reality: Option<(&str, &str)>,
-) -> Value {
+) -> Result<Value, String> {
     super::outbound::tls_value(
         enabled,
         server_name,
@@ -715,6 +740,59 @@ fn tls_value(
 
 fn string_field<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     object.get(key).and_then(Value::as_str)
+}
+
+fn bool_field(object: &Map<String, Value>, key: &str) -> bool {
+    match object.get(key) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => {
+            matches!(value.as_str(), "1" | "yes") || value.eq_ignore_ascii_case("true")
+        }
+        _ => false,
+    }
+}
+
+// Port-hopping authorities like host:443,8443-9000 are not valid URLs; rewrite to the
+// first port and keep the list for server_ports.
+fn split_hysteria2_ports(uri: &str) -> Result<(String, Option<String>), String> {
+    let unchanged = || (uri.to_string(), None);
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return Ok(unchanged());
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((userinfo, hostport)) => (Some(userinfo), hostport),
+        None => (None, authority),
+    };
+    let Some((host, port_part)) = hostport.rsplit_once(':') else {
+        return Ok(unchanged());
+    };
+    if host.starts_with('[') {
+        if !host.ends_with(']') {
+            return Ok(unchanged());
+        }
+    } else if host.contains(':') {
+        return Ok(unchanged());
+    }
+    if port_part.is_empty() || port_part.parse::<u16>().is_ok() {
+        return Ok(unchanged());
+    }
+    if !port_part.contains([',', '-', ':']) {
+        return Ok(unchanged());
+    }
+    let ranges = parse_port_ranges(port_part)?;
+    let first = ranges[0].split(':').next().unwrap_or(&ranges[0]);
+    let mut rebuilt = format!("{scheme}://");
+    if let Some(userinfo) = userinfo {
+        rebuilt.push_str(userinfo);
+        rebuilt.push('@');
+    }
+    rebuilt.push_str(host);
+    rebuilt.push(':');
+    rebuilt.push_str(first);
+    rebuilt.push_str(&rest[authority_end..]);
+    Ok((rebuilt, Some(port_part.to_string())))
 }
 
 fn number_field(object: &Map<String, Value>, key: &str) -> Option<u16> {
@@ -827,14 +905,122 @@ mod tests {
 
     #[test]
     fn parses_vless_reality() {
-        let uri = "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=reality&sni=example.com&pbk=abc&sid=1234&fp=chrome#vless";
+        let uri = "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=reality&sni=example.com&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0&sid=1234&fp=chrome#vless";
         let node = parse_uri(uri, "test").unwrap();
         assert_eq!(node.protocol, "vless");
-        assert_eq!(node.outbound.value()["tls"]["reality"]["public_key"], "abc");
+        assert_eq!(
+            node.outbound.value()["tls"]["reality"]["public_key"],
+            "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0"
+        );
         assert_eq!(
             node.outbound.value()["tls"]["utls"]["fingerprint"],
             "chrome"
         );
+    }
+
+    #[test]
+    fn reality_requires_usable_fingerprint() {
+        let base = "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=reality&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0";
+        let missing = parse_uri(base, "test").unwrap();
+        assert_eq!(
+            missing.outbound.value()["tls"]["utls"]["fingerprint"],
+            "chrome"
+        );
+        let legacy = parse_uri(&format!("{base}&fp=chrome_pq"), "test").unwrap();
+        assert_eq!(
+            legacy.outbound.value()["tls"]["utls"]["fingerprint"],
+            "chrome"
+        );
+        let err = parse_uri(&format!("{base}&fp=bogus"), "test").unwrap_err();
+        assert!(err.contains("fingerprint"), "{err}");
+    }
+
+    #[test]
+    fn vless_reality_rejects_empty_or_invalid_keys() {
+        let base = "vless://11111111-1111-1111-1111-111111111111@example.com:443?security=reality";
+        assert!(parse_uri(&format!("{base}&pbk="), "test")
+            .unwrap_err()
+            .contains("public key"));
+        assert!(parse_uri(&format!("{base}&pbk=abc"), "test")
+            .unwrap_err()
+            .contains("public key"));
+        let valid = format!("{base}&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0");
+        assert!(parse_uri(&format!("{valid}&sid=zz"), "test")
+            .unwrap_err()
+            .contains("short id"));
+        assert!(parse_uri(&format!("{valid}&sid=123"), "test")
+            .unwrap_err()
+            .contains("short id"));
+        assert!(parse_uri(&valid, "test").is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_uuid_in_all_uuid_protocols() {
+        assert!(
+            parse_uri("vless://not-a-uuid@example.com:443?security=tls#v", "test")
+                .unwrap_err()
+                .contains("uuid")
+        );
+        assert!(
+            parse_uri("tuic://not-a-uuid:pass@example.com:443#t", "test")
+                .unwrap_err()
+                .contains("uuid")
+        );
+        let vmess = format!(
+            "vmess://{}",
+            STANDARD.encode(r#"{"add":"example.com","port":"443","id":"uuid","net":"tcp"}"#)
+        );
+        assert!(parse_uri(&vmess, "test").unwrap_err().contains("uuid"));
+    }
+
+    #[test]
+    fn vmess_maps_fp_alpn_and_allow_insecure() {
+        let vmess = format!(
+            "vmess://{}",
+            STANDARD.encode(
+                r#"{"add":"example.com","port":"443","id":"11111111-1111-1111-1111-111111111111","net":"ws","tls":"tls","sni":"example.com","fp":"firefox","alpn":"h2,http/1.1","allowInsecure":true}"#
+            )
+        );
+        let node = parse_uri(&vmess, "test").unwrap();
+        let tls = &node.outbound.value()["tls"];
+        assert_eq!(tls["utls"]["fingerprint"], "firefox");
+        assert_eq!(tls["alpn"][0], "h2");
+        assert_eq!(tls["alpn"][1], "http/1.1");
+        assert_eq!(tls["insecure"], true);
+    }
+
+    #[test]
+    fn hysteria2_maps_port_hopping() {
+        let mport = parse_uri(
+            "hysteria2://pass@example.com:443?mport=443,8443-9000#h",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(mport.outbound.value()["server_port"], 443);
+        assert_eq!(mport.outbound.value()["server_ports"][0], "443");
+        assert_eq!(mport.outbound.value()["server_ports"][1], "8443:9000");
+
+        let authority = parse_uri("hysteria2://pass@example.com:443,8443-9000#h", "test").unwrap();
+        assert_eq!(authority.outbound.value()["server_port"], 443);
+        assert_eq!(authority.outbound.value()["server_ports"][1], "8443:9000");
+
+        let ipv6 = parse_uri("hysteria2://pass@[::1]:443,8443#h", "test").unwrap();
+        assert_eq!(ipv6.server, "::1");
+        assert_eq!(ipv6.outbound.value()["server_ports"][1], "8443");
+
+        assert!(parse_uri("hysteria2://pass@example.com:443?mport=0#h", "test").is_err());
+        assert!(parse_uri("hysteria2://pass@example.com:443?mport=9000-8000#h", "test").is_err());
+        assert!(parse_uri("hysteria2://pass@example.com:abc,def#h", "test").is_err());
+    }
+
+    #[test]
+    fn hysteria2_accepts_gecko_obfs() {
+        let node = parse_uri(
+            "hysteria2://pass@example.com:443?obfs=gecko&obfs-password=x#h",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(node.outbound.value()["obfs"]["type"], "gecko");
     }
 
     #[test]
@@ -919,7 +1105,7 @@ mod tests {
         let vmess = format!(
             "vmess://{}",
             STANDARD.encode(
-                r#"{"add":"example.com","port":"443","id":"uuid","net":"tcp","scy":"rc4"}"#
+                r#"{"add":"example.com","port":"443","id":"11111111-1111-1111-1111-111111111111","net":"tcp","scy":"rc4"}"#
             )
         );
         assert!(parse_uri(&vmess, "test").is_err());
