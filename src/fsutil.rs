@@ -14,6 +14,13 @@ pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
     set_private_dir(path)
 }
 
+// For directories DFRelay owns; unlike ensure_private_dir this also tightens
+// pre-existing directories, which may have been created by older versions.
+pub fn ensure_owned_private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    set_private_dir(path)
+}
+
 pub fn set_private_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -109,4 +116,22 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_owned_directories_are_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("data");
+        fs::create_dir_all(&nested).unwrap();
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_owned_private_dir(&nested).unwrap();
+        let mode = fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
 }

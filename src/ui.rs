@@ -172,7 +172,15 @@ fn render_header(
     let fixed = UnicodeWidthStr::width(prefix.as_str())
         + UnicodeWidthStr::width(middle.as_str())
         + UnicodeWidthStr::width(suffix.as_str());
-    let current = truncate_to_width(current, available.saturating_sub(fixed).max(1));
+    let budget = available.saturating_sub(fixed);
+    let summary = if budget > 0 {
+        format!(
+            "{prefix}{}{middle}{suffix}",
+            truncate_to_width(current, budget)
+        )
+    } else {
+        format!("{prefix}{suffix}")
+    };
 
     let left_width = UnicodeWidthStr::width(status_prefix.as_str())
         + UnicodeWidthStr::width(status_text.as_str());
@@ -196,10 +204,7 @@ fn render_header(
         first_line.push(Span::styled(right_text, right_style));
     }
 
-    let lines = vec![
-        Line::from(first_line),
-        Line::from(format!("{prefix}{current}{middle}{suffix}")),
-    ];
+    let lines = vec![Line::from(first_line), Line::from(summary)];
     let paragraph = Paragraph::new(lines)
         .block(titled_block(text.app_title))
         .wrap(Wrap { trim: true });
@@ -668,13 +673,12 @@ fn marquee_slice(text: &str, width: usize, offset: usize) -> String {
     let mut out_width = 0usize;
     for ch in text.chars() {
         let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if position + char_width <= offset {
+        if position < offset {
             position += char_width;
             continue;
         }
-        if position < offset || out_width + char_width > width {
-            position += char_width;
-            continue;
+        if out_width + char_width > width {
+            break;
         }
         out.push(ch);
         position += char_width;

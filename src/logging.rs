@@ -364,7 +364,7 @@ pub struct Logger {
 
 impl Logger {
     pub fn new(dir: &Path, app_level: LogLevel, singbox_level: LogLevel) -> std::io::Result<Self> {
-        fsutil::ensure_private_dir(dir)?;
+        fsutil::ensure_owned_private_dir(dir)?;
         let inner = Inner {
             dir: dir.to_path_buf(),
             date: today(),

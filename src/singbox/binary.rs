@@ -214,7 +214,7 @@ impl BinaryManager {
     }
 
     pub fn scan_inbox(&self) -> Result<Vec<InboxCandidate>, BinaryError> {
-        fsutil::ensure_private_dir(&self.paths.inbox_dir)?;
+        fsutil::ensure_owned_private_dir(&self.paths.inbox_dir)?;
         let mut candidates = Vec::new();
         for entry in fs::read_dir(&self.paths.inbox_dir)? {
             let entry = entry?;
@@ -455,7 +455,7 @@ impl BinaryManager {
     }
 
     fn write_temp_binary(&self, bytes: &[u8]) -> Result<PathBuf, BinaryError> {
-        fsutil::ensure_private_dir(&self.paths.bin_dir)?;
+        fsutil::ensure_owned_private_dir(&self.paths.bin_dir)?;
         let temp = self.paths.bin_dir.join("sing-box.new");
         {
             let mut file = fsutil::open_private_file(&temp, false)?;

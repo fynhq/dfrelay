@@ -204,7 +204,7 @@ fn write_candidate(
     generated: &serde_json::Value,
     suffix: &str,
 ) -> Result<std::path::PathBuf, SupervisorError> {
-    fsutil::ensure_private_dir(&paths.runtime_dir)?;
+    fsutil::ensure_owned_private_dir(&paths.runtime_dir)?;
     let candidate = paths.runtime_config().with_extension(suffix);
     let generated = serde_json::to_string_pretty(generated)?;
     fsutil::write_private_file(&candidate, generated.as_bytes())?;
@@ -354,13 +354,24 @@ pub async fn stop(mut proxy: RunningProxy, logger: &Logger) {
         }
     }
     let waited = tokio::time::timeout(Duration::from_secs(5), proxy.child.wait()).await;
-    if waited.is_err() {
-        let _ = proxy.child.kill().await;
+    let mut stopped = waited.is_ok();
+    if !stopped {
+        if let Err(err) = proxy.child.kill().await {
+            logger.app(
+                LogLevel::Warn,
+                format!("forced kill of sing-box failed: {err}"),
+            );
+        }
+        stopped = proxy.child.try_wait().is_ok_and(|status| status.is_some());
     }
     for task in proxy.log_tasks {
         task.abort();
     }
-    logger.app(LogLevel::Info, "sing-box stopped");
+    if stopped {
+        logger.app(LogLevel::Info, "sing-box stopped");
+    } else {
+        logger.app(LogLevel::Warn, "sing-box stop unconfirmed");
+    }
 }
 
 fn spawn_log_reader<R>(reader: R, logger: Logger) -> JoinHandle<()>
@@ -369,12 +380,21 @@ where
 {
     tokio::spawn(async move {
         let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let (level, message) = crate::logging::parse_singbox_line(&line);
-            if message.is_empty() {
-                continue;
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let (level, message) = crate::logging::parse_singbox_line(&line);
+                    if message.is_empty() {
+                        continue;
+                    }
+                    logger.singbox(level.unwrap_or(LogLevel::Info), message);
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    logger.singbox(LogLevel::Warn, format!("sing-box log read failed: {err}"));
+                    break;
+                }
             }
-            logger.singbox(level.unwrap_or(LogLevel::Info), message);
         }
     })
 }

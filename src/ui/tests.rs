@@ -884,6 +884,12 @@ fn marquee_respects_display_width_for_wide_characters() {
 }
 
 #[test]
+fn marquee_slice_stops_at_unfittable_wide_characters() {
+    assert_eq!(marquee_slice("A中B", 3, 0), "A中");
+    assert_eq!(marquee_slice("A中B", 2, 0), "A");
+}
+
+#[test]
 fn settings_values_wrap_and_indent_under_the_value_column() {
     let label_width = 18;
     let value_width = 30;

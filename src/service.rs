@@ -712,27 +712,51 @@ fn run_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<O
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| err.to_string())?;
+    // Drain both pipes concurrently; a helper that fills the pipe buffer would
+    // otherwise block until the timeout kills it.
+    let stdout_reader = std::thread::spawn({
+        let pipe = child.stdout.take();
+        move || read_pipe(pipe)
+    });
+    let stderr_reader = std::thread::spawn({
+        let pipe = child.stderr.take();
+        move || read_pipe(pipe)
+    });
     let deadline = std::time::Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child.wait_with_output().map_err(|err| err.to_string());
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {}s", timeout.as_secs()));
+                break Err(format!("timed out after {}s", timeout.as_secs()));
             }
             Err(err) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(err.to_string());
+                break Err(err.to_string());
             }
         }
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    status.map(|status| Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+fn read_pipe(pipe: Option<impl std::io::Read>) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut buffer);
     }
+    buffer
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -805,6 +829,15 @@ mod tests {
         let output = run_output_with_timeout(&mut command, Duration::from_secs(2)).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"ready");
+    }
+
+    #[test]
+    fn service_command_drains_large_output() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "yes x | head -c 200000"]);
+        let output = run_output_with_timeout(&mut command, Duration::from_secs(5)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 200_000);
     }
 
     #[test]

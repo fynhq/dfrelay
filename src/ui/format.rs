@@ -39,6 +39,8 @@ fn wrap_text(text: &str, width: usize, keep_indent: bool) -> Vec<String> {
         }
         if !current.trim().is_empty() {
             lines.push(current.trim_end().to_string());
+        } else if raw.trim().is_empty() {
+            lines.push(String::new());
         }
     }
     if lines.is_empty() {
@@ -100,6 +102,12 @@ mod tests {
         assert_eq!(lines, vec!["abc", "def"]);
         let lines = wrap_display_text("a\nb", 3);
         assert_eq!(lines, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn whitespace_only_lines_survive_wrapping() {
+        assert_eq!(wrap_display_text("a\n \nb", 10), vec!["a", "", "b"]);
+        assert_eq!(wrap_help_text("   \nx", 10), vec!["", "x"]);
     }
 
     #[test]

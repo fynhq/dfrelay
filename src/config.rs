@@ -15,6 +15,8 @@ pub const DEFAULT_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 pub const DEFAULT_TEST_INTERVAL: &str = "3m";
 pub const DEFAULT_IDLE_TIMEOUT: &str = "30m";
 pub const DEFAULT_DNS_SERVERS: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
+const DEFAULT_PROXY_IP_V4_URL: &str = "https://api.ipify.org";
+const DEFAULT_PROXY_IP_V6_URL: &str = "https://api6.ipify.org";
 
 pub(crate) fn is_go_duration(value: &str) -> bool {
     let mut rest = value.trim();
@@ -170,12 +172,24 @@ impl Config {
         self.dns_servers = dns_servers;
         self.keywords_include = clean_keywords(&self.keywords_include);
         self.keywords_exclude = clean_keywords(&self.keywords_exclude);
+        let before_mirrors = self.github_mirrors.len();
         self.github_mirrors = self
             .github_mirrors
             .iter()
             .map(|s| s.trim().to_string())
             .filter(|s| s.starts_with("https://"))
             .collect();
+        if self.github_mirrors.len() != before_mirrors {
+            warnings.push("GitHub mirrors must use https; invalid entries removed".to_string());
+        }
+        if !is_http_url(&self.proxy_ip_v4_url) {
+            self.proxy_ip_v4_url = DEFAULT_PROXY_IP_V4_URL.to_string();
+            warnings.push("proxy IP v4 URL must be http(s); reset to default".to_string());
+        }
+        if !is_http_url(&self.proxy_ip_v6_url) {
+            self.proxy_ip_v6_url = DEFAULT_PROXY_IP_V6_URL.to_string();
+            warnings.push("proxy IP v6 URL must be http(s); reset to default".to_string());
+        }
         let before = self.subscriptions.len();
         self.subscriptions.retain(|s| {
             !s.url.trim().is_empty()
@@ -232,8 +246,8 @@ impl Default for Config {
             app_log_level: LogLevel::Info,
             singbox_log_level: LogLevel::Info,
             github_mirrors: default_mirrors(),
-            proxy_ip_v4_url: "https://api.ipify.org".to_string(),
-            proxy_ip_v6_url: "https://api6.ipify.org".to_string(),
+            proxy_ip_v4_url: DEFAULT_PROXY_IP_V4_URL.to_string(),
+            proxy_ip_v6_url: DEFAULT_PROXY_IP_V6_URL.to_string(),
             subscriptions: Vec::new(),
         }
     }
@@ -241,6 +255,10 @@ impl Default for Config {
 
 fn default_true() -> bool {
     true
+}
+
+fn is_http_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 fn default_mirrors() -> Vec<String> {
@@ -357,7 +375,7 @@ impl Paths {
             &self.logs_dir,
             &self.inbox_dir,
         ] {
-            fsutil::ensure_private_dir(dir)?;
+            fsutil::ensure_owned_private_dir(dir)?;
         }
         if let Some(parent) = self
             .config_file
@@ -536,6 +554,7 @@ mod tests {
         config.idle_timeout = "".into();
         config.keywords_include = vec![" 香港 ".into(), "".into(), "香港".into()];
         config.github_mirrors = vec!["http://bad".into(), "https://ok/".into()];
+        config.proxy_ip_v4_url = "ftp://bad".into();
         config.dns_servers = vec![
             "1.1.1.1".into(),
             "not-an-ip".into(),
@@ -550,6 +569,8 @@ mod tests {
         assert_eq!(config.idle_timeout, DEFAULT_IDLE_TIMEOUT);
         assert_eq!(config.keywords_include, vec!["香港"]);
         assert_eq!(config.github_mirrors, vec!["https://ok/"]);
+        assert_eq!(config.proxy_ip_v4_url, DEFAULT_PROXY_IP_V4_URL);
+        assert_eq!(config.proxy_ip_v6_url, DEFAULT_PROXY_IP_V6_URL);
         assert_eq!(config.dns_servers, vec!["1.1.1.1", "8.8.8.8"]);
     }
 

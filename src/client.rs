@@ -1,5 +1,7 @@
 use std::io::{stdout, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -61,7 +63,8 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
         let palette = Palette::auto();
         let mut reader = BufReader::new(read_half).lines();
         let (in_tx, mut in_rx) = mpsc::unbounded_channel();
-        spawn_input(in_tx);
+        let input_stop = Arc::new(AtomicBool::new(false));
+        spawn_input(in_tx, input_stop.clone());
         let mut view: Option<View> = None;
         let mut parse_errors = 0usize;
         let mut note: Option<&'static str> = None;
@@ -208,6 +211,7 @@ pub async fn run(socket: PathBuf, lang: Lang) -> anyhow::Result<()> {
                 }
             }
         }
+        input_stop.store(true, Ordering::Relaxed);
         note
     };
 
@@ -257,8 +261,16 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn spawn_input(tx: mpsc::UnboundedSender<InputEvent>) {
+fn spawn_input(tx: mpsc::UnboundedSender<InputEvent>, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match event::poll(Duration::from_millis(100)) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => break,
+        }
         match event::read() {
             Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                 let Some(code) = InputCode::from_key_code(key.code) else {

@@ -29,6 +29,7 @@ const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_INBOUND_MESSAGES_PER_SECOND: usize = 120;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputCode {
@@ -398,9 +399,13 @@ async fn write_client(
             continue;
         };
         line.push(b'\n');
-        if write.write_all(&line).await.is_err() {
-            let _ = events_tx.send(AppEvent::ClientDetached(id));
-            break;
+        // A viewer that stops reading must not hold the only viewer slot forever.
+        match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(&line)).await {
+            Ok(Ok(())) => {}
+            _ => {
+                let _ = events_tx.send(AppEvent::ClientDetached(id));
+                break;
+            }
         }
     }
 }
@@ -420,7 +425,7 @@ fn bind_private(socket: &Path) -> io::Result<UnixListener> {
 }
 
 pub fn acquire_daemon_lock(data_dir: &Path) -> io::Result<std::fs::File> {
-    crate::fsutil::ensure_private_dir(data_dir)?;
+    crate::fsutil::ensure_owned_private_dir(data_dir)?;
     let path = data_dir.join("daemon.lock");
     #[cfg(unix)]
     {
