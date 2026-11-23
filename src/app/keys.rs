@@ -213,7 +213,7 @@ impl App {
                     self.switch_page(Page::Logs);
                 }
             }
-            Page::Nodes => self.select_node().await,
+            Page::Nodes => self.select_node(),
             Page::Subscriptions => self.open_edit_subscription_form(),
             Page::Connections => self.copy_connection_target(),
             Page::Logs => self.open_log_detail(),
