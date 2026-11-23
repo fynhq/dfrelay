@@ -228,7 +228,7 @@ impl Default for Config {
             idle_timeout: DEFAULT_IDLE_TIMEOUT.to_string(),
             keywords_include: Vec::new(),
             keywords_exclude: Vec::new(),
-            subscription_refresh_hours: 24,
+            subscription_refresh_hours: 6,
             app_log_level: LogLevel::Info,
             singbox_log_level: LogLevel::Info,
             github_mirrors: default_mirrors(),
@@ -484,6 +484,7 @@ mod tests {
         assert!(config.lan_password.is_empty());
         assert_eq!(config.dns_servers, vec!["1.1.1.1", "8.8.8.8"]);
         assert_eq!(config.tolerance_ms, 100);
+        assert_eq!(config.subscription_refresh_hours, 6);
         assert!(!config.github_mirrors.is_empty());
     }
 

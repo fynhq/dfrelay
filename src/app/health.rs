@@ -21,6 +21,8 @@ pub(super) struct HealthState {
     pub(super) no_node_level: u8,
     pub(super) recovery_refresh_pending: bool,
     pub(super) last_recovery_refresh: Option<Instant>,
+    pub(super) last_failure_at: Option<Instant>,
+    pub(super) last_failure_tag: Option<String>,
     pub(super) quality: QualityBook,
     pub(super) auto_switch_times: VecDeque<Instant>,
     pub(super) last_logged_selection: Option<(bool, Option<String>)>,
@@ -168,6 +170,8 @@ impl App {
         self.health.last_probe = None;
         self.health.no_node_level = 0;
         self.health.recovery_refresh_pending = false;
+        self.health.last_failure_at = None;
+        self.health.last_failure_tag = None;
         self.reset_health_failures();
         self.health.last_recovery = None;
     }

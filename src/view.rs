@@ -38,6 +38,13 @@ pub struct SubscriptionView {
     pub stale: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SubscriptionApplyView {
+    pub added: usize,
+    pub removed: usize,
+    pub auto_changed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigView {
     pub language: Lang,
@@ -108,6 +115,8 @@ pub struct View {
     pub auto_tags: HashSet<String>,
     pub auto_candidates: usize,
     pub subscriptions: Vec<SubscriptionView>,
+    #[serde(default)]
+    pub subscription_apply_pending: Option<SubscriptionApplyView>,
     pub selected: usize,
     pub preferred_node: Option<String>,
     pub metrics: MetricsSnapshot,

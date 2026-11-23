@@ -749,6 +749,27 @@ fn subscription_times_drop_the_year_for_display() {
 }
 
 #[tokio::test]
+async fn subscriptions_title_shows_pending_apply_diff() {
+    let (app, _dir) = test_app(Lang::Zh).await;
+    let mut view = app.view();
+    view.page = Page::Subscriptions;
+    view.subscription_apply_pending = Some(crate::view::SubscriptionApplyView {
+        added: 4,
+        removed: 1,
+        auto_changed: true,
+    });
+    let content: String = rendered_rows(&view, 100, 20)
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    let compact: String = content.chars().filter(|ch| !ch.is_whitespace()).collect();
+    assert!(compact.contains("待应用"), "{compact}");
+    assert!(compact.contains("+4"), "{compact}");
+    assert!(compact.contains("-1"), "{compact}");
+}
+
+#[tokio::test]
 async fn subscriptions_scroll_long_name_url_and_status_text() {
     let (app, _dir) = test_app(Lang::En).await;
     let mut view = app.view();

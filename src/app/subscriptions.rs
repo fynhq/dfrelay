@@ -42,6 +42,39 @@ impl SubscriptionDiff {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SubscriptionApplyReason {
+    Idle,
+    HealthDegraded,
+    MaxDefer,
+}
+
+impl SubscriptionApplyReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::HealthDegraded => "health-degraded",
+            Self::MaxDefer => "max-defer",
+        }
+    }
+}
+
+pub(super) fn subscription_apply_reason(
+    idle: bool,
+    degraded: bool,
+    pending_for: Duration,
+) -> Option<SubscriptionApplyReason> {
+    if idle {
+        Some(SubscriptionApplyReason::Idle)
+    } else if degraded {
+        Some(SubscriptionApplyReason::HealthDegraded)
+    } else if pending_for >= REFRESH_APPLY_MAX_DEFER {
+        Some(SubscriptionApplyReason::MaxDefer)
+    } else {
+        None
+    }
+}
+
 impl App {
     pub(super) fn refresh_subscriptions(&mut self) {
         if self.subscription_state.refreshing_subscriptions {
@@ -209,14 +242,21 @@ impl App {
         {
             return;
         }
-        if !self.metrics_api_fresh() {
-            return;
-        }
-        let idle = self
-            .metrics_state
-            .idle_since
-            .is_some_and(|at| at.elapsed() >= REFRESH_IDLE_GRACE);
-        if !idle {
+        let idle = self.metrics_api_fresh()
+            && self
+                .metrics_state
+                .idle_since
+                .is_some_and(|at| at.elapsed() >= REFRESH_IDLE_GRACE);
+        let degraded = self
+            .health
+            .last_failure_at
+            .is_some_and(|at| at.elapsed() <= REFRESH_DEGRADED_WINDOW)
+            && self
+                .health
+                .last_failure_tag
+                .as_deref()
+                .is_some_and(|tag| self.health_target().as_deref() == Some(tag));
+        let Some(reason) = subscription_apply_reason(idle, degraded, since.elapsed()) else {
             if !wait_logged && since.elapsed() >= REFRESH_IDLE_WAIT_LOG {
                 if let Some(pending) = self.subscription_state.pending_refresh_apply.as_mut() {
                     pending.wait_logged = true;
@@ -224,29 +264,37 @@ impl App {
                 self.logger.app(
                     LogLevel::Info,
                     format!(
-                        "subscription changes pending for {}s: waiting for idle ({})",
+                        "subscription changes pending for {}s: waiting for idle or health degradation (max {}m) ({})",
                         since.elapsed().as_secs(),
+                        REFRESH_APPLY_MAX_DEFER.as_secs() / 60,
                         diff.detail()
                     ),
                 );
             }
             return;
-        }
+        };
         if self.auto_restart_after_change() {
             self.subscription_state.pending_refresh_apply = None;
             self.logger.app(
                 LogLevel::Info,
                 format!(
-                    "subscription changes applying while idle: {}",
+                    "subscription changes applying ({}): {}",
+                    reason.label(),
                     diff.detail()
                 ),
             );
-            self.notify(self.text().msg_subscription_applied_idle);
+            if reason == SubscriptionApplyReason::Idle {
+                self.notify(self.text().msg_subscription_applied_idle);
+            }
         } else {
             self.subscription_state.pending_refresh_apply = None;
             self.logger.app(
                 LogLevel::Warn,
-                format!("subscription idle apply skipped: {}", diff.detail()),
+                format!(
+                    "subscription apply skipped ({}): {}",
+                    reason.label(),
+                    diff.detail()
+                ),
             );
         }
     }

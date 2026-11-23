@@ -82,6 +82,7 @@ pub struct Text {
     pub(crate) nodes_auto_candidates: &'static str,
 
     pub(crate) subscriptions_title: &'static str,
+    pub(crate) subscriptions_pending_apply: &'static str,
     pub(crate) subscriptions_empty: &'static str,
     pub(crate) subscriptions_name: &'static str,
     pub(crate) subscriptions_url: &'static str,

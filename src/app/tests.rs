@@ -1,7 +1,9 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::health::{http_probe_outcome, probe_failure_outcome};
 use super::selection_state::PendingSelection;
-use super::subscriptions::{PendingRefreshApply, SubscriptionDiff};
+use super::subscriptions::{
+    subscription_apply_reason, PendingRefreshApply, SubscriptionApplyReason, SubscriptionDiff,
+};
 use super::*;
 use crate::singbox::binary::InboxCandidate;
 use crate::state::{KeywordField, SettingsField, SettingsItem};
@@ -1245,6 +1247,41 @@ async fn missing_preferred_node_is_cleared() {
     );
 }
 
+#[test]
+fn subscription_apply_reason_prefers_idle_then_degraded_then_deadline() {
+    let recent = Duration::from_secs(1);
+    assert_eq!(
+        subscription_apply_reason(true, true, recent),
+        Some(SubscriptionApplyReason::Idle)
+    );
+    assert_eq!(
+        subscription_apply_reason(false, true, recent),
+        Some(SubscriptionApplyReason::HealthDegraded)
+    );
+    assert_eq!(
+        subscription_apply_reason(
+            false,
+            false,
+            REFRESH_APPLY_MAX_DEFER - Duration::from_secs(1),
+        ),
+        None
+    );
+    assert_eq!(
+        subscription_apply_reason(false, false, REFRESH_APPLY_MAX_DEFER),
+        Some(SubscriptionApplyReason::MaxDefer)
+    );
+}
+
+#[tokio::test]
+async fn invalidating_health_tasks_clears_degraded_timestamp() {
+    let (mut app, _dir) = test_app().await;
+    app.health.last_failure_at = Some(Instant::now());
+    app.health.last_failure_tag = Some("n1".to_string());
+    app.invalidate_health_tasks();
+    assert!(app.health.last_failure_at.is_none());
+    assert!(app.health.last_failure_tag.is_none());
+}
+
 #[tokio::test]
 async fn subscription_apply_tracks_tag_diff_and_clears_when_unchanged() {
     let (mut app, _dir) = test_app().await;
@@ -1891,6 +1928,8 @@ async fn health_probe_failures_are_counted_per_selected_node() {
     }
     assert_eq!(app.health.failures, HEALTH_FAILURE_THRESHOLD);
     assert_eq!(app.health.failure_tag.as_deref(), Some("n1"));
+    assert!(app.health.last_failure_at.is_some());
+    assert_eq!(app.health.last_failure_tag.as_deref(), Some("n1"));
 
     app.handle_event(AppEvent::HealthProbe {
         generation,

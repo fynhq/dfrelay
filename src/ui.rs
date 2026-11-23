@@ -501,7 +501,7 @@ fn active_node_tag(view: &View) -> Option<&str> {
 
 fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::Rect, tick: u64) {
     let text = view.text();
-    let block = titled_block(text.subscriptions_title);
+    let block = titled_block(subscription_title(view));
     if view.subscriptions.is_empty() {
         frame.render_widget(
             Paragraph::new(text.subscriptions_empty)
@@ -576,6 +576,29 @@ fn render_subscriptions(frame: &mut Frame, view: &View, area: ratatui::layout::R
         start,
         end,
     );
+}
+
+fn subscription_title(view: &View) -> String {
+    let text = view.text();
+    let Some(pending) = view.subscription_apply_pending else {
+        return text.subscriptions_title.to_string();
+    };
+    let mut title = format!(
+        "{} · {}",
+        text.subscriptions_title, text.subscriptions_pending_apply
+    );
+    let mut detail = Vec::new();
+    if pending.added > 0 {
+        detail.push(format!("+{}", pending.added));
+    }
+    if pending.removed > 0 {
+        detail.push(format!("-{}", pending.removed));
+    }
+    if !detail.is_empty() {
+        title.push(' ');
+        title.push_str(&detail.join(" "));
+    }
+    title
 }
 
 const SUBSCRIPTION_NAME_WIDTH: u16 = 14;

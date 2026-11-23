@@ -77,6 +77,8 @@ const SELECTION_STORM_WARN_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const SWITCH_REASON_TTL: Duration = Duration::from_secs(15);
 const REFRESH_IDLE_GRACE: Duration = Duration::from_secs(10);
 const REFRESH_IDLE_WAIT_LOG: Duration = Duration::from_secs(5 * 60);
+const REFRESH_APPLY_MAX_DEFER: Duration = Duration::from_secs(2 * 60 * 60);
+const REFRESH_DEGRADED_WINDOW: Duration = Duration::from_secs(5 * 60);
 const PROXY_IP_STARTUP_GRACE: Duration = Duration::from_secs(30);
 const SUBSCRIPTION_STARTUP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 const SUBSCRIPTION_REFRESH_MIN_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -644,6 +646,13 @@ impl App {
                     stale: runtime.stale,
                 })
                 .collect(),
+            subscription_apply_pending: self.subscription_state.pending_refresh_apply.as_ref().map(
+                |pending| crate::view::SubscriptionApplyView {
+                    added: pending.diff.added,
+                    removed: pending.diff.removed,
+                    auto_changed: pending.diff.auto_changed,
+                },
+            ),
             selected: self.ui_state.selected,
             preferred_node: self.selection_state.preferred_node.clone(),
             metrics,
@@ -1280,6 +1289,8 @@ impl App {
                         }
                         self.stats.health_probe_failures_total =
                             self.stats.health_probe_failures_total.saturating_add(1);
+                        self.health.last_failure_at = Some(Instant::now());
+                        self.health.last_failure_tag = Some(tag.clone());
                         if self.health.failure_tag.as_deref() != Some(tag.as_str()) {
                             self.health.failure_tag = Some(tag.clone());
                             self.health.failures = 0;
