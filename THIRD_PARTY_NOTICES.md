@@ -49,7 +49,6 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `by_address` | `1.2.1` | MIT OR Apache-2.0 |
 | `bytemuck` | `1.25.2` | Zlib OR Apache-2.0 OR MIT |
 | `bytes` | `1.12.1` | MIT |
-| `bzip2` | `0.6.1` | MIT OR Apache-2.0 |
 | `castaway` | `0.2.4` | MIT |
 | `cc` | `1.11.2` | MIT OR Apache-2.0 |
 | `cfg-if` | `1.0.5` | MIT OR Apache-2.0 |
@@ -77,7 +76,6 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `darling` | `0.24.1` | MIT |
 | `darling_core` | `0.24.1` | MIT |
 | `darling_macro` | `0.24.1` | MIT |
-| `deflate64` | `0.1.12` | MIT |
 | `deltae` | `0.3.2` | MIT |
 | `deranged` | `0.5.9` | MIT OR Apache-2.0 |
 | `derive_more` | `2.1.1` | MIT |
@@ -148,12 +146,10 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `jiff-static` | `1.0.1` | Unlicense OR MIT |
 | `jiff-tzdb` | `1.0.0` | Unlicense OR MIT |
 | `jiff-tzdb-platform` | `1.0.0` | Unlicense OR MIT |
-| `jobserver` | `0.1.35` | MIT OR Apache-2.0 |
 | `js-sys` | `0.3.107` | MIT OR Apache-2.0 |
 | `kasuari` | `0.4.13` | MIT OR Apache-2.0 |
 | `lab` | `0.11.0` | MIT |
 | `lazy_static` | `1.5.1` | MIT OR Apache-2.0 |
-| `libbz2-rs-sys` | `0.2.6` | bzip2-1.0.6 |
 | `libc` | `0.2.191` | MIT OR Apache-2.0 |
 | `libm` | `0.2.16` | MIT |
 | `libredox` | `0.1.25` | MIT |
@@ -165,7 +161,6 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `log` | `0.4.35` | MIT OR Apache-2.0 |
 | `lru` | `0.18.5` | MIT |
 | `lru-slab` | `0.1.3` | MIT OR Apache-2.0 OR Zlib |
-| `lzma-rust2` | `0.25.0` | Apache-2.0 |
 | `mac_address` | `1.2.1` | MIT OR Apache-2.0 |
 | `memchr` | `2.8.3` | Unlicense OR MIT |
 | `memmem` | `0.1.1` | MIT/Apache-2.0 |
@@ -203,12 +198,10 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `phf_macros` | `0.11.3` | MIT |
 | `phf_shared` | `0.11.3` | MIT |
 | `pin-project-lite` | `0.2.17` | Apache-2.0 OR MIT |
-| `pkg-config` | `0.3.34` | MIT OR Apache-2.0 |
 | `portable-atomic` | `1.15.0` | Apache-2.0 OR MIT |
 | `portable-atomic-util` | `0.2.8` | Apache-2.0 OR MIT |
 | `potential_utf` | `0.1.6` | Unicode-3.0 |
 | `powerfmt` | `0.2.1` | MIT OR Apache-2.0 |
-| `ppmd-rust` | `1.5.2` | CC0-1.0 OR MIT-0 |
 | `proc-macro2` | `1.0.107` | MIT OR Apache-2.0 |
 | `psm` | `0.1.32` | MIT OR Apache-2.0 |
 | `quinn` | `0.11.12` | MIT OR Apache-2.0 |
@@ -369,9 +362,6 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `zlib-rs` | `0.6.8` | Zlib |
 | `zmij` | `1.0.23` | MIT |
 | `zopfli` | `0.8.4` | Apache-2.0 |
-| `zstd` | `0.14.4` | BSD-3-Clause |
-| `zstd-safe` | `8.3.0` | BSD-3-Clause |
-| `zstd-sys` | `2.1.3+zstd.1.5.7` | BSD-3-Clause AND BSD-2-Clause |
 
 ## Common license texts
 
