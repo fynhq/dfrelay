@@ -117,7 +117,7 @@ impl App {
         });
     }
 
-    pub(super) async fn install_selected(&mut self) {
+    pub(super) fn install_selected(&mut self) {
         if self.binary_state.setup.downloading || self.binary_state.install_in_flight {
             return;
         }

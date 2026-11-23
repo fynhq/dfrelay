@@ -4,7 +4,7 @@ use crate::state::{KeywordField, OverlayKind, SettingsAction, SettingsItem, MAIN
 use std::time::{Duration, Instant};
 
 impl App {
-    pub(super) async fn handle_key(&mut self, key: KeyEvent) {
+    pub(super) fn handle_key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.ui_state.overlay.is_some() {
                 self.close_overlay();
@@ -49,7 +49,7 @@ impl App {
         }
         if self.binary_state.setup.pending_install.is_some() {
             if key.code == KeyCode::Enter {
-                self.install_selected().await;
+                self.install_selected();
             } else {
                 self.binary_state.setup.pending_install = None;
                 self.binary_state.setup.message = None;
@@ -57,7 +57,7 @@ impl App {
             return;
         }
         if let Some(kind) = self.ui_state.overlay.as_ref().map(Overlay::kind) {
-            self.handle_overlay_key(kind, key).await;
+            self.handle_overlay_key(kind, key);
             return;
         }
         if self.ui_state.restart_confirm {
@@ -172,7 +172,7 @@ impl App {
             KeyCode::Char('L') => self.toggle_language(),
             KeyCode::Char('s') => self.start_or_stop(),
             KeyCode::Char('R') => self.request_restart(),
-            KeyCode::Char('r') => self.refresh_current().await,
+            KeyCode::Char('r') => self.refresh_current(),
             KeyCode::Char('d') if self.ui_state.page == Page::Subscriptions => {
                 self.request_delete_subscription();
             }
@@ -201,12 +201,12 @@ impl App {
             KeyCode::Char('a') if self.ui_state.page == Page::Nodes => self.select_node_auto(),
             KeyCode::Char('n') if self.ui_state.page == Page::Nodes => self.toggle_node_sort(),
             KeyCode::Char('t') if self.ui_state.page == Page::Nodes => self.test_node_delay(),
-            KeyCode::Enter => self.handle_enter().await,
+            KeyCode::Enter => self.handle_enter(),
             _ => {}
         }
     }
 
-    pub(super) async fn handle_enter(&mut self) {
+    pub(super) fn handle_enter(&mut self) {
         match self.ui_state.page {
             Page::Dashboard => {
                 if self.ui_state.last_error.is_some() {
@@ -553,7 +553,7 @@ impl App {
         }
     }
 
-    pub(super) async fn refresh_current(&mut self) {
+    pub(super) fn refresh_current(&mut self) {
         match self.ui_state.page {
             Page::Nodes => self.maybe_test_node_delays(true),
             Page::Subscriptions | Page::Dashboard => self.refresh_subscriptions(),
@@ -634,12 +634,12 @@ impl App {
             .app(LogLevel::Info, format!("subscription deleted: {id}"));
     }
 
-    pub(super) async fn handle_overlay_key(&mut self, kind: OverlayKind, key: KeyEvent) {
+    pub(super) fn handle_overlay_key(&mut self, kind: OverlayKind, key: KeyEvent) {
         match kind {
             OverlayKind::Subscription => self.handle_form_key(key),
             OverlayKind::Keyword => self.handle_keyword_form_key(key),
             OverlayKind::Settings => self.handle_settings_form_key(key),
-            OverlayKind::Setup => self.handle_setup_overlay_key(key).await,
+            OverlayKind::Setup => self.handle_setup_overlay_key(key),
             OverlayKind::LogDetail => self.handle_log_detail_key(key),
         }
     }
@@ -677,14 +677,14 @@ impl App {
         }
     }
 
-    pub(super) async fn handle_setup_overlay_key(&mut self, key: KeyEvent) {
+    pub(super) fn handle_setup_overlay_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.close_overlay(),
             KeyCode::Char('j') | KeyCode::Down => self.move_setup_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_setup_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => self.jump_setup_selection(false),
             KeyCode::Char('G') | KeyCode::End => self.jump_setup_selection(true),
-            KeyCode::Enter => self.install_selected().await,
+            KeyCode::Enter => self.install_selected(),
             KeyCode::Char('d') => self.start_download(),
             KeyCode::Char('b') => self.request_rollback(),
             KeyCode::Char('p') => self.copy_binary_path(),

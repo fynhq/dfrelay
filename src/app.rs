@@ -838,7 +838,7 @@ impl App {
     async fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => {
-                self.handle_key(key).await;
+                self.handle_key(key);
                 self.remember_connection_cursor();
             }
             AppEvent::BackgroundPanic { task, message } => {

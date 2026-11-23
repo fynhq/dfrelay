@@ -69,22 +69,22 @@ async fn hjkl_navigates_pages_and_lists() {
     app.metrics_state.nodes = vec![node("one"), node("two"), node("three")];
     app.ui_state.page = Page::Nodes;
 
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert_eq!(app.ui_state.selected, 1);
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.ui_state.selected, 0);
-    app.handle_key(key(KeyCode::Char('G'))).await;
+    app.handle_key(key(KeyCode::Char('G')));
     assert_eq!(app.ui_state.selected, 2);
-    app.handle_key(key(KeyCode::Char('g'))).await;
+    app.handle_key(key(KeyCode::Char('g')));
     assert_eq!(app.ui_state.selected, 0);
 
-    app.handle_key(key(KeyCode::Char('l'))).await;
+    app.handle_key(key(KeyCode::Char('l')));
     assert_eq!(app.ui_state.page, Page::Subscriptions);
-    app.handle_key(key(KeyCode::Char('h'))).await;
+    app.handle_key(key(KeyCode::Char('h')));
     assert_eq!(app.ui_state.page, Page::Nodes);
-    app.handle_key(key(KeyCode::Right)).await;
+    app.handle_key(key(KeyCode::Right));
     assert_eq!(app.ui_state.page, Page::Subscriptions);
-    app.handle_key(key(KeyCode::Left)).await;
+    app.handle_key(key(KeyCode::Left));
     assert_eq!(app.ui_state.page, Page::Nodes);
 }
 
@@ -93,23 +93,23 @@ async fn home_and_end_jump_like_g_and_big_g() {
     let (mut app, _dir) = test_app().await;
     app.metrics_state.nodes = vec![node("one"), node("two"), node("three")];
     app.ui_state.page = Page::Nodes;
-    app.handle_key(key(KeyCode::End)).await;
+    app.handle_key(key(KeyCode::End));
     assert_eq!(app.ui_state.selected, 2);
-    app.handle_key(key(KeyCode::Home)).await;
+    app.handle_key(key(KeyCode::Home));
     assert_eq!(app.ui_state.selected, 0);
 
     app.ui_state.page = Page::Dashboard;
     app.ui_state.dashboard_max_scroll = 4;
-    app.handle_key(key(KeyCode::End)).await;
+    app.handle_key(key(KeyCode::End));
     assert_eq!(app.ui_state.dashboard_scroll, 4);
-    app.handle_key(key(KeyCode::Home)).await;
+    app.handle_key(key(KeyCode::Home));
     assert_eq!(app.ui_state.dashboard_scroll, 0);
 
     app.ui_state.page = Page::Help;
     app.ui_state.help_max_scroll = 3;
-    app.handle_key(key(KeyCode::End)).await;
+    app.handle_key(key(KeyCode::End));
     assert_eq!(app.ui_state.help_scroll, 3);
-    app.handle_key(key(KeyCode::Home)).await;
+    app.handle_key(key(KeyCode::Home));
     assert_eq!(app.ui_state.help_scroll, 0);
 }
 
@@ -121,9 +121,9 @@ async fn confirmation_keys_only_cancel() {
     app.ui_state.selected = 0;
 
     app.proxy_runtime.status = ProxyStatus::Running;
-    app.handle_key(key(KeyCode::Char('R'))).await;
+    app.handle_key(key(KeyCode::Char('R')));
     assert!(app.ui_state.restart_confirm);
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert!(!app.ui_state.restart_confirm);
     assert_eq!(app.ui_state.selected, 0);
 
@@ -139,9 +139,9 @@ async fn confirmation_keys_only_cancel() {
         .subscriptions
         .push(empty_runtime(config));
     app.ui_state.selected = 0;
-    app.handle_key(key(KeyCode::Char('d'))).await;
+    app.handle_key(key(KeyCode::Char('d')));
     assert!(app.ui_state.subscription_delete.is_some());
-    app.handle_key(key(KeyCode::Char('n'))).await;
+    app.handle_key(key(KeyCode::Char('n')));
     assert!(app.ui_state.subscription_delete.is_none());
     assert!(app.ui_state.overlay.is_none());
 }
@@ -150,14 +150,12 @@ async fn confirmation_keys_only_cancel() {
 async fn ctrl_c_clears_other_confirmations() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.restart_confirm = true;
-    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(!app.ui_state.restart_confirm);
     assert!(!app.should_quit);
 
     app.ui_state.subscription_delete = Some("s-1".to_string());
-    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(app.ui_state.subscription_delete.is_none());
     assert!(!app.should_quit);
 }
@@ -166,7 +164,7 @@ async fn ctrl_c_clears_other_confirmations() {
 async fn start_stop_reports_busy_state() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Starting;
-    app.handle_key(key(KeyCode::Char('s'))).await;
+    app.handle_key(key(KeyCode::Char('s')));
     assert_eq!(
         app.ui_state.message.as_deref(),
         Some(app.text().msg_proxy_busy)
@@ -177,11 +175,11 @@ async fn start_stop_reports_busy_state() {
 async fn dashboard_enter_opens_logs_only_when_an_error_is_shown() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.page = Page::Dashboard;
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.ui_state.page, Page::Dashboard);
 
     app.ui_state.last_error = Some("boom".to_string());
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.ui_state.page, Page::Logs);
 }
 
@@ -190,7 +188,7 @@ async fn settings_install_entry_opens_setup_popup() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.page = Page::Settings;
     app.ui_state.selected = setting_index(&app, SettingsItem::BinaryInfo);
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.ui_state.page, Page::Settings);
     assert!(matches!(
         app.ui_state.overlay,
@@ -198,7 +196,7 @@ async fn settings_install_entry_opens_setup_popup() {
     ));
     assert_eq!(app.view().tab_page, Page::Settings);
 
-    app.handle_key(key(KeyCode::Esc)).await;
+    app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.ui_state.page, Page::Settings);
     assert!(app.ui_state.overlay.is_none());
     assert_eq!(app.view().tab_page, Page::Settings);
@@ -262,7 +260,7 @@ async fn binary_status_tracks_install_and_upgrade() {
 async fn rollback_requires_previous_binary() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
-    app.handle_key(key(KeyCode::Char('b'))).await;
+    app.handle_key(key(KeyCode::Char('b')));
     assert_eq!(
         app.ui_state.message.as_deref(),
         Some(app.text().msg_rollback_unavailable)
@@ -275,9 +273,9 @@ async fn rollback_confirmation_is_consumed_by_other_keys() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     std::fs::write(app.paths.previous_binary(), b"previous").unwrap();
-    app.handle_key(key(KeyCode::Char('b'))).await;
+    app.handle_key(key(KeyCode::Char('b')));
     assert!(app.ui_state.rollback_confirm);
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert!(!app.ui_state.rollback_confirm);
 }
 
@@ -291,7 +289,7 @@ async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
         has_checksum: false,
     }];
     let expected = PathBuf::from("/inbox/raw-sing-box");
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(
         app.binary_state.setup.pending_install.as_ref(),
         Some(&expected)
@@ -299,19 +297,19 @@ async fn unverified_install_confirmation_is_cancelled_by_other_keys() {
     assert!(app.binary_state.setup.message.is_none());
     assert!(!app.should_quit);
 
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert!(app.binary_state.setup.pending_install.is_none());
     assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
 
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.binary_state.setup.pending_install.is_some());
-    app.handle_key(key(KeyCode::Char('q'))).await;
+    app.handle_key(key(KeyCode::Char('q')));
     assert!(app.binary_state.setup.pending_install.is_none());
     assert!(!app.should_quit);
 
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.binary_state.setup.pending_install.is_some());
-    app.handle_key(key(KeyCode::Esc)).await;
+    app.handle_key(key(KeyCode::Esc));
     assert!(app.binary_state.setup.pending_install.is_none());
     assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
 }
@@ -321,8 +319,7 @@ async fn ctrl_c_clears_unverified_install_confirmation() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     app.binary_state.setup.pending_install = Some(PathBuf::from("/inbox/raw-sing-box"));
-    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(app.binary_state.setup.pending_install.is_none());
     assert!(!app.should_quit);
 }
@@ -426,15 +423,15 @@ async fn restart_in_progress_blocks_keys_except_detach() {
     app.proxy_runtime.restart_in_progress = true;
     let mut rx = attach_client(&mut app, 11, true).await;
 
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert_eq!(app.ui_state.selected, 0);
-    app.handle_key(key(KeyCode::Char('l'))).await;
+    app.handle_key(key(KeyCode::Char('l')));
     assert_eq!(app.ui_state.page, Page::Nodes);
-    app.handle_key(key(KeyCode::Char('q'))).await;
+    app.handle_key(key(KeyCode::Char('q')));
     assert!(!app.should_quit);
     assert!(!app.has_viewer());
     assert!(drain_until_detach(&mut rx));
-    app.handle_key(key(KeyCode::Char('s'))).await;
+    app.handle_key(key(KeyCode::Char('s')));
     assert_eq!(app.proxy_runtime.status, ProxyStatus::Stopped);
 }
 
@@ -459,7 +456,7 @@ async fn connections_enter_copies_the_selected_target() {
     app.metrics_state.metrics.total_connections = 1;
     app.remember_connection_cursor();
     app.ui_state.selected = 0;
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(
         app.ui_state.message.as_deref(),
         Some(app.text().settings_copied)
@@ -479,7 +476,7 @@ async fn setup_copies_the_binary_path() {
     let mut rx = attach_client(&mut app, 1, true).await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     let expected = app.paths.binary().display().to_string();
-    app.handle_key(key(KeyCode::Char('p'))).await;
+    app.handle_key(key(KeyCode::Char('p')));
     assert_eq!(
         app.ui_state.message.as_deref(),
         Some(app.text().settings_copied)
@@ -504,19 +501,19 @@ async fn logs_follow_tail_until_scrolled() {
     app.ui_state.selected = app.max_selection().saturating_sub(1);
     assert_eq!(app.ui_state.selected, 19);
 
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert!(!app.ui_state.log_follow);
     assert_eq!(app.ui_state.selected, 18);
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert!(app.ui_state.log_follow);
     assert_eq!(app.ui_state.selected, 19);
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert!(!app.ui_state.log_follow);
     assert_eq!(app.ui_state.selected, 18);
-    app.handle_key(key(KeyCode::Char('G'))).await;
+    app.handle_key(key(KeyCode::Char('G')));
     assert!(app.ui_state.log_follow);
     assert_eq!(app.ui_state.selected, 19);
-    app.handle_key(key(KeyCode::Char('f'))).await;
+    app.handle_key(key(KeyCode::Char('f')));
     assert!(!app.ui_state.log_follow);
 }
 
@@ -532,7 +529,7 @@ async fn logs_source_cycles_and_filters_lines() {
     assert_eq!(app.ui_state.log_source, LogSource::All);
     assert_eq!(app.log_lines().len(), 2);
 
-    app.handle_key(key(KeyCode::Char('x'))).await;
+    app.handle_key(key(KeyCode::Char('x')));
     assert_eq!(app.ui_state.log_source, LogSource::App);
     assert_eq!(
         app.ui_state.message.as_deref(),
@@ -542,12 +539,12 @@ async fn logs_source_cycles_and_filters_lines() {
     assert_eq!(app.log_lines()[0].message, "app line");
     assert_eq!(app.ui_state.selected, 0);
 
-    app.handle_key(key(KeyCode::Char('x'))).await;
+    app.handle_key(key(KeyCode::Char('x')));
     assert_eq!(app.ui_state.log_source, LogSource::Singbox);
     assert_eq!(app.log_lines().len(), 1);
     assert_eq!(app.log_lines()[0].message, "sing-box line");
 
-    app.handle_key(key(KeyCode::Char('x'))).await;
+    app.handle_key(key(KeyCode::Char('x')));
     assert_eq!(app.ui_state.log_source, LogSource::All);
     assert_eq!(app.log_lines().len(), 2);
 }
@@ -591,7 +588,7 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
     );
     assert_eq!(app.metrics_state.nodes[app.ui_state.selected].name, "Delta");
 
-    app.handle_key(key(KeyCode::Char('n'))).await;
+    app.handle_key(key(KeyCode::Char('n')));
     assert_eq!(
         app.metrics_state
             .nodes
@@ -602,7 +599,7 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
     );
     assert_eq!(app.metrics_state.nodes[app.ui_state.selected].name, "Delta");
 
-    app.handle_key(key(KeyCode::Char('n'))).await;
+    app.handle_key(key(KeyCode::Char('n')));
     assert_eq!(
         app.metrics_state
             .nodes
@@ -617,14 +614,14 @@ async fn nodes_sort_by_auto_candidates_and_latency_then_name() {
 async fn restart_requires_two_presses_and_can_be_cancelled() {
     let (mut app, _dir) = test_app().await;
     app.proxy_runtime.status = ProxyStatus::Running;
-    app.handle_key(key(KeyCode::Char('R'))).await;
+    app.handle_key(key(KeyCode::Char('R')));
     assert!(app.ui_state.restart_confirm);
     assert!(app.view().restart_confirm);
-    app.handle_key(key(KeyCode::Esc)).await;
+    app.handle_key(key(KeyCode::Esc));
     assert!(!app.ui_state.restart_confirm);
 
     app.proxy_runtime.status = ProxyStatus::Stopped;
-    app.handle_key(key(KeyCode::Char('R'))).await;
+    app.handle_key(key(KeyCode::Char('R')));
     assert!(!app.ui_state.restart_confirm);
     assert_eq!(
         app.ui_state.message.as_deref(),
@@ -637,11 +634,11 @@ async fn logs_timestamp_cycles_through_time_date_and_hidden() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.page = Page::Logs;
     assert_eq!(app.ui_state.log_timestamp, LogTimestamp::Time);
-    app.handle_key(key(KeyCode::Char('d'))).await;
+    app.handle_key(key(KeyCode::Char('d')));
     assert_eq!(app.ui_state.log_timestamp, LogTimestamp::DateTime);
-    app.handle_key(key(KeyCode::Char('d'))).await;
+    app.handle_key(key(KeyCode::Char('d')));
     assert_eq!(app.ui_state.log_timestamp, LogTimestamp::Hidden);
-    app.handle_key(key(KeyCode::Char('d'))).await;
+    app.handle_key(key(KeyCode::Char('d')));
     assert_eq!(app.ui_state.log_timestamp, LogTimestamp::Time);
 }
 
@@ -649,11 +646,9 @@ async fn logs_timestamp_cycles_through_time_date_and_hidden() {
 async fn modified_shortcuts_are_ignored() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.page = Page::Nodes;
-    app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL))
-        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
     assert_eq!(app.ui_state.page, Page::Nodes);
-    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT))
-        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT));
     assert!(app.ui_state.message.is_none());
 }
 
@@ -783,26 +778,26 @@ async fn settings_jk_selects_and_enter_toggles_or_edits() {
     app.ui_state.page = Page::Settings;
     app.ui_state.selected = setting_index(&app, SettingsItem::Language);
     let language = app.config.language;
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.config.language, language.toggle());
 
     app.ui_state.selected = setting_index(&app, SettingsItem::AllowLan);
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.config.allow_lan);
 
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert_eq!(
         app.ui_state.selected,
         setting_index(&app, SettingsItem::LanAuth)
     );
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(
         app.ui_state.selected,
         setting_index(&app, SettingsItem::AllowLan)
     );
 
     app.ui_state.selected = setting_index(&app, SettingsItem::KeywordsExclude);
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(
         app.keyword_form().map(|form| form.field),
         Some(KeywordField::Exclude)
@@ -816,7 +811,7 @@ async fn test_url_is_read_only_and_copyable() {
     app.ui_state.page = Page::Settings;
     app.ui_state.selected = setting_index(&app, SettingsItem::TestUrl);
     let expected = app.config.test_url.clone();
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.settings_form().is_none());
     assert_eq!(
         app.ui_state.message.as_deref(),
@@ -838,7 +833,7 @@ async fn settings_read_only_item_copies_its_value() {
     app.ui_state.page = Page::Settings;
     app.ui_state.selected = setting_index(&app, SettingsItem::ConfigPath);
     let expected = app.paths.config_file.display().to_string();
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.settings_form().is_none());
     assert_eq!(
         app.ui_state.message.as_deref(),
@@ -863,7 +858,7 @@ async fn port_and_dns_are_read_only_and_copyable() {
         (SettingsItem::DnsServers, "1.1.1.1, 8.8.8.8".to_string()),
     ] {
         app.ui_state.selected = setting_index(&app, item);
-        app.handle_key(key(KeyCode::Enter)).await;
+        app.handle_key(key(KeyCode::Enter));
         assert!(app.settings_form().is_none());
         let mut copied = None;
         while let Ok(message) = rx.try_recv() {
@@ -888,7 +883,7 @@ async fn lan_auth_is_one_setting_and_persists_both_fields() {
     assert!(settings_items(true).contains(&SettingsItem::LanAuth));
 
     app.ui_state.selected = setting_index(&app, SettingsItem::LanAuth);
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     let form = app.settings_form().expect("LAN auth form");
     assert_eq!(form.active, SettingsField::LanUsername);
     assert!(form.username.value.is_empty());
@@ -898,7 +893,7 @@ async fn lan_auth_is_one_setting_and_persists_both_fields() {
     if let Some(form) = app.settings_form_mut() {
         form.username = LineInput::new("alice");
     }
-    app.handle_key(key(KeyCode::Tab)).await;
+    app.handle_key(key(KeyCode::Tab));
     assert_eq!(
         app.settings_form().unwrap().active,
         SettingsField::LanPassword
@@ -906,7 +901,7 @@ async fn lan_auth_is_one_setting_and_persists_both_fields() {
     if let Some(form) = app.settings_form_mut() {
         form.password = LineInput::new("s3cret");
     }
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(app.config.lan_username, "alice");
     assert_eq!(app.config.lan_password, "s3cret");
     assert_eq!(app.config.lan_auth(), Some(("alice", "s3cret")));
@@ -931,12 +926,11 @@ async fn lan_auth_form_keeps_password_visible_and_ignores_ctrl_r() {
     app.config.lan_username = "alice".into();
     app.config.lan_password = "s3cret".into();
     app.ui_state.selected = setting_index(&app, SettingsItem::LanAuth);
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     let form = app.settings_form().expect("LAN auth form");
     assert_eq!(form.username.value, "alice");
     assert_eq!(form.password.value, "s3cret");
-    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
     assert_eq!(app.settings_form().unwrap().password.value, "s3cret");
     assert_eq!(
         app.settings_form().unwrap().active,
@@ -949,7 +943,7 @@ async fn singbox_log_level_is_read_only_on_setup() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.overlay = Some(Overlay::Setup { selected: 0 });
     let before = app.config.singbox_log_level;
-    app.handle_key(key(KeyCode::Char('v'))).await;
+    app.handle_key(key(KeyCode::Char('v')));
     assert_eq!(app.config.singbox_log_level, before);
     let (loaded, _) = Config::load_or_default(&app.paths.config_file);
     assert_eq!(loaded.singbox_log_level, before);
@@ -959,15 +953,14 @@ async fn singbox_log_level_is_read_only_on_setup() {
 async fn q_detaches_viewers_without_stopping_daemon() {
     let (mut app, _dir) = test_app().await;
     let mut rx = attach_client(&mut app, 7, true).await;
-    app.handle_key(key(KeyCode::Char('q'))).await;
+    app.handle_key(key(KeyCode::Char('q')));
     assert!(drain_until_detach(&mut rx));
     assert!(!app.should_quit);
     assert!(app.clients.is_empty());
     assert!(!app.has_viewer());
 
     let mut rx = attach_client(&mut app, 8, true).await;
-    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
     assert!(drain_until_detach(&mut rx));
     assert!(!app.should_quit);
     assert!(app.clients.is_empty());
@@ -1072,7 +1065,7 @@ async fn subscription_form_clears_its_error_when_the_user_edits() {
     app.save_subscription_form();
     assert!(app.subscription_form().unwrap().error.is_some());
 
-    app.handle_key(key(KeyCode::Char('x'))).await;
+    app.handle_key(key(KeyCode::Char('x')));
     assert!(app.subscription_form().unwrap().error.is_none());
 }
 
@@ -1092,7 +1085,7 @@ async fn subscription_delete_confirmation_is_persistent_and_cancellable() {
     app.ui_state.page = Page::Subscriptions;
     app.ui_state.selected = 0;
 
-    app.handle_key(key(KeyCode::Char('d'))).await;
+    app.handle_key(key(KeyCode::Char('d')));
     assert!(app.ui_state.subscription_delete.is_some());
     assert!(app.view().subscription_delete);
     assert!(
@@ -1108,17 +1101,17 @@ async fn subscription_delete_confirmation_is_persistent_and_cancellable() {
         "toast expiry must not cancel the confirmation"
     );
 
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert!(app.ui_state.subscription_delete.is_none());
 
-    app.handle_key(key(KeyCode::Char('d'))).await;
-    app.handle_key(key(KeyCode::Esc)).await;
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(key(KeyCode::Esc));
     assert!(app.ui_state.subscription_delete.is_none());
     assert_eq!(app.config.subscriptions.len(), 1);
 
-    app.handle_key(key(KeyCode::Char('d'))).await;
+    app.handle_key(key(KeyCode::Char('d')));
     assert!(app.ui_state.subscription_delete.is_some());
-    app.handle_key(key(KeyCode::Char('d'))).await;
+    app.handle_key(key(KeyCode::Char('d')));
     assert!(app.config.subscriptions.is_empty());
 }
 
@@ -1129,7 +1122,7 @@ async fn node_selection_while_stopped_applies_on_start() {
     app.ui_state.page = Page::Nodes;
     app.ui_state.selected = 1;
 
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert_eq!(
         app.selection_state.preferred_node.as_deref(),
         Some(app.metrics_state.nodes[1].tag.as_str())
@@ -1147,7 +1140,7 @@ async fn node_selection_while_stopped_applies_on_start() {
         .unwrap_or_default()
         .contains("日本 02"));
 
-    app.handle_key(key(KeyCode::Char('a'))).await;
+    app.handle_key(key(KeyCode::Char('a')));
     assert!(app.selection_state.preferred_node.is_none());
     assert_eq!(
         app.selection_state.pending_selection,
@@ -1487,15 +1480,15 @@ async fn help_returns_to_the_previous_page() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.page = Page::Logs;
 
-    app.handle_key(key(KeyCode::Char('?'))).await;
+    app.handle_key(key(KeyCode::Char('?')));
     assert_eq!(app.ui_state.page, Page::Help);
     assert_eq!(app.view().tab_page, Page::Logs);
-    app.handle_key(key(KeyCode::Esc)).await;
+    app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.ui_state.page, Page::Logs);
 
-    app.handle_key(key(KeyCode::Char('?'))).await;
+    app.handle_key(key(KeyCode::Char('?')));
     assert_eq!(app.ui_state.page, Page::Help);
-    app.handle_key(key(KeyCode::Char('?'))).await;
+    app.handle_key(key(KeyCode::Char('?')));
     assert_eq!(app.ui_state.page, Page::Logs);
 }
 
@@ -1503,24 +1496,24 @@ async fn help_returns_to_the_previous_page() {
 async fn help_scrolls_with_jk_and_clamps_at_bottom() {
     let (mut app, _dir) = test_app().await;
     app.ui_state.page = Page::Logs;
-    app.handle_key(key(KeyCode::Char('?'))).await;
+    app.handle_key(key(KeyCode::Char('?')));
     app.ui_state.help_max_scroll = 5;
 
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert_eq!(app.ui_state.help_scroll, 1);
-    app.handle_key(key(KeyCode::Down)).await;
+    app.handle_key(key(KeyCode::Down));
     assert_eq!(app.ui_state.help_scroll, 2);
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.ui_state.help_scroll, 1);
-    app.handle_key(key(KeyCode::Char('g'))).await;
+    app.handle_key(key(KeyCode::Char('g')));
     assert_eq!(app.ui_state.help_scroll, 0);
-    app.handle_key(key(KeyCode::Char('G'))).await;
+    app.handle_key(key(KeyCode::Char('G')));
     assert_eq!(app.ui_state.help_scroll, 5);
     for _ in 0..10 {
-        app.handle_key(key(KeyCode::Char('j'))).await;
+        app.handle_key(key(KeyCode::Char('j')));
     }
     assert_eq!(app.ui_state.help_scroll, 5);
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.ui_state.help_scroll, 4);
 
     app.handle_event(AppEvent::HelpViewport(2)).await;
@@ -1563,9 +1556,9 @@ async fn enter_opens_log_detail_and_esc_closes_it() {
     app.ui_state.log_follow = true;
     app.ui_state.selected = app.max_selection().saturating_sub(1);
 
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.log_detail().is_some());
-    app.handle_key(key(KeyCode::Esc)).await;
+    app.handle_key(key(KeyCode::Esc));
     assert!(app.log_detail().is_none());
 }
 
@@ -1579,29 +1572,29 @@ async fn log_detail_scrolls_and_clamps_to_the_viewport() {
     app.ui_state.page = Page::Logs;
     app.ui_state.log_follow = true;
     app.ui_state.selected = app.max_selection().saturating_sub(1);
-    app.handle_key(key(KeyCode::Enter)).await;
+    app.handle_key(key(KeyCode::Enter));
     assert!(app.log_detail().is_some());
 
     app.handle_event(AppEvent::LogDetailViewport(5)).await;
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert_eq!(app.log_detail_scroll(), 1);
-    app.handle_key(key(KeyCode::Down)).await;
+    app.handle_key(key(KeyCode::Down));
     assert_eq!(app.log_detail_scroll(), 2);
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.log_detail_scroll(), 1);
-    app.handle_key(key(KeyCode::Char('g'))).await;
+    app.handle_key(key(KeyCode::Char('g')));
     assert_eq!(app.log_detail_scroll(), 0);
-    app.handle_key(key(KeyCode::Char('G'))).await;
+    app.handle_key(key(KeyCode::Char('G')));
     assert_eq!(app.log_detail_scroll(), 5);
-    app.handle_key(key(KeyCode::Char('j'))).await;
+    app.handle_key(key(KeyCode::Char('j')));
     assert_eq!(app.log_detail_scroll(), 5);
-    app.handle_key(key(KeyCode::End)).await;
+    app.handle_key(key(KeyCode::End));
     assert_eq!(app.log_detail_scroll(), 5);
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.log_detail_scroll(), 4);
     app.handle_event(AppEvent::LogDetailViewport(2)).await;
     assert_eq!(app.log_detail_scroll(), 2);
-    app.handle_key(key(KeyCode::Esc)).await;
+    app.handle_key(key(KeyCode::Esc));
     assert!(app.log_detail().is_none());
 }
 
@@ -1621,14 +1614,14 @@ async fn dashboard_scroll_clamps_to_viewport() {
     app.ui_state.page = Page::Dashboard;
     app.handle_event(AppEvent::DashboardViewport(3)).await;
     for _ in 0..10 {
-        app.handle_key(key(KeyCode::Char('j'))).await;
+        app.handle_key(key(KeyCode::Char('j')));
     }
     assert_eq!(app.ui_state.dashboard_scroll, 3);
-    app.handle_key(key(KeyCode::Char('k'))).await;
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.ui_state.dashboard_scroll, 2);
-    app.handle_key(key(KeyCode::Char('g'))).await;
+    app.handle_key(key(KeyCode::Char('g')));
     assert_eq!(app.ui_state.dashboard_scroll, 0);
-    app.handle_key(key(KeyCode::Char('G'))).await;
+    app.handle_key(key(KeyCode::Char('G')));
     assert_eq!(app.ui_state.dashboard_scroll, 3);
     app.handle_event(AppEvent::DashboardViewport(1)).await;
     assert_eq!(app.ui_state.dashboard_scroll, 1);
@@ -2249,6 +2242,72 @@ async fn stale_proxy_events_keep_current_task_handles() {
     })
     .await;
     assert!(app.proxy_runtime.start_task.is_none());
+}
+
+#[tokio::test]
+async fn proxy_start_failure_restores_previous_plan() {
+    let (mut app, _dir) = test_app().await;
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
+    let fallback = app.current_start_plan();
+    app.metrics_state.nodes = vec![tagged_node("B", "n2")];
+    let failed = app.current_start_plan();
+    let binary = app.paths.binary();
+    std::fs::write(&binary, "#!/bin/sh\nsleep 30\n").unwrap();
+    crate::fsutil::set_executable(&binary).unwrap();
+    app.proxy_runtime.restart_fallback_plan = Some(fallback);
+    let epoch = app.proxy_runtime.epoch;
+    app.handle_event(AppEvent::ProxyStarted {
+        epoch,
+        plan: Box::new(failed),
+        result: Err("boom".to_string()),
+    })
+    .await;
+    assert_eq!(app.proxy_runtime.status, ProxyStatus::Starting);
+    assert!(app.proxy_runtime.restart_in_progress);
+    assert!(app.proxy_runtime.restart_fallback_plan.is_none());
+    assert!(app.proxy_runtime.start_task.is_some());
+    assert!(app.proxy_runtime.restart_at.is_none());
+}
+
+#[tokio::test]
+async fn proxy_start_failure_with_failed_fallback_schedules_restart() {
+    let (mut app, _dir) = test_app().await;
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
+    let fallback = app.current_start_plan();
+    app.metrics_state.nodes = vec![tagged_node("B", "n2")];
+    let failed = app.current_start_plan();
+    app.proxy_runtime.restart_fallback_plan = Some(fallback);
+    let epoch = app.proxy_runtime.epoch;
+    app.handle_event(AppEvent::ProxyStarted {
+        epoch,
+        plan: Box::new(failed),
+        result: Err("boom".to_string()),
+    })
+    .await;
+    assert_eq!(app.proxy_runtime.status, ProxyStatus::Failed);
+    assert!(!app.proxy_runtime.restart_in_progress);
+    assert!(app.proxy_runtime.restart_at.is_some());
+    assert!(matches!(app.ui_state.overlay, Some(Overlay::Setup { .. })));
+    assert_eq!(app.ui_state.last_error.as_deref(), Some("boom"));
+}
+
+#[tokio::test]
+async fn proxy_start_failure_ignores_identical_fallback_plan() {
+    let (mut app, _dir) = test_app().await;
+    app.metrics_state.nodes = vec![tagged_node("A", "n1")];
+    let plan = app.current_start_plan();
+    app.proxy_runtime.restart_fallback_plan = Some(plan.clone());
+    let epoch = app.proxy_runtime.epoch;
+    app.handle_event(AppEvent::ProxyStarted {
+        epoch,
+        plan: Box::new(plan),
+        result: Err("boom".to_string()),
+    })
+    .await;
+    assert_eq!(app.proxy_runtime.status, ProxyStatus::Failed);
+    assert!(!app.proxy_runtime.restart_in_progress);
+    assert!(app.proxy_runtime.restart_at.is_some());
+    assert!(app.ui_state.overlay.is_none());
 }
 
 #[tokio::test]
