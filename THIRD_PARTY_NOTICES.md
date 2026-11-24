@@ -30,11 +30,10 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `anstyle-parse` | `1.0.0` | MIT OR Apache-2.0 |
 | `anstyle-query` | `1.1.5` | MIT OR Apache-2.0 |
 | `anstyle-wincon` | `3.0.11` | MIT OR Apache-2.0 |
-| `anyhow` | `1.0.104` | MIT OR Apache-2.0 |
+| `anyhow` | `1.0.105` | MIT OR Apache-2.0 |
 | `approx` | `0.5.1` | Apache-2.0 |
 | `ar_archive_writer` | `0.5.5` | Apache-2.0 WITH LLVM-exception |
 | `arraydeque` | `0.5.1` | MIT/Apache-2.0 |
-| `atomic` | `0.6.1` | Apache-2.0/MIT |
 | `atomic-waker` | `1.1.2` | Apache-2.0 OR MIT |
 | `autocfg` | `1.5.1` | Apache-2.0 OR MIT |
 | `base64` | `0.22.1` | MIT OR Apache-2.0 |
@@ -47,17 +46,16 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `block-buffer` | `0.12.1` | MIT OR Apache-2.0 |
 | `bumpalo` | `3.20.4` | MIT OR Apache-2.0 |
 | `by_address` | `1.2.1` | MIT OR Apache-2.0 |
-| `bytemuck` | `1.25.2` | Zlib OR Apache-2.0 OR MIT |
-| `bytes` | `1.12.1` | MIT |
+| `bytes` | `1.12.2` | MIT |
 | `castaway` | `0.2.4` | MIT |
-| `cc` | `1.11.2` | MIT OR Apache-2.0 |
+| `cc` | `1.11.3` | MIT OR Apache-2.0 |
 | `cfg-if` | `1.0.5` | MIT OR Apache-2.0 |
 | `cfg_aliases` | `0.2.2` | MIT |
 | `chacha20` | `0.10.2` | MIT OR Apache-2.0 |
-| `clap` | `4.6.8` | MIT OR Apache-2.0 |
+| `clap` | `4.6.9` | MIT OR Apache-2.0 |
 | `clap_builder` | `4.6.7` | MIT OR Apache-2.0 |
-| `clap_derive` | `4.6.8` | MIT OR Apache-2.0 |
-| `clap_lex` | `1.1.1` | MIT OR Apache-2.0 |
+| `clap_derive` | `4.6.9` | MIT OR Apache-2.0 |
+| `clap_lex` | `1.1.2` | MIT OR Apache-2.0 |
 | `colorchoice` | `1.0.5` | MIT OR Apache-2.0 |
 | `compact_str` | `0.9.1` | MIT |
 | `const-oid` | `0.10.3` | Apache-2.0 OR MIT |
@@ -95,7 +93,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `fancy-regex` | `0.11.0` | MIT |
 | `fastrand` | `2.5.0` | Apache-2.0 OR MIT |
 | `filedescriptor` | `0.8.3` | MIT |
-| `filetime` | `0.2.29` | MIT/Apache-2.0 |
+| `filetime` | `0.2.30` | MIT/Apache-2.0 |
 | `find-msvc-tools` | `0.1.15` | MIT OR Apache-2.0 |
 | `finl_unicode` | `1.5.1` | (MIT OR Apache-2.0) AND Unicode-DFS-2016 |
 | `fixedbitset` | `0.4.2` | MIT/Apache-2.0 |
@@ -112,7 +110,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `getrandom` | `0.3.4` | MIT OR Apache-2.0 |
 | `getrandom` | `0.4.3` | MIT OR Apache-2.0 |
 | `granit-parser` | `2.2.0` | MIT OR Apache-2.0 |
-| `hashbrown` | `0.17.1` | MIT OR Apache-2.0 |
+| `hashbrown` | `0.17.2` | MIT OR Apache-2.0 |
 | `heck` | `0.5.0` | MIT OR Apache-2.0 |
 | `hex` | `0.4.3` | MIT OR Apache-2.0 |
 | `http` | `1.5.0` | MIT OR Apache-2.0 |
@@ -141,9 +139,9 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `is_terminal_polyfill` | `1.70.2` | MIT OR Apache-2.0 |
 | `itertools` | `0.14.0` | MIT OR Apache-2.0 |
 | `itoa` | `1.0.19` | MIT OR Apache-2.0 |
-| `jiff` | `1.0.1` | Unlicense OR MIT |
+| `jiff` | `1.0.2` | Unlicense OR MIT |
 | `jiff-core` | `1.0.1` | Unlicense OR MIT |
-| `jiff-static` | `1.0.1` | Unlicense OR MIT |
+| `jiff-static` | `1.0.2` | Unlicense OR MIT |
 | `jiff-tzdb` | `1.0.0` | Unlicense OR MIT |
 | `jiff-tzdb-platform` | `1.0.0` | Unlicense OR MIT |
 | `js-sys` | `0.3.107` | MIT OR Apache-2.0 |
@@ -170,7 +168,8 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `mio` | `1.2.5` | MIT |
 | `multiversion_no_op` | `1.0.0` | Apache-2.0 OR MIT |
 | `nix` | `0.29.0` | MIT |
-| `nix` | `0.31.3` | MIT |
+| `nix` | `0.31.4` | MIT |
+| `nix` | `0.32.0` | MIT |
 | `nom` | `7.1.3` | MIT |
 | `num-conv` | `0.2.2` | MIT OR Apache-2.0 |
 | `num-derive` | `0.4.2` | MIT OR Apache-2.0 |
@@ -197,7 +196,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `phf_generator` | `0.11.3` | MIT |
 | `phf_macros` | `0.11.3` | MIT |
 | `phf_shared` | `0.11.3` | MIT |
-| `pin-project-lite` | `0.2.17` | Apache-2.0 OR MIT |
+| `pin-project-lite` | `0.2.18` | Apache-2.0 OR MIT |
 | `portable-atomic` | `1.15.0` | Apache-2.0 OR MIT |
 | `portable-atomic-util` | `0.2.8` | Apache-2.0 OR MIT |
 | `potential_utf` | `0.1.6` | Unicode-3.0 |
@@ -214,7 +213,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `rand` | `0.8.8` | MIT OR Apache-2.0 |
 | `rand_core` | `0.10.1` | MIT OR Apache-2.0 |
 | `rand_core` | `0.6.4` | MIT OR Apache-2.0 |
-| `rand_pcg` | `0.10.2` | MIT OR Apache-2.0 |
+| `rand_pcg` | `0.10.3` | MIT OR Apache-2.0 |
 | `ratatui` | `0.30.2` | MIT |
 | `ratatui-core` | `0.1.2` | MIT |
 | `ratatui-crossterm` | `0.1.2` | MIT |
@@ -224,9 +223,9 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `ratatui-widgets` | `0.3.2` | MIT |
 | `redox_syscall` | `0.5.18` | MIT |
 | `redox_users` | `0.5.3` | MIT |
-| `regex` | `1.13.1` | MIT OR Apache-2.0 |
-| `regex-automata` | `0.4.18` | MIT OR Apache-2.0 |
-| `regex-syntax` | `0.8.11` | MIT OR Apache-2.0 |
+| `regex` | `1.13.2` | MIT OR Apache-2.0 |
+| `regex-automata` | `0.4.19` | MIT OR Apache-2.0 |
+| `regex-syntax` | `0.8.12` | MIT OR Apache-2.0 |
 | `reqwest` | `0.12.28` | MIT OR Apache-2.0 |
 | `ring` | `0.17.14` | Apache-2.0 AND ISC |
 | `rustc-hash` | `2.1.3` | Apache-2.0 OR MIT |
@@ -256,7 +255,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `simdutf8` | `0.1.5` | MIT OR Apache-2.0 |
 | `siphasher` | `1.0.4` | MIT OR Apache-2.0 |
 | `slab` | `0.4.12` | MIT |
-| `smallvec` | `1.16.5` | MIT OR Apache-2.0 |
+| `smallvec` | `1.16.6` | MIT OR Apache-2.0 |
 | `socket2` | `0.6.5` | MIT OR Apache-2.0 |
 | `stable_deref_trait` | `1.2.1` | MIT OR Apache-2.0 |
 | `stacker` | `0.1.25` | MIT OR Apache-2.0 |
@@ -287,9 +286,9 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `tokio` | `1.54.1` | MIT |
 | `tokio-macros` | `2.7.2` | MIT |
 | `tokio-rustls` | `0.26.6` | MIT OR Apache-2.0 |
-| `toml` | `1.2.1+spec-1.1.0` | MIT OR Apache-2.0 |
+| `toml` | `1.2.2+spec-1.1.0` | MIT OR Apache-2.0 |
 | `toml_datetime` | `1.1.3+spec-1.1.0` | MIT OR Apache-2.0 |
-| `toml_parser` | `1.1.5+spec-1.1.0` | MIT OR Apache-2.0 |
+| `toml_parser` | `1.1.6+spec-1.1.0` | MIT OR Apache-2.0 |
 | `toml_writer` | `1.2.0+spec-1.1.0` | MIT OR Apache-2.0 |
 | `tower` | `0.5.3` | MIT |
 | `tower-http` | `0.6.11` | MIT |
@@ -300,7 +299,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `try-lock` | `0.2.5` | MIT |
 | `typed-path` | `0.13.0` | MIT OR Apache-2.0 |
 | `typenum` | `1.20.1` | MIT OR Apache-2.0 |
-| `ucd-trie` | `0.1.7` | MIT OR Apache-2.0 |
+| `ucd-trie` | `0.1.8` | MIT OR Apache-2.0 |
 | `unicode-ident` | `1.0.27` | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | `unicode-segmentation` | `1.13.3` | MIT OR Apache-2.0 |
 | `unicode-truncate` | `2.0.1` | MIT OR Apache-2.0 |
@@ -310,7 +309,7 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `utf8_iter` | `1.1.0` | Apache-2.0 OR MIT |
 | `utf8parse` | `0.2.2` | Apache-2.0 OR MIT |
 | `utf_types` | `1.0.0` | Apache-2.0 OR MIT |
-| `uuid` | `1.29.2` | Apache-2.0 OR MIT |
+| `uuid` | `1.29.3` | Apache-2.0 OR MIT |
 | `version_check` | `0.9.5` | MIT/Apache-2.0 |
 | `vtparse` | `0.6.2` | MIT |
 | `want` | `0.3.2` | MIT |
@@ -353,12 +352,12 @@ Where a crate offers a choice of licenses, DFRelay relies on the permissive opti
 | `yoke-derive` | `0.8.4` | Unicode-3.0 |
 | `zerofrom` | `0.1.8` | Unicode-3.0 |
 | `zerofrom-derive` | `0.1.8` | Unicode-3.0 |
-| `zeroize` | `1.9.1` | Apache-2.0 OR MIT |
+| `zeroize` | `1.9.2` | Apache-2.0 OR MIT |
 | `zeroize_derive` | `1.5.0` | Apache-2.0 OR MIT |
 | `zerotrie` | `0.2.5` | Unicode-3.0 |
 | `zerovec` | `0.11.9` | Unicode-3.0 |
 | `zerovec-derive` | `0.11.7` | Unicode-3.0 |
-| `zip` | `9.7.0` | MIT |
+| `zip` | `9.8.2` | MIT |
 | `zlib-rs` | `0.6.8` | Zlib |
 | `zmij` | `1.0.23` | MIT |
 | `zopfli` | `0.8.4` | Apache-2.0 |
