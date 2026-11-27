@@ -2,7 +2,6 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::config::SubscriptionConfig;
 use crate::fsutil;
@@ -95,7 +94,7 @@ pub fn save(path: &Path, runtimes: &[SubscriptionRuntime]) -> std::io::Result<()
 }
 
 pub(super) fn url_hash(url: &str) -> String {
-    crate::hex::encode(&Sha256::digest(url.as_bytes()))
+    crate::hex::encode(ring::digest::digest(&ring::digest::SHA256, url.as_bytes()).as_ref())
 }
 
 #[cfg(test)]

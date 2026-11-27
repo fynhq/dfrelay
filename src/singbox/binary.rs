@@ -6,7 +6,6 @@ use std::time::Duration;
 use jiff::ZonedDateTime;
 use reqwest::{Client, Proxy};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::config::{Config, Paths};
 use crate::fsutil;
@@ -1112,7 +1111,7 @@ fn extract_zip(bytes: &[u8]) -> Result<Vec<u8>, BinaryError> {
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    crate::hex::encode(&Sha256::digest(bytes))
+    crate::hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
 fn parse_version_output(output: &str) -> Option<String> {

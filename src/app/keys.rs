@@ -1,6 +1,7 @@
 use super::*;
 use crate::logging::LogLine;
 use crate::state::{KeywordField, OverlayKind, SettingsAction, SettingsItem, MAIN_PAGES};
+use ring::rand::SecureRandom;
 use std::time::{Duration, Instant};
 
 impl App {
@@ -783,10 +784,12 @@ impl App {
         if name.is_empty() {
             name = default_subscription_name(&url);
         }
-        let id = form
-            .editing_id
-            .clone()
-            .unwrap_or_else(|| format!("s-{:016x}", rand::random::<u64>()));
+        let id = form.editing_id.clone().unwrap_or_else(|| {
+            let mut bytes = [0u8; 8];
+            let rng = ring::rand::SystemRandom::new();
+            rng.fill(&mut bytes).expect("system RNG");
+            format!("s-{:016x}", u64::from_le_bytes(bytes))
+        });
         let previous = self
             .config
             .subscriptions

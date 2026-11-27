@@ -1,10 +1,10 @@
+use ring::digest::{Context, SHA256};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::subscription::model::Node;
 
 pub fn stable_tag(protocol: &str, server: &str, port: u16, material: &str) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = Context::new(&SHA256);
     hasher.update(protocol.as_bytes());
     hasher.update(b"|");
     hasher.update(server.as_bytes());
@@ -12,9 +12,9 @@ pub fn stable_tag(protocol: &str, server: &str, port: u16, material: &str) -> St
     hasher.update(port.to_string().as_bytes());
     hasher.update(b"|");
     hasher.update(material.as_bytes());
-    let digest = hasher.finalize();
+    let digest = hasher.finish();
     let mut tag = String::from("n-");
-    tag.push_str(&crate::hex::encode(&digest[..8]));
+    tag.push_str(&crate::hex::encode(&digest.as_ref()[..8]));
     tag
 }
 
